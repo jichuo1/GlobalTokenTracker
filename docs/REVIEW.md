@@ -916,3 +916,20 @@
   - 飞行期间（~0.7s）命中测试按静止布局位置计算；被新导航打断时到达页直接归位（`snap_home`）。
   - 只在本机（Win11 26200 + 1 块 NVIDIA 独显）验证；旧版 Windows / 其它 GPU / 高 DPI 未测。合成器路径不可用时降级为直接切页而非旧的 margin 动画（已删除该路径）。
   - 未做：位移之外的绘制（文字/卡片圆角等）本就由 XAML 合成走 GPU，无可迁移项。
+
+## S74 安装器用户 PATH 破坏修复（读失败被当空串写回 + 类型降级） ✅
+
+- **现象**：安装/升级/卸载后电脑上其他 PATH 条目丢失或错乱。本机实证：`HKCU\Environment\Path` 仅剩 `...\Programs\GlobalTokenTracker` 一条，且类型由 `REG_EXPAND_SZ` 变成 `REG_SZ`。
+- **根因**（setup/src/main.rs）：
+  1. `remove_user_path` 仅以 `KEY_WRITE` 打开 Environment 后读取 Path → 读被拒（OS error 5）→ `unwrap_or_default()` 变空串 → 过滤后写回 `""`，**整条用户 PATH 被清空**。调用点：卸载 + `cleanup_prior_install`（每次改目录的升级）。
+  2. 读写都走 `get_value/set_value::<String>` → 恒写 `REG_SZ`，含 `%USERPROFILE%` 等变量的条目不再展开（"紊乱"）。
+  3. `extend_user_path` 对**任何**读错误都 `unwrap_or_default()`，同样可能用单条目覆盖整条 PATH。
+- **修复**：
+  - 纯函数 `path_eq/path_with/path_without`：只增删匹配条目，其余段落（含空段、变量引用、顺序）逐字保留；无变化返回 `None` → 不写。
+  - `read_path_value` 用 `get_raw_value`：仅 NotFound 视为不存在，其余错误一律向上抛、**绝不写回**；只接受 REG_SZ/REG_EXPAND_SZ。`write_path_value` 用 `set_raw_value` **保持原类型**；新建时默认 REG_EXPAND_SZ。
+  - 两处均以 `KEY_READ|KEY_WRITE` 打开；`remove_user_path` 失败时记录"PATH 清理跳过——未改动用户 PATH"。
+  - 兜底：结果为空而原值仍含其他条目 → 拒绝写入；每次写入前先把原值（含类型）备份到 `%USERPROFILE%\.globaltokentracker\path.bak`，备份失败则放弃修改。
+  - 写入后广播 `WM_SETTINGCHANGE("Environment")`，新开终端即时生效。
+- **测试**（6 个，注册表用例全部在临时键 `HKCU\Software\GlobalTokenTracker-test-*` 上，Drop 守卫清理，不触碰真实 PATH）：纯函数增删边界；REG_EXPAND_SZ 增→删往返逐字还原且类型不变；值不存在路径；**原 bug 复现**——只写句柄下删除必须报错且值不变；备份失败阻断写入。
+- **验证**：`cargo test -p globaltokentracker-setup` 6/6 通过；`cargo clippy -p globaltokentracker-setup --all-targets -- -D warnings` 0；测试后临时键残留 0。
+- **遗留**：已被旧版破坏的用户 PATH 无法自动恢复（原值未留存），需人工恢复一次；此后每次修改都有 `path.bak`。

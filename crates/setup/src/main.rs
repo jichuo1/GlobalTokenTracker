@@ -208,39 +208,182 @@ fn register_uninstall(dest: &Path, size: u64) -> Result<()> {
 /// terminals. Best-effort: EDR/policy may guard HKCU\Environment for unsigned
 /// binaries — a denied write must not fail the whole install.
 fn extend_user_path(dest: &Path, log: &dyn Fn(String)) {
-    let inner = || -> Result<()> {
-        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-        let env_key = hkcu.open_subkey_with_flags(
-            "Environment",
-            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
-        )?;
-        let cur: String = env_key.get_value("Path").unwrap_or_default();
-        let d = dest.display().to_string();
-        if cur.split(';').any(|p| {
-            p.trim_end_matches('\\').eq_ignore_ascii_case(d.trim_end_matches('\\'))
-        }) {
-            return Ok(());
+    let inner = || -> Result<bool> {
+        let env_key = open_user_env()?;
+        let wrote = add_dir_to_path(&env_key, &dest.display().to_string(), &backup_path_value)?;
+        if wrote {
+            broadcast_env_change();
         }
-        let new = if cur.is_empty() { d } else { format!("{cur};{d}") };
-        env_key.set_value("Path", &new)?;
-        Ok(())
+        Ok(wrote)
     };
     match inner() {
-        Ok(()) => log("已加入用户 PATH（新开的终端生效）".into()),
-        Err(e) => log(format!("PATH 追加被拒（{e}）——不影响使用，CLI 可用完整路径")),
+        Ok(true) => log("已加入用户 PATH（新开的终端生效）".into()),
+        Ok(false) => log("用户 PATH 已包含安装目录".into()),
+        Err(e) => log(format!(
+            "PATH 追加被拒（{e}）——不影响使用，CLI 可用完整路径"
+        )),
     }
 }
 
-fn remove_user_path(dest: &Path) {
+fn remove_user_path(dest: &Path, log: &dyn Fn(String)) {
+    let inner = || -> Result<bool> {
+        let env_key = open_user_env()?;
+        let wrote =
+            remove_dir_from_path(&env_key, &dest.display().to_string(), &backup_path_value)?;
+        if wrote {
+            broadcast_env_change();
+        }
+        Ok(wrote)
+    };
+    match inner() {
+        Ok(true) => log("已从用户 PATH 移除安装目录".into()),
+        Ok(false) => {}
+        Err(e) => log(format!("PATH 清理跳过（{e}）——未改动用户 PATH")),
+    }
+}
+
+fn open_user_env() -> Result<winreg::RegKey> {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    if let Ok(env_key) = hkcu.open_subkey_with_flags("Environment", winreg::enums::KEY_WRITE) {
-        let cur: String = env_key.get_value("Path").unwrap_or_default();
-        let d = dest.display().to_string();
-        let kept: Vec<&str> = cur
+    Ok(hkcu.open_subkey_with_flags(
+        "Environment",
+        winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
+    )?)
+}
+
+fn path_eq(a: &str, b: &str) -> bool {
+    a.trim()
+        .trim_end_matches('\\')
+        .eq_ignore_ascii_case(b.trim().trim_end_matches('\\'))
+}
+
+fn path_with(cur: &str, dir: &str) -> Option<String> {
+    if cur.split(';').any(|p| path_eq(p, dir)) {
+        return None;
+    }
+    Some(if cur.is_empty() {
+        dir.to_string()
+    } else if cur.ends_with(';') {
+        format!("{cur}{dir}")
+    } else {
+        format!("{cur};{dir}")
+    })
+}
+
+fn path_without(cur: &str, dir: &str) -> Option<String> {
+    let segments: Vec<&str> = cur.split(';').collect();
+    if !segments.iter().any(|p| path_eq(p, dir)) {
+        return None;
+    }
+    let kept: Vec<&str> = segments.into_iter().filter(|p| !path_eq(p, dir)).collect();
+    Some(kept.join(";"))
+}
+
+fn read_path_value(key: &winreg::RegKey) -> Result<Option<(String, winreg::enums::RegType)>> {
+    use winreg::enums::RegType;
+    let raw = match key.get_raw_value("Path") {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("读取用户 PATH"),
+    };
+    if !matches!(raw.vtype, RegType::REG_SZ | RegType::REG_EXPAND_SZ) {
+        bail!("用户 PATH 类型异常（{:?}）", raw.vtype);
+    }
+    let units: Vec<u16> = raw
+        .bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    let text = String::from_utf16(&units).context("用户 PATH 不是有效 UTF-16")?;
+    Ok(Some((text.trim_end_matches('\0').to_string(), raw.vtype)))
+}
+
+fn write_path_value(
+    key: &winreg::RegKey,
+    value: &str,
+    vtype: winreg::enums::RegType,
+) -> Result<()> {
+    let bytes: Vec<u8> = value
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    key.set_raw_value("Path", &winreg::RegValue { bytes, vtype })
+        .context("写入用户 PATH")
+}
+
+type Backup<'a> = &'a dyn Fn(&str, &winreg::enums::RegType) -> Result<()>;
+
+/// `backup` runs with the previous raw value right before a write; its
+/// failure aborts the modification.
+fn add_dir_to_path(key: &winreg::RegKey, dir: &str, backup: Backup) -> Result<bool> {
+    match read_path_value(key)? {
+        None => {
+            write_path_value(key, dir, winreg::enums::RegType::REG_EXPAND_SZ)?;
+            Ok(true)
+        }
+        Some((cur, vtype)) => {
+            let Some(new) = path_with(&cur, dir) else {
+                return Ok(false);
+            };
+            backup(&cur, &vtype).context("备份原 PATH 失败")?;
+            write_path_value(key, &new, vtype)?;
+            Ok(true)
+        }
+    }
+}
+
+fn remove_dir_from_path(key: &winreg::RegKey, dir: &str, backup: Backup) -> Result<bool> {
+    let Some((cur, vtype)) = read_path_value(key)? else {
+        return Ok(false);
+    };
+    let Some(new) = path_without(&cur, dir) else {
+        return Ok(false);
+    };
+    if new.trim().is_empty()
+        && cur
             .split(';')
-            .filter(|p| !p.trim_end_matches('\\').eq_ignore_ascii_case(d.trim_end_matches('\\')))
-            .collect();
-        let _ = env_key.set_value("Path", &kept.join(";"));
+            .any(|p| !p.trim().is_empty() && !path_eq(p, dir))
+    {
+        bail!("清理结果为空，拒绝写入");
+    }
+    backup(&cur, &vtype).context("备份原 PATH 失败")?;
+    write_path_value(key, &new, vtype)?;
+    Ok(true)
+}
+
+fn backup_path_value(raw: &str, vtype: &winreg::enums::RegType) -> Result<()> {
+    let dir = env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .context("USERPROFILE not set")?
+        .join(".globaltokentracker");
+    fs::create_dir_all(&dir)?;
+    let tname = if *vtype == winreg::enums::RegType::REG_EXPAND_SZ {
+        "REG_EXPAND_SZ"
+    } else {
+        "REG_SZ"
+    };
+    fs::write(dir.join("path.bak"), format!("type={tname}\n{raw}\n"))?;
+    Ok(())
+}
+
+fn broadcast_env_change() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
+    use windows::core::w;
+    unsafe {
+        let _ = SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(w!("Environment").as_ptr() as isize),
+            SMTO_ABORTIFHUNG,
+            5000,
+            None,
+        );
     }
 }
 
@@ -298,7 +441,7 @@ pub fn uninstall_steps(
     let _ = fs::remove_dir_all(&start);
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let _ = hkcu.delete_subkey_all(UNINSTALL_KEY);
-    remove_user_path(dest);
+    remove_user_path(dest, log);
     step(100, "已卸载");
     log("用户数据保留在 %USERPROFILE%\\.globaltokentracker".into());
     Ok(())
@@ -321,7 +464,7 @@ pub fn cleanup_prior_install(old: &Path, new: &Path, log: &dyn Fn(String)) {
         return;
     }
     log(format!("清理旧安装目录 {}", old.display()));
-    remove_user_path(old);
+    remove_user_path(old, log);
     if let Err(e) = schedule_dir_delete(old) {
         log(format!("旧目录延迟删除失败：{e}"));
     }
@@ -493,4 +636,131 @@ fn main() -> Result<()> {
         println!("  数据目录 : %USERPROFILE%\\.globaltokentracker（首次运行创建）");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, RegType};
+
+    const DIR: &str = r"C:\Apps\GTT";
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn no_backup(_: &str, _: &RegType) -> Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn with_cases() {
+        assert_eq!(path_with("", DIR).as_deref(), Some(DIR));
+        assert_eq!(path_with("a;b", DIR).as_deref(), Some(r"a;b;C:\Apps\GTT"));
+        assert_eq!(path_with("a;b;", DIR).as_deref(), Some(r"a;b;C:\Apps\GTT"));
+        assert_eq!(path_with(r"a;c:\apps\gtt\;b", DIR), None);
+        assert_eq!(path_with(r"a; C:\APPS\GTT ", DIR), None);
+    }
+
+    #[test]
+    fn without_cases() {
+        assert_eq!(
+            path_without(r"C:\x;%USERPROFILE%\bin;c:\apps\gtt\;;C:\y", DIR).as_deref(),
+            Some(r"C:\x;%USERPROFILE%\bin;;C:\y")
+        );
+        assert_eq!(
+            path_without(r"a;C:\Apps\GTT;b", DIR).as_deref(),
+            Some("a;b")
+        );
+        assert_eq!(path_without("a;b", DIR), None);
+        assert_eq!(path_without(DIR, DIR).as_deref(), Some(""));
+    }
+
+    struct Scratch {
+        path: String,
+    }
+
+    impl Scratch {
+        fn new() -> (Self, RegKey) {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = format!(
+                r"Software\GlobalTokenTracker-test-{}-{nanos}",
+                std::process::id()
+            );
+            let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+                .create_subkey(&path)
+                .unwrap();
+            (Self { path }, key)
+        }
+
+        fn open(&self, flags: u32) -> RegKey {
+            RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey_with_flags(&self.path, flags)
+                .unwrap()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn registry_roundtrip_preserves_expand_sz() {
+        let (_g, key) = Scratch::new();
+        let orig = r"C:\x;%USERPROFILE%\bin";
+        write_path_value(&key, orig, RegType::REG_EXPAND_SZ).unwrap();
+        assert!(add_dir_to_path(&key, DIR, &no_backup).unwrap());
+        let (cur, t) = read_path_value(&key).unwrap().unwrap();
+        assert_eq!(t, RegType::REG_EXPAND_SZ);
+        assert!(cur.contains(r"%USERPROFILE%\bin"));
+        assert!(cur.ends_with(DIR));
+        assert!(!add_dir_to_path(&key, DIR, &no_backup).unwrap());
+        assert!(remove_dir_from_path(&key, DIR, &no_backup).unwrap());
+        assert_eq!(
+            read_path_value(&key).unwrap(),
+            Some((orig.to_string(), RegType::REG_EXPAND_SZ))
+        );
+    }
+
+    #[test]
+    fn registry_absent_value() {
+        let (_g, key) = Scratch::new();
+        assert!(!remove_dir_from_path(&key, DIR, &no_backup).unwrap());
+        assert!(add_dir_to_path(&key, DIR, &no_backup).unwrap());
+        assert_eq!(
+            read_path_value(&key).unwrap(),
+            Some((DIR.to_string(), RegType::REG_EXPAND_SZ))
+        );
+    }
+
+    #[test]
+    fn write_only_handle_errors_without_change() {
+        let (g, key) = Scratch::new();
+        let orig = format!(r"C:\x;{DIR};%USERPROFILE%\bin");
+        write_path_value(&key, &orig, RegType::REG_EXPAND_SZ).unwrap();
+        let wo = g.open(KEY_WRITE);
+        assert!(remove_dir_from_path(&wo, DIR, &no_backup).is_err());
+        assert!(add_dir_to_path(&wo, r"C:\other", &no_backup).is_err());
+        let ro = g.open(KEY_READ);
+        assert_eq!(
+            read_path_value(&ro).unwrap(),
+            Some((orig, RegType::REG_EXPAND_SZ))
+        );
+    }
+
+    #[test]
+    fn backup_failure_blocks_write() {
+        let (_g, key) = Scratch::new();
+        write_path_value(&key, "a", RegType::REG_SZ).unwrap();
+        let fail = |_: &str, _: &RegType| -> Result<()> { bail!("nope") };
+        assert!(add_dir_to_path(&key, DIR, &fail).is_err());
+        assert_eq!(
+            read_path_value(&key).unwrap(),
+            Some(("a".to_string(), RegType::REG_SZ))
+        );
+    }
 }
