@@ -226,6 +226,7 @@ pub fn app_display(app: &str) -> &str {
         "kimi_code" => "Kimi Code",
         "cline" => "Cline",
         "commandcode" => "Command Code",
+        "gemini_antigravity" => "Antigravity",
         other => other,
     }
 }

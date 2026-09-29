@@ -16,7 +16,7 @@ use windows_reactor::*;
 pub const OVERVIEW_WIDGETS: &[(&str, &str, Symbol)] = &[
     ("stats", "统计卡", Symbol::Calculator),
     ("trend", "近 30 天趋势", Symbol::FourBars),
-    ("share", "占比分布", Symbol::Target),
+    ("share", "占比分布", Symbol::AllApps),
     ("apps", "本周 · 按工具", Symbol::List),
     ("quotas", "订阅配额", Symbol::Clock),
     ("unpriced", "未计价提示", Symbol::Important),
@@ -80,22 +80,30 @@ pub fn card(theme: &Theme, content: View) -> View {
 /// Icon + title + hairline rule — the line is the visual divider the design
 /// asks for; it stretches to fill remaining width.
 pub fn section_header(theme: &Theme, icon: Symbol, title: &str) -> View {
-    StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(8.0)
-        .children((
-            SymbolIcon::new().symbol(icon),
-            TextBlock::new()
-                .text(title)
-                .font_size(theme.h2_size)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .vertical_alignment(VerticalAlignment::Center),
+    // The rule takes whatever the icon + title leave (a fixed-width rule ran
+    // past narrow cards and stopped short in wide ones).
+    Grid::new()
+        .columns([GridLength::Auto, GridLength::Auto, GridLength::STAR])
+        .column_spacing(8.0)
+        .children([
             Border::new()
+                .grid_column(0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(SymbolIcon::new().symbol(icon)),
+            Border::new().grid_column(1).content(
+                TextBlock::new()
+                    .text(title)
+                    .font_size(theme.h2_size)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+            ),
+            Border::new()
+                .grid_column(2)
                 .height(1.0)
-                .width(600.0)
                 .background(theme.divider)
-                .vertical_alignment(VerticalAlignment::Center),
-        ))
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        ])
 }
 
 /// Emphasis tones — used sparingly: only state signals earn color.
@@ -283,9 +291,12 @@ pub fn trend_strip(
                 let ink = ctx.create_solid_brush(subtle)?;
                 let line = ctx.create_solid_brush(divider)?;
 
-                // Layout: 18px top label strip, plot area, 16px bottom ticks.
-                let top = 18.0f32;
-                let bottom = h - 16.0;
+                // Layout: top label strip, plot area, bottom ticks. The strips
+                // are 18 / 16px at the default 11pt label and grow with the
+                // font — fixed heights clipped the date ticks at larger sizes.
+                let top = (label_pt * 1.65).max(18.0).ceil();
+                let strip = (label_pt * 1.5).max(16.0).ceil();
+                let bottom = h - strip;
                 let plot_h = (bottom - top).max(1.0);
                 let max = days.iter().map(|d| d.tokens).max().unwrap_or(1).max(1) as f32;
 
@@ -293,7 +304,7 @@ pub fn trend_strip(
                 ctx.draw_text(
                     &fmt::tokens_exact(max as u64),
                     &tf,
-                    &Rect::new(0.0, 0.0, 120.0, top),
+                    &Rect::new(0.0, 0.0, 160.0, top),
                     &ink,
                 );
                 let mid_y = top + plot_h * 0.5;
@@ -814,9 +825,9 @@ pub fn donut_cell(
         ))
 }
 
-/// Two-column row; right-aligned meta. Hairline divider under the row when the
-/// theme enables line separators.
-pub fn key_value_row(theme: &Theme, left: String, right: String) -> View {
+/// Any row content with the list chrome every stacked list shares: 3 DIPs of
+/// padding and a hairline underneath when the theme enables separators.
+pub fn ruled_row(theme: &Theme, content: impl Into<View>) -> View {
     let divider: View = if theme.line_separators {
         Border::new().height(1.0).background(theme.divider).into()
     } else {
@@ -826,22 +837,7 @@ pub fn key_value_row(theme: &Theme, left: String, right: String) -> View {
         StackPanel::new()
             .orientation(Orientation::Vertical)
             .spacing(0.0)
-            .children((
-                Grid::new()
-                    .columns([GridLength::STAR, GridLength::Auto])
-                    .children([
-                        Border::new()
-                            .grid_column(0)
-                            .content(TextBlock::new().text(left).font_size(theme.body_size)),
-                        Border::new().grid_column(1).content(
-                            TextBlock::new()
-                                .text(right)
-                                .font_size(theme.body_size)
-                                .foreground(theme.subtle),
-                        ),
-                    ]),
-                divider,
-            )),
+            .children((content.into(), divider)),
     )
 }
 

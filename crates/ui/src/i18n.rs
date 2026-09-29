@@ -110,6 +110,7 @@ pub fn tr(zh: &str) -> &str {
         "{rl}事件" => "{rl} events",
         "{rl}趋势" => "{rl} trend",
         "{rl} · 按工具" => "{rl} · by tool",
+        "{rl} · 占比分布" => "{rl} · share breakdown",
         "事件 {}" => "{} events",
         "全部 {}" => "All-time {}",
         "输入 {}" => "Input {}",
@@ -132,8 +133,8 @@ pub fn tr(zh: &str) -> &str {
         "刷新" => "Refresh",
         "正在扫描数据源…" => "Scanning sources…",
         // ---- filter chrome
-        "工具" => "Tools",
-        "模型" => "Models",
+        "工具" => "Tool",
+        "模型" => "Model",
         "工具筛选" => "Tool filter",
         "模型筛选" => "Model filter",
         "刷新频率" => "Refresh cadence",
@@ -179,12 +180,13 @@ pub fn tr(zh: &str) -> &str {
         "{}…" => "{}…",
         // ---- quota page
         "配额组 {}" => "Quota group {}",
-        "{}  ·  reset {}" => "{}  ·  reset {}",
         "余额 {}" => "Balance {}",
         "已用 {} / 上限 {}" => "Used {} / limit {}",
         "用量 {}" => "Used {}",
         "上限 {}" => "Limit {}",
-        "重置 {} · 采集 {}" => "Resets {} · collected {}",
+        "重置 {}" => "Resets {}",
+        "采集 {}" => "Collected {}",
+        "另有 {} 项 · 见配额页" => "{} more · see the Quota page",
         "暂无配额数据" => "No quota data",
         "5 小时窗口" => "5-hour window",
         "每周限额" => "Weekly limit",
@@ -194,7 +196,7 @@ pub fn tr(zh: &str) -> &str {
         "Auto 用量池" => "Auto pool",
         "API 用量池" => "API pool",
         "会话上下文" => "Session context",
-        "已过期" => "expired",
+        "已过期" => "Expired",
         // ---- sources page
         "尚未扫描" => "Not scanned yet",
         "正常" => "OK",
@@ -203,7 +205,20 @@ pub fn tr(zh: &str) -> &str {
             "{} files · {} rows ingested · {} cursors · last {}"
         }
         // ---- prices page
-        "{} 个模型 · 前 400 条 · {}" => "{} models · first 400 · {}",
+        "{} 个模型 · {}" => "{} models · {}",
+        "匹配 {} / {} 个模型 · {}" => "{} of {} models match · {}",
+        "搜索模型，如 opus 4.6 或 gpt mini" => "Search models, e.g. opus 4.6 or gpt mini",
+        "仅看有分歧的" => "Disputed only",
+        "没有匹配的模型" => "No matching models",
+        "佐证" => "Sources",
+        "与所示价格一致的来源数 / 给出报价的来源总数。橙色 = 来源之间有分歧；悬停行查看各家报价。" => {
+            "Sources backing the shown price / sources that quoted one. Orange = the sources disagree; hover a row for each quote."
+        }
+        " · 缓存读 {}" => " · cache read {}",
+        " · 缓存写 {}" => " · cache write {}",
+        "采信 {}（{}/{} 家一致）" => "Taken from {} ({}/{} agree)",
+        "无报价" => "no price",
+        "{}（未计票）" => "{} (not counted)",
         "联网同步于 {} 小时前" => "Synced {}h ago",
         "仅本地种子，尚未联网同步" => "Local seed only; not synced yet",
         // ---- tray
@@ -238,6 +253,8 @@ pub fn tr(zh: &str) -> &str {
             "Start with Windows (minimized to tray)"
         }
         "点击关闭按钮时" => "When closing",
+        "开" => "On",
+        "关" => "Off",
         "每次询问" => "Ask every time",
         "彻底退出" => "Quit completely",
         "仅作用于图表文字；界面控件字体跟随系统" => {

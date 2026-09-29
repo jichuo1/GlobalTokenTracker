@@ -31,7 +31,8 @@ The UI is native WinUI 3 (Rust + windows-reactor), built for small binary size, 
 
 - Five views: Overview / Detail / Quota / Sources / Prices, with persistent tool+model filtering
 - Exact bucketing: non-cached input / cache-read / cache-write / output tokens
-- Price book synced from `llmpricing.dev` every 12 h (once forced per launch) with an offline seed fallback
+- **Cross-checked price book**: nine public sources (models.dev, LiteLLM, llmpricing.dev, OpenRouter, Vercel AI Gateway, Helicone, Langfuse, llm-prices.com, Portkey) synced every 12 h; a model is billed at the price **most sources agree on**, so one feed's mistake never reaches the ledger. Offline seed fallback
+- Prices page: **search by model** (case- and separator-insensitive: `opus 4.6`, `gpt mini`), a "n/m sources agree" pill per row, per-source quotes on hover, and a "disputed only" filter
 - USD estimates kept strictly separate from subscription credits/percentages
 - Incremental byte-cursor scanning; truncation/rotation handled; read-only on all sources
 - Ledger snapshot backup (two generations) with open-time self-healing
@@ -49,6 +50,7 @@ The UI is native WinUI 3 (Rust + windows-reactor), built for small binary size, 
 | OpenCode / ZCode / Grok / WorkBuddy / MiniMax Code / Kimi Code | Local logs | ✅ exact |
 | Cline | `ui_messages.json` + editor globalStorage | ✅ exact (self-reported cost) |
 | Command Code | Local JSONL | ✅ exact (self-reported cost) |
+| Antigravity (app / IDE / `agy` CLI) | Local conversation databases `~/.gemini/antigravity*/…/*.db` | ✅ exact (incl. thinking tokens; no cache-write data) |
 | CodeBuddy IDE | `state.vscdb` / sessions | 🟡 session-level + model multipliers |
 | Cursor / Qoder | Credentials + official quota APIs | 🟡 quota-oriented |
 
@@ -75,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File installer\package.ps1   # single-file s
 
 ## Privacy
 
-The only outbound traffic is the public price-book fetch from `llmpricing.dev` (offline seed covers failure). The OTLP receiver binds loopback only. Source logs are never modified. User data lives in `%USERPROFILE%\.globaltokentracker` and survives updates and uninstalls.
+Price sync only issues **GET** requests to the nine public sources above — no usage data, paths or account details are sent (offline seed covers failure). The update check (GitHub Releases) and the optional vendor quota queries are the only other traffic; nothing from your logs is uploaded. The OTLP receiver binds loopback only. Source logs are never modified. User data lives in `%USERPROFILE%\.globaltokentracker` and survives updates and uninstalls.
 
 ## License
 
@@ -83,4 +85,4 @@ Dual-licensed under **MIT OR Apache-2.0** — [LICENSE-MIT](LICENSE-MIT) · [LIC
 
 ## Acknowledgements
 
-Research references (no code reused): [cc-switch](https://github.com/farion1231/cc-switch) · [TokenTracker](https://github.com/xiufengsun/TokenTracker) · [cursor-usage](https://github.com/chocolatemale/cursor-usage) · [tokcat](https://github.com/handlecusion/tokcat) · [agent-trail](https://github.com/camtrik/agent-trail) · [windows-reactor](https://crates.io/crates/windows-reactor) · pricing data from [llmpricing.dev](https://llmpricing.dev), [models.dev](https://models.dev), [LiteLLM](https://github.com/BerriAI/litellm).
+Research references (no code reused): [cc-switch](https://github.com/farion1231/cc-switch) · [TokenTracker](https://github.com/xiufengsun/TokenTracker) · [cursor-usage](https://github.com/chocolatemale/cursor-usage) · [tokcat](https://github.com/handlecusion/tokcat) · [agent-trail](https://github.com/camtrik/agent-trail) · [windows-reactor](https://crates.io/crates/windows-reactor) · pricing data from [models.dev](https://models.dev), [LiteLLM](https://github.com/BerriAI/litellm), [llmpricing.dev](https://llmpricing.dev), [OpenRouter](https://openrouter.ai/models), [Vercel AI Gateway](https://vercel.com/ai-gateway), [Helicone](https://www.helicone.ai/llm-cost), [Langfuse](https://github.com/langfuse/langfuse), [llm-prices.com](https://www.llm-prices.com), [Portkey](https://github.com/Portkey-AI/models).

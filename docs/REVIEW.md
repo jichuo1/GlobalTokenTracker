@@ -990,6 +990,93 @@
   - 下载反馈：`Downloading(Release)`、`UpdateDownloaded(Release, Result)`；下载/启动安装器失败时回到 `Available(rel)` 并记 `update_error`（新检查结果或再次点击时清除）。横幅在 `Available`/`Downloading` 均显示：下载中以"正在下载并校验…"替换按钮，失败显示单行截断（80 字符）的"更新失败：…"与"重试"；设置页状态行同步。
   - 调试钩子 `GTT_UPDATE_FAIL_DOWNLOAD=1`：`update::download` 在任何网络访问前直接报错（与 `GTT_UPDATE_AS` 同处文档）。实测：开发版 UI 经 UIA 点击横幅"立即更新"→ 横幅显示失败原因 + "重试"（`target\shot-update-error.png`）；`cargo test --workspace` 全绿、`cargo clippy --workspace --all-targets -- -D warnings` 0。
 
+## S76 主程序 UI 排版审计：窄窗口 / 英文 / 浅色 / 大字号下的裁切与冲突 ✅
+
+- **方法**：用测试实例（`GTT_DATA_DIR` 指向账本副本，不碰真实数据）按 页面 × 宽度（1196/860/780/736/620）× 语言（中/英）× 主题（深/浅）× 字号（12/17pt）逐张 `PrintWindow` 截图核对，问题先复现再改。
+- **问题与修复**
+  1. **窗口可被拖得过窄**：620 宽时标题栏品牌名与居中导航重叠；明细表“模型”列被挤成 0 宽、末两列被裁。→ `close_hook` 的子类过程增加 `WM_GETMINMAXINFO`，最小外框 780×560 DIP（按窗口 DPI 换算）。
+  2. **明细/价目表固定列宽**：改为“列方案”（`Plan`）——按实测行宽与字号系数挑选**能给模型列留足 140 DIP 的最宽方案**：明细 8→7→6→5 列（依次去掉 缓存 / 时长 / 工具），价目 6→6 紧凑→5→4 列（去掉 缓存写 / 缓存读）；文本改 `CharacterEllipsis`，工具列用显示名（`CodeBuddy` 而非 `codebuddy_ide`）。3 个单测覆盖挑选规则、“被选中的方案必给星号列留够空间”的扫描、逻辑列→网格列映射。
+  3. **“占比分布”图标是空方框**：`Symbol::Target` 在系统图标字体中缺字 → `AllApps`。
+  4. **区块标题分隔线固定 600 宽**：窄卡片被撑出、宽卡片够不到头 → Grid 星号列自适应。
+  5. **总览“订阅配额”**：直接显示 `5h_block`/`credits` 原始 id、中文界面混入英文 `reset`、同名多账号（3 行 `codex · 5h_block`）无法区分 → 显示名 + 窗口中文名 + 账号徽章；按（未过期优先，用量降序）取前 6，尾行“另有 N 项 · 见配额页”；行改 名称｜进度条｜数值｜重置 四列，列宽固定使条与数值上下对齐；已过期直接写“已过期”。
+  6. **总览“按工具”**：名称与数字在宽窗口下相隔上千像素 → 中间加相对 token 占比条（右列固定 210 使条对齐）。
+  7. **配额页**：行间无分隔、有无进度条高度不一 → 行间发丝线；credits 行余额移到右侧徽章，不再打印“重置 —”。
+  8. **英文界面**：筛选条标签 `Models`/`Refresh` 被 28 DIP 宽度裁成 `Mode`/`Refres` → 标签与按钮宽度按语言 + 字号计算（`chrome_geom`），下拉面板 x 同步；表头“Tools/Models”改单数；饼图中心与图例仍显示 万/亿 → 改 `i18n::compact`（K/M/B）；补 `{rl} · 占比分布` 翻译；开关的 开/关 文案随 OS 语言显示 → 自绘 On/Off；设置页较长说明文字被控件列截断 → 自动换行，标签列垂直居中。
+  9. **大字号（17pt）**：趋势图底部日期刻度被裁 → 刻度条高度随 label 字号；固定列宽、设置页标签列按字号系数放大。
+  10. **浅色主题**：图表画布沿用深色常量——卡片上出现灰色方块，饼图强调色与图例色块不一致 → `Theme::resolve(cfg, light)` 提供浅/深两套画布默认色（accent / subtle / card），`is_light` 读注册表 `AppsUseLightTheme`，切换主题时重解析。
+  11. **设置页“更新状态”**：空状态文本仍占 12 DIP 间距，按钮偏离控件列 → 空文本不再创建。
+- **未改 / 遗留（如实）**：价目表首行有一个空 `model_id`（litellm feed 里的空键，数据问题，未动）；系统自定义强调色下图表强调色仍是固定近似值；“跟随系统”主题在应用运行中被系统切换时，图表色要到下次切换设置/重启才更新；17pt 且最窄窗口时明细表只保留 5 列（设计取舍）。
+- **验证**：`cargo clippy --workspace --all-targets -- -D warnings` 0；`cargo test --workspace` 全绿（core 82 + 1 ignored、setup 9、ui 13）；上述维度截图逐张复核（含 780 最小宽度下明细表 7 列、17pt 下 5 列、浅色图表底色一致、英文筛选条与设置页）。
+
+## S77 安装 / 更新 / 卸载程序重做：DPI 正确、统一栅格、可预览的卸载 ✅
+
+- **问题**：窗口外框按 96 DPI 定尺寸而子控件按实际 DPI 缩放 → 高分屏下控件溢出窗口；右缘不对齐（输入框止于 588、分隔线 616、按钮 628）；卸载页只有三行文字；`STATIC` 控件渲染 CJK 文本比同字号的父窗口绘制大约 20%（状态行/“安装位置”字号发飘）。
+- **重做（`crates/setup/src/gui.rs`）**
+  - 一套 DIP 栅格：客户区 620 宽、32 边距，标题带（应用图标 44px + 标题/副标题）→ 内容区 → 底栏（按钮右对齐同一边距）。窗口按**客户区**在目标 DPI 下经 `AdjustWindowRectExForDpi` 定外框并居中；子控件统一由 `layout()` 定位，`WM_DPICHANGED` 时重排、重建字体与图标。
+  - 状态行与“安装位置”标签改由父窗口自绘（隐藏的 `STATIC` 仅作线程安全的文本存储），失败时状态行变红；路径输入框内缩进自绘圆角框内，文本垂直居中；字号取偶数像素（避免 CJK 回退到点阵字体）。
+  - **完成态**：成功标记 + “安装完成/更新完成/卸载完成”+ 说明，取代原来只把按钮文字改成“关闭”。
+  - **卸载确认页**：左卡“将被移除”（程序文件及大小、开始菜单快捷方式、用户 PATH 条目、卸载注册项——只列实际存在的），右卡“将保留”（用量账本与设置及大小、目录、“重新安装后自动沿用”）；勾选“同时删除用户数据（不可恢复）”时右卡翻为红色“将一并删除”，卸载按钮点击后再弹一次默认“否”的确认框。`--quiet` 卸载行为不变（仍保留数据）。
+- **逻辑（`crates/setup/src/main.rs`）**：`uninstall_plan`（只读：目录大小、快捷方式/PATH/注册项是否存在、用户数据目录及大小）；`uninstall_steps(dest, purge_data, …)`；`remove_user_data` 仅接受恰好为 `<profile>\.globaltokentracker` 的路径，否则拒绝；清理失败不使卸载失败（程序此时已移除），完成页据目录是否仍在如实提示。3 个新单测（大小格式化、目录累计、清理只动数据目录——含“拒绝 profile 本身与同级目录”“重复清理幂等”）。
+- **调试钩子（仅 debug 构建）**：`GTT_SETUP_DPI` 模拟其他缩放，`GTT_SETUP_PREVIEW=fresh,purge,work,fail,done,dataleft` 直接进入某个状态以便截图，release 构建不含。
+- **验证**：安装/更新/卸载 × 空闲/进行中/失败/完成/勾选删除数据 逐态截图；模拟 144 DPI 下整体等比、无溢出；`cargo clippy -p globaltokentracker-setup --all-targets -- -D warnings` 0，`cargo test -p globaltokentracker-setup` 9/9。**未点击任何真实的安装/卸载按钮**（会改动本机安装、注册表与用户 PATH）；数据清理路径以临时目录单测覆盖。
+
+## S78 新增 Antigravity 用量统计（应用 / IDE / `agy` CLI） ✅
+
+- **范围**：新增 `adapters/antigravity.rs`，注册为第 15 个数据源（`gemini_antigravity`，显示名 Antigravity）。此前该工具在 spec 里只列为 P2 且“本机未使用”，界面与账本均无此源。
+- **调研结论（网络 + 本机）**
+  - 本机：`~/.gemini/antigravity` 已装（Antigravity 2.0 应用，9/15），但 `conversations/`、`brain/` 均空，仅有索引库 `conversation_summaries.db`（无 `gen_metadata`）——没有真实会话可对照，格式全部依据第三方逆向，见下。
+  - 存储：每个会话一个 SQLite；`agy` CLI 在 `~/.gemini/antigravity-cli/conversations/`，应用/IDE 在 `~/.gemini/antigravity/` 与其 `conversations/`（`GEMINI_CLI_HOME` 可改根）。旧 `.pb` 会话不可读。
+  - 表：`gen_metadata(idx,data,size)` 每行一次生成（protobuf：`#1.#4` 用量 — `#1+#2` 输入、`#5` 缓存读、`#9` 文本输出、`#10` 思考输出、`#11` responseId；`#1.#19` 机器模型 id、`#1.#21` 显示名）、`trajectory_metadata_blob`（`#2` 会话创建时间、`#1.#1` 工作区 URI）、`steps`（`step_type=15` 的 `metadata.#1` 才是 agy ≥ 1.1.18 唯一的生成时间）。来源：tokscale `antigravity_cli.rs` + issue #1184/PR #1327、CodexBar `docs/antigravity.md`（二者互相印证；#1184 是真实生产库解码，且证伪了早先“`#9.#10` 是 8 字节时间戳”的推断，故本实现**不采用**该推断）。
+- **口径与取舍**
+  - `input = #1+#2`（不含缓存）；`output = #9+#10`，因为 `pricing::compute` 只乘 `output_tokens`、Google 把思考按输出计费；`reasoning = #10` 作子集展示（与 Codex/Claude 同约定）。无缓存写数据，如实为 0。
+  - 模型：机器 id → 价目表键（`gemini-pro-default/-agent`→`gemini-3.1-pro`，`gemini-3-flash-a/b/agent`、`gemini-3.5-flash-*`→`gemini-3.5-flash`，`MODEL_PLACEHOLDER_M26/M35`、`claude-*-4-6-thinking`→`claude-opus/sonnet-4-6`，GPT-OSS→`gpt-oss-120b`…），原 id 存 `request_model` 留痕；缺 `#19` 的续写行只从**同一会话**里同显示名的兄弟行借，且会话里出现过“从未被任何行识别的显示名”时禁用整体回退（防止模型切换后串价）；路由占位 `gemini-default` 无法确定则保持未计价，不猜。显示名仅作连接键/有限的已验证映射，不作价格键（会被改名/本地化）。
+  - 时间：`#9.#4`（旧版）→ `steps` 按 responseId → 按 gen idx → 会话创建时间 → 文件 mtime，全部过“2020-01-01…now+1h”可信窗口；agy ≥ 1.1.18 完全依赖 `steps`。
+  - 去重：按 responseId **全局**去重（`agy:{id}`），因为 `/fork` 与 IDE→CLI 导入会把早先的生成整段复制进新库，这些 token 只花了一次。先上报的会话拥有该行，副本一律跳过（`skipped`），避免两个库互相改写 session/project 导致每次重扫翻转。
+  - 新鲜度：库的 `len:mtime` + `-wal` 的 `len:mtime` 作指纹存进游标，未变化只需两次 `stat`；有变化则整库重读（会话库很小，账本 UPSERT 幂等）。只读打开；干净关闭后无 `-wal/-shm` 的 WAL 库会被 `mode=ro` 拒绝，此时（且确无活动 WAL）改 `immutable=1` 重试。
+- **测试**（14 个，全在临时库/临时目录，不碰真实数据）：用量→事件映射（含思考=输出子集、缓存读、去重、零用量丢弃、`file://` 工作区含 `%20`）；agy ≥ 1.1.18 由 `steps` 按 responseId/gen idx 定时且非模型步骤不参与；无可用时间时回落会话创建时间、荒谬时间戳（2000 年）不被采信；缺失模型的兄弟借用/路由占位/已知显示名；“唯一模型”回退及模型切换时被禁用；未变化库被跳过、增长后被重读；fork 副本不偷行不重复计数且原库增长后归属不变；无 `gen_metadata` 的库被忽略并记指纹；无边车 WAL 库仍可读；损坏 blob 只丢坏行；三个根目录发现/索引库排除/`GEMINI_CLI_HOME`；`file://` → 本机路径（盘符、`%3A`、CJK、UNC）；**每个别名目标都能被种子价目表定价**、`gemini-default` 保持未计价。
+- **端到端**（临时 `GEMINI_CLI_HOME` + 临时账本，`globaltokentracker-cli scan gemini_antigravity`）：2 个会话库 + 1 个索引库 → `2 seen`，`+5 events, skipped 1`（fork 副本），重扫 `+0`；账本行的模型/项目/时间（2.0h/1.98h/0.17h 前，分别经 responseId、responseId、gen idx 对上）与手算成本一致（如 `gemini-3.5-flash`：5332×1.5 + 1150×9 + 30000×0.15 = $0.02285）。
+- **验证**：`cargo test --workspace` 全绿（core 96 + 1 ignored、setup 9、ui 13）；`cargo clippy --workspace --all-targets -- -D warnings` 0。
+- **未做 / 风险（如实）**：
+  - 没有真实 Antigravity 会话库可对照（本机为空）；字段号取自两份独立第三方逆向，Google 改版（agy 升级）可能使解码变空——此时表现为该源“文件 N / 事件 0”，而不是误记数字。
+  - 应用/IDE 的 `.pb` 旧会话不可读；官方配额（`RetrieveUserQuotaSummary`，需本地 language_server 进程 + CSRF token）本次未接，后续可作为 `quota.rs` 的一路。
+  - Claude/GPT-OSS 在 Antigravity 内是订阅配额而非按量计费，这里的美元数是按公开价目表折算的估算值，与“配额”页数字无关。
+
+## S79 价目多方佐证：6 个新来源 + 投票共识 + 价格页模型搜索 ✅
+
+- **动机**：价目只有 models.dev / LiteLLM / llmpricing.dev 三个来源，按固定优先级取一家（llmpricing > models.dev > LiteLLM），任何一家出错就直接进账。实测这三家互相并不可靠。
+- **渠道调研（全网搜索 + 逐个实测拉取）**
+  | 来源 | 结论 | 说明 |
+  |---|---|---|
+  | OpenRouter `/api/v1/models` | ✅ 采用 | 网关按官方标价透传，365 条；价格为十进制字符串 $/token；`:free`/`:thinking` 等变体去掉后缀会与本体同 id 且价格为 0，故整条跳过带 `:` 的 id |
+  | Vercel AI Gateway `/v1/models` | ✅ 采用 | 同为透传，322 条，含缓存读写价 |
+  | Portkey `Portkey-AI/models`（MIT） | ✅ 采用 | 每个**厂商**一个文件，取模型厂商自家文件（anthropic/openai/google/x-ai/mistral-ai/deepseek/moonshot/z-ai/minimax/cohere/perplexity-ai + dashscope 仅 `qwen*`/`qwq*`），716 行；**单位是 美分/token**（×1e4 → $/1M），已与 gpt-4o=2.5/10 核对；不用 zhipu（CNY 价，与 z-ai 争同一 id） |
+  | Langfuse `default-model-prices.json` | ✅ 采用 | 手工维护，158 条；取 `isDefault` 档（其余是 Fast mode / >200k 加价档）；旧行只有 `total` 混合价，无输入/输出，跳过 |
+  | llm-prices.com（Simon Willison） | ✅ 采用 | 手工维护，138 条；`name` 含 `>`（长上下文加价档，id 形如 `gpt-5.4-272k`）的行跳过 |
+  | Helicone `/api/llm-costs` | ✅ 采用（仅厂商自家行） | 表里列了各家转售商：其 OpenRouter 行含 5.5% 手续费（Opus 4.6 = $5.275），故只读 OPENAI/ANTHROPIC/GOOGLE/MISTRAL/X/DEEPSEEK/COHERE/LLAMA/PERPLEXITY；`equals` 行后写以压过同 id 的 `includes` 家族模式 |
+  | tokencost（AgentOps） | ❌ | 由 LiteLLM 衍生，不是独立佐证 |
+  | pricepertoken.com / Artificial Analysis | ❌ | 无公开无鉴权接口 |
+  | Azure Retail Prices / AWS Pricing List / GCP | ❌ | 计量项（meter）粒度，映射到模型 id 成本高、易错 |
+  | 各厂商官网价格页 | ❌ | 多为脚本渲染，解析脆弱；Portkey 的厂商自家文件是其最接近的替代 |
+- **实测：现有来源互相不一致**（同一模型、input+output 均在 2% 内视为一致；共享模型数 / 一致率）：LiteLLM 与其余来源仅 45–65% 一致（混入 batch / flex / 区域路由价），llmpricing 与 models.dev 83%，Langfuse/llm-prices/OpenRouter/Vercel 之间 92–100%。典型错价：`gpt-5` LiteLLM 0.625/5（其余 8 家 1.25/10）；`gemini-3.5-flash` LiteLLM 0.75/4.5、models.dev/seed 为 0/0（其余 1.5/9）；`gpt-oss-120b` llmpricing 2.92/2.92 而旧规则恰以它为准；内置 seed 里 `gemini-3-1-pro` 为 0/0。
+- **共识算法（`pricing/consensus.rs`）**
+  1. 按**规范 id** 分组：`normalize_key` 后把“数字.数字”的点换成横线（`claude-opus-4.6` ≡ `claude-opus-4-6`）。同一来源在同一组里有多个拼写只算一票（取被更多**其他**来源印证的那个，平票取 id 小者）。
+  2. 0/0 行是“无数据”而非“免费的一票”；内置 seed 只在没有任何在线来源认识该模型时才发言（它本身就是 models.dev 的快照，不是独立证人）。
+  3. 以 6% 容差（输入、输出同时）聚类，票权：portkey/langfuse/llm-prices/openrouter/vercel/models.dev = 1，helicone 0.9，litellm 0.8，llmpricing 0.6（转载 models.dev+OpenRouter）。含 ≥2 家的最重一簇获胜，价格取该簇最可信成员；恰有 2 家且互斥 → 取更可信者；≥3 家互斥 → 按输出价取**中位数**，极端值不可能胜出。
+  4. 缓存读/写价与分档列只从获胜簇成员里补，不采信持异议的来源。结果记录 `agree/total` 与每家立场（✓ 一致 / ✗ 异议 / – 无报价 / · 未计票）。
+  6% 是量出来的分界：区域价（+10–20%）、batch（−50%）、flex 是异议，四舍五入与个别 5% 手续费不是；在 3%–15% 之间扫描，结论几乎不变（分歧数 188→159）。
+- **实测结果**（真实刷新后的账本，3803 个模型）：1440 个全一致、270 个多数一致、281 个有分歧、1812 个单来源、0 未计价。`gpt-5`→1.25/10（8/9，LiteLLM 异议）；`gemini-3.5-flash`→1.5/9（6/7）；`claude-opus-4-6`→5/25（9/9）；`kimi-k2.5`→0.6/3.0（Moonshot 自家，3/6）；`gpt-oss-120b` 无厂商标价，四家各说各话 → 取中位数并标为分歧（1/4）。
+- **对计费的影响（如实）**：新入账事件按共识价计；**已入账事件不重算**（账本只对 `unpriced` 补价）。刷新时顺带把先前未计价的事件补上——在本机账本副本上 `codex-auto-review`（Portkey 收录，$2.5/$15）补价 2074 条 ≈ $89.2。三个原始来源的 `INSERT OR REPLACE` 行为不变。
+- **代价**：一次全量刷新 9 个来源 ≈ 21 次下载（Portkey 12 个文件），实测 10.7 s（后台），比原先多约 2.6 MB；每个下载 30 s 超时，连续 4 次连接失败即判断断网并放弃余下（不再逐个吃满超时）；各来源独立事务，单源失败只丢该源、其旧行保留。共识计算 13 ms/3800 模型，`PriceBook` 的共识部分按 `(账本路径, prices 表指纹)` 缓存，引擎每个扫描 tick 重载价目不再重算。
+- **价格页**：模型**搜索框**（多词 AND、忽略大小写与分隔符，`opus 4.6`≡`OPUS-4-6`，以查询开头的 id 排前，中文输入法拼音分隔符 `'` 不影响匹配）、“仅看有分歧的”开关、“匹配 N / M”计数、“没有匹配的模型”空态；最后一列“来源”改为“佐证”`agree/total` 徽标（橙 = 有分歧，蓝 = 全一致，灰 = 单来源/seed），悬停整行显示各家报价与拼写差异；原先只显示前 400 条，现全量虚拟化浏览（3.8k 行）。搜索框必须受控（框架会记录观察到的文本，未给 `text` 的框会被下一次渲染清空——UIA 实测复现后改正）。同一 id 的各种拼写合并成一行，搜索命中任一拼写。
+- **测试**：consensus 14 个（规范 id、多数胜错价、离群高优先级来源不能胜、容差边界、三家互斥取中位、0 行无票、seed 规则、缓存/分档只取自一致方、垃圾数值不投票、同源双拼写一票、分组合并与显示拼写）；6 个 importer（各含过滤规则与畸形输入）；账本级 3 个（共识胜过优先级 / 各拼写同价 / 页面价 = 计费价）+ 搜索排序；UI 提示文本 1 个；另有 2 个 `--ignored`（`GTT_FEED_DIR`：真实 feed 导入且 Opus 4.6 各家均 $5/$25；`GTT_DB`：真实账本共识报告与耗时）。真实 feed 上原三个 importer 仍与 `Value` 参考实现逐行一致。
+- **验证**：`cargo test --workspace` 全绿（core 119 + 3 ignored、setup 9、ui 14）；`cargo clippy --workspace --all-targets -- -D warnings` 0；CLI `prices --update` 实网 9/9 来源成功；UI 实机（UIA 真实按键，英文键盘布局）逐项：`gpt mini`→61/3802、`opus 4.6`→21、`zzzz`→空态、清空→3802、开关→550 条分歧；英文 + 浅色 + 最小窗口 780 宽截图核对。
+- **未做 / 风险（如实）**：
+  - 全部来源都是第三方；“独立”只是维护者不同——Portkey/Langfuse/llm-prices 手工维护、OpenRouter/Vercel 是网关透传，仍可能一起错，共识只能防单点错价，不能防系统性错。票权与容差来自本次实测，不是理论最优。
+  - 开放权重模型（gpt-oss、deepseek、kimi、glm、qwen）没有唯一“官方价”，各托管商价格本就不同，页面上会显示为分歧；需要时用价格覆写（`price_overrides`）钉死。
+  - 各来源的 id 命名混乱（Bedrock 前缀 `us.anthropic.…-v1`、区域后缀 `-eu`、`ft:` 微调 id 被 `normalize_key` 截成 `ft` 等）是既有问题，未动。
+  - 搜索框保留 WinUI 默认的拼写检查红线（reactor 0.100 未暴露 `IsSpellCheckEnabled`）。
+  - 工作区里 `power::tests::efficiency_mode_toggles_priority_class` 偶发失败（疑为并行测试互相改进程优先级类；出现过一次，之后连跑多次均通过，与本次无关）。
+
 ## S80 安装器 PATH 比较先展开 %VAR%：消除 `%LOCALAPPDATA%\…` 与绝对路径的重复条目 ✅
 
 - **范围**：仅 `crates/setup`——`path_eq` 比较前先做 Windows 环境变量展开；新增 4 个纯字符串单测；`Cargo.toml` 给 `windows` 增加 `Win32_System_Environment` 特性（`Cargo.lock` 无变化）。未动注册表读写流程、备份逻辑与 UI。

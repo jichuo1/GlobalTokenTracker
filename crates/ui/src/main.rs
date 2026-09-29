@@ -23,7 +23,9 @@ mod widgets;
 use config::{REFRESH_OPTIONS, UiConfig};
 use globaltokentracker_core::adapters;
 use globaltokentracker_core::power;
-use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_db_path};
+use globaltokentracker_core::store::{
+    EventRow, PriceRow, SourceHealth, default_db_path, filter_prices,
+};
 use globaltokentracker_core::update::Channel;
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::{Range, day_start_ms};
@@ -114,6 +116,13 @@ pub struct Shell {
     /// Sources / prices tables — independent of `snap`, see `PageData`.
     sources: Option<Vec<SourceHealth>>,
     prices: Option<PriceTable>,
+    /// Price-page search: what was typed, the "disputed only" toggle, and the
+    /// rows they select. The text box is fed `price_query` back on every
+    /// render (it has to be: the framework records the text it observed, so a
+    /// box left without a `text` would be cleared by the very next render).
+    price_query: String,
+    price_disputed: bool,
+    price_shown: Arc<Vec<PriceRow>>,
     /// Per lazy page (`lazy_slot`): a load is running / was asked for again
     /// meanwhile (re-run on completion instead of racing two queries).
     page_loading: [bool; 2],
@@ -271,6 +280,10 @@ pub enum Msg {
     SetOverviewCols(usize),
     /// Table-card ruler: virtualized rows must span this many DIPs.
     SetTableWidth(f64),
+    /// Prices page: the search box text changed.
+    PriceQuery(String),
+    /// Prices page: "only models the sources disagree on" toggled.
+    PriceDisputed(bool),
     /// Post-slide stagger: let the next Overview chart mount.
     CanvasStage,
     /// Flight `id`: new page is mounted — start the compositor animations
@@ -670,7 +683,7 @@ impl Component for Shell {
                 });
             }
         }
-        let theme = Theme::resolve(&config.theme);
+        let theme = Theme::resolve(&config.theme, theme::is_light(&config.window_theme));
         // OTLP receiver: dedicated blocking thread (never the reactor pool).
         // Port busy or GTT_NO_OTEL → file-based sources only.
         let _otel = globaltokentracker_core::otel::spawn(db_path());
@@ -681,6 +694,9 @@ impl Component for Shell {
             snap: None,
             sources: None,
             prices: None,
+            price_query: String::new(),
+            price_disputed: false,
+            price_shown: Arc::default(),
             page_loading: [false; 2],
             page_again: [false; 2],
             prefetched: false,
@@ -1021,7 +1037,9 @@ impl Component for Shell {
             Msg::SetThemeMode(v) => {
                 self.config.window_theme = v.to_string();
                 self.config.save();
-                // `window_visuals` is re-published every view — no extra work.
+                // `window_visuals` is re-published every view; the chart
+                // colors (light/dark sets) are re-resolved here.
+                self.theme = self.resolve_theme();
             }
             Msg::SetAccent(v) => {
                 self.config.theme.accent = if v.is_empty() {
@@ -1029,12 +1047,12 @@ impl Component for Shell {
                 } else {
                     Some(v.to_string())
                 };
-                self.theme = Theme::resolve(&self.config.theme);
+                self.theme = self.resolve_theme();
                 self.config.save();
             }
             Msg::SetFontFamily(v) => {
                 self.config.theme.font_family = if v.is_empty() { None } else { Some(v) };
-                self.theme = Theme::resolve(&self.config.theme);
+                self.theme = self.resolve_theme();
                 self.config.save();
             }
             Msg::SetFontSize(body) => {
@@ -1045,7 +1063,7 @@ impl Component for Shell {
                 t.title_size = Some(body + 10.0);
                 t.h2_size = Some(body + 2.0);
                 t.label_size = Some(body - 1.0);
-                self.theme = Theme::resolve(&self.config.theme);
+                self.theme = self.resolve_theme();
                 self.config.save();
             }
             Msg::SetLang(v) => {
@@ -1233,6 +1251,19 @@ impl Component for Shell {
             // observer already dedupes, so landing here always rebuilds.
             Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, 4),
             Msg::SetTableWidth(w) => self.table_w = w,
+            Msg::PriceQuery(q) => {
+                self.price_query = q;
+                self.refresh_price_view();
+                diag!(
+                    "[prices] query {:?} → {} rows",
+                    self.price_query,
+                    self.price_shown.len()
+                );
+            }
+            Msg::PriceDisputed(on) => {
+                self.price_disputed = on;
+                self.refresh_price_view();
+            }
             Msg::CanvasStage => {
                 // Not before the animation has started: the incoming page is
                 // still hidden and its visuals unresolved.
@@ -1320,7 +1351,10 @@ impl Component for Shell {
                 }
                 match res {
                     Ok(PageData::Sources(rows)) => self.sources = Some(rows),
-                    Ok(PageData::Prices(t)) => self.prices = Some(t),
+                    Ok(PageData::Prices(t)) => {
+                        self.prices = Some(t);
+                        self.refresh_price_view();
+                    }
                     Err(e) => {
                         diag!("[page] {page:?} load failed: {e}");
                     }
@@ -1401,13 +1435,10 @@ impl Component for Shell {
                 self.prices_refreshing = false;
                 match res {
                     Ok(r) => {
-                        diag!(
-                            "[prices] synced: dev={} litellm={} llmpricing={} repriced={}",
-                            r.models_dev,
-                            r.litellm,
-                            r.llmpricing,
-                            r.repriced
-                        );
+                        diag!("[prices] synced: {} repriced={}", r.summary(), r.repriced);
+                        for f in &r.failed {
+                            diag!("[prices] feed failed: {f}");
+                        }
                         // A successful sync rewrites the price table and its
                         // sync stamp; repriced>0 additionally changes
                         // visible USD.
@@ -1673,6 +1704,14 @@ impl Component for Shell {
 }
 
 impl Shell {
+    /// Theme tokens for the current config and window theme.
+    fn resolve_theme(&self) -> Theme {
+        Theme::resolve(
+            &self.config.theme,
+            theme::is_light(&self.config.window_theme),
+        )
+    }
+
     /// Programmatic quit — `allow_next_close` lets the close we requested
     /// pass our own WM_CLOSE swallow (without it the subclass eats it).
     fn quit_now(&mut self, context: &ComponentContext<Self>) {
@@ -1725,6 +1764,11 @@ impl Shell {
                 &TableArgs {
                     width: self.table_w,
                     ruler: &self.table_rulers[1],
+                },
+                &PriceSearch {
+                    query: &self.price_query,
+                    disputed: self.price_disputed,
+                    shown: &self.price_shown,
                 },
             ),
             Page::Settings => settings_page(&self.config, &self.update, self.update_error.as_deref(), theme, context),
@@ -1822,6 +1866,19 @@ impl Shell {
         self.layer_hosts[old].reset();
         self.block_hosts[old].iter().for_each(LayerHost::reset);
         self.rest_idx = new;
+    }
+
+    /// Recompute the rows the prices page shows from the search state.
+    fn refresh_price_view(&mut self) {
+        self.price_shown = match &self.prices {
+            None => Arc::default(),
+            Some(t) if self.price_query.trim().is_empty() && !self.price_disputed => t.rows.clone(),
+            Some(t) => Arc::new(filter_prices(
+                &t.rows,
+                &self.price_query,
+                self.price_disputed,
+            )),
+        };
     }
 
     /// One frame's wait before checking the new page's visuals.

@@ -134,9 +134,13 @@ fn main() -> Result<()> {
             if update {
                 let r = pricing::refresh(&engine.store)?;
                 println!(
-                    "synced: models.dev {} rows, litellm {} rows, llmpricing {} rows; repriced {} unpriced events",
-                    r.models_dev, r.litellm, r.llmpricing, r.repriced
+                    "synced: {}; repriced {} unpriced events",
+                    r.summary(),
+                    r.repriced
                 );
+                for f in &r.failed {
+                    eprintln!("  failed: {f}");
+                }
             }
         }
         Cmd::Quota => {

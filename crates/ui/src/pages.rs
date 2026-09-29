@@ -10,7 +10,8 @@ use crate::updater::UpdateState;
 use crate::widgets as w;
 use crate::{DETAIL_PAGE_SIZE, MenuKind, Msg, PriceTable, Shell, Snapshot};
 use crate::{t, tf};
-use globaltokentracker_core::store::EventRow;
+use globaltokentracker_core::pricing::consensus::Stance;
+use globaltokentracker_core::store::{EventRow, PriceRow};
 use globaltokentracker_core::update::Release;
 use globaltokentracker_core::viewmodel::Range;
 use globaltokentracker_core::viewmodel::{app_display, fmt};
@@ -59,35 +60,141 @@ fn reflow_grid(theme: &Theme, items: Vec<View>, cols: usize) -> View {
         }))
 }
 
-/// Quota row where the percent earns a tone badge (>=50% only — sparingly).
-fn quota_row_badged(
+/// Rows the overview quota card lists before pointing at the Quota page.
+const QUOTA_STRIP_ROWS: usize = 6;
+
+/// "已过期" for a window whose reset time has passed, "重置 3h12m" otherwise,
+/// nothing when the tool reports no reset time.
+fn reset_text(resets_at: Option<i64>) -> String {
+    let until = fmt::until(resets_at);
+    match resets_at {
+        None => String::new(),
+        Some(_) if until == "已过期" => tr("已过期").to_string(),
+        Some(_) => tf!("重置 {}", tr(&until)),
+    }
+}
+
+/// Right-aligned, subtle cell text.
+fn side_text(theme: &Theme, text: String) -> View {
+    TextBlock::new()
+        .text(text)
+        .font_size(theme.body_size)
+        .foreground(theme.subtle)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into()
+}
+
+/// One row of the overview quota card: "Tool · window" (+ account pill), the
+/// percent (a tone pill from 50% — sparingly) or credit balance, and when the
+/// window resets. Value and reset sit in fixed columns so they line up down
+/// the card.
+fn quota_strip_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> View {
+    let mut name: Vec<View> = vec![
+        TextBlock::new()
+            .text(tf!(
+                "{} · {}",
+                app_display(&q.app),
+                tr(globaltokentracker_core::viewmodel::quota_kind_label(
+                    &q.window_kind
+                ))
+            ))
+            .font_size(theme.body_size)
+            .text_trimming(TextTrimming::CharacterEllipsis)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+    ];
+    if let Some(acc) = &q.account {
+        name.push(w::badge(theme, acc.clone(), w::BadgeTone::Muted));
+    }
+    let value: View = match (q.window_kind.as_str(), q.used, q.used_percent) {
+        ("credits", Some(u), _) => side_text(theme, tf!("余额 {}", i18n::compact(u as u64))),
+        (_, _, Some(p)) if p >= 50.0 => Border::new()
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .vertical_alignment(VerticalAlignment::Center)
+            .content(w::badge(
+                theme,
+                format!("{p:.0}%"),
+                if p >= 80.0 {
+                    w::BadgeTone::Danger
+                } else {
+                    w::BadgeTone::Warn
+                },
+            )),
+        (_, _, Some(p)) => side_text(theme, format!("{p:.0}%")),
+        _ => side_text(theme, "—".into()),
+    };
+    bar_row(
+        theme,
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .keyed_children(keyed(name)),
+        260.0,
+        if q.window_kind == "credits" {
+            None
+        } else {
+            q.used_percent
+        },
+        vec![
+            (64.0, value),
+            (108.0, side_text(theme, reset_text(q.resets_at))),
+        ],
+    )
+}
+
+/// List row with a share bar between the name and the figures: the bar makes
+/// the ranking readable at a glance and fills the gap that used to separate a
+/// short name from its numbers on wide windows.
+fn usage_row(theme: &Theme, left: String, share_pct: f64, right: String) -> View {
+    bar_row(
+        theme,
+        TextBlock::new()
+            .text(left)
+            .font_size(theme.body_size)
+            .text_trimming(TextTrimming::CharacterEllipsis)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+        200.0,
+        Some(share_pct),
+        vec![(210.0, side_text(theme, right))],
+    )
+}
+
+/// Name | bar | fixed-width figure columns. Every row of a list passes the same
+/// widths, so the bars start and end on the same x down the whole card (Auto
+/// columns would size per row and leave the bars ragged).
+fn bar_row(
     theme: &Theme,
-    label: &str,
-    pct: f64,
-    tone: w::BadgeTone,
-    reset: String,
+    name: View,
+    name_w: f64,
+    bar_pct: Option<f64>,
+    figures: Vec<(f64, View)>,
 ) -> View {
-    Grid::new()
-        .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
-        .column_spacing(10.0)
-        .children([
-            cell(
-                0,
-                TextBlock::new()
-                    .text(label)
-                    .font_size(theme.body_size)
-                    .into(),
-            ),
-            cell(1, w::badge(theme, format!("{pct:.0}%"), tone)),
-            cell(
-                2,
-                TextBlock::new()
-                    .text(format!("reset {reset}"))
-                    .font_size(theme.body_size)
-                    .foreground(theme.subtle)
-                    .into(),
-            ),
-        ])
+    // Widths are for the default 12pt body; the figures grow with the font.
+    let k = font_scale(theme);
+    let mut cols = vec![GridLength::Pixel(name_w * k), GridLength::STAR];
+    cols.extend(figures.iter().map(|(w, _)| GridLength::Pixel(*w * k)));
+    let mut cells: Vec<View> = vec![cell(0, name)];
+    if let Some(p) = bar_pct {
+        cells.push(cell(
+            1,
+            ProgressBar::new()
+                .value(p)
+                .maximum(100.0)
+                .minimum(0.0)
+                .margin(Thickness::xy(16.0, 0.0))
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        ));
+    }
+    for (i, (_, v)) in figures.into_iter().enumerate() {
+        cells.push(cell(2 + i as i32, v));
+    }
+    w::ruled_row(
+        theme,
+        Grid::new().columns(cols).keyed_children(keyed(cells)),
+    )
 }
 
 fn vstack(spacing: f64, children: Vec<View>) -> View {
@@ -416,7 +523,7 @@ fn overview_widget(
                             .collect(),
                         4,
                     ),
-                    |v| fmt::tokens_compact(v as u64),
+                    |v| i18n::compact(v as u64),
                 ),
                 (
                     tf!("{} · Tokens", tr("按模型")),
@@ -427,7 +534,7 @@ fn overview_widget(
                             .collect(),
                         4,
                     ),
-                    |v| fmt::tokens_compact(v as u64),
+                    |v| i18n::compact(v as u64),
                 ),
             ];
             let mut cells: Vec<View> = Vec::with_capacity(columns.len());
@@ -456,25 +563,29 @@ fn overview_widget(
                     .orientation(Orientation::Vertical)
                     .spacing(10.0)
                     .children((
-                        w::section_header(theme, Symbol::Target, &tf!("{rl} · 占比分布", rl)),
+                        w::section_header(theme, Symbol::AllApps, &tf!("{rl} · 占比分布", rl)),
                         reflow_grid(theme, cells, args.cols),
                     )),
             ))
         }
         "apps" => {
+            let tokens = |a: &globaltokentracker_core::store::AppSummary| {
+                a.input_tokens + a.output_tokens + a.cache_read_tokens + a.cache_write_tokens
+            };
+            let top = vm.by_app.iter().take(8).map(tokens).max().unwrap_or(0);
             let mut rows: Vec<View> = Vec::new();
             for a in vm.by_app.iter().take(8) {
-                rows.push(w::key_value_row(
+                rows.push(usage_row(
                     theme,
-                    tf!("{}  ·  {} 事件", a.app, a.events),
+                    tf!("{}  ·  {} 事件", app_display(&a.app), a.events),
+                    if top > 0 {
+                        tokens(a) as f64 / top as f64 * 100.0
+                    } else {
+                        0.0
+                    },
                     tf!(
                         "{} tok  ·  {}",
-                        fmt::tokens_exact(
-                            a.input_tokens
-                                + a.output_tokens
-                                + a.cache_read_tokens
-                                + a.cache_write_tokens
-                        ),
+                        fmt::tokens_exact(tokens(a)),
                         fmt::usd(a.cost_usd)
                     ),
                 ));
@@ -500,36 +611,37 @@ fn overview_widget(
             ))
         }
         "quotas" => {
-            let mut rows: Vec<View> = Vec::new();
-            for q in vm.quotas.iter().take(6) {
-                let label = tf!("{} · {}", q.app, tr(&q.window_kind));
-                match q.used_percent {
-                    Some(p) if p >= 50.0 => {
-                        let tone = if p >= 80.0 {
-                            w::BadgeTone::Danger
-                        } else {
-                            w::BadgeTone::Warn
-                        };
-                        rows.push(quota_row_badged(
-                            theme,
-                            &label,
-                            p,
-                            tone,
-                            fmt::until(q.resets_at),
-                        ));
-                    }
-                    _ => rows.push(w::key_value_row(
-                        theme,
-                        label,
-                        tf!(
-                            "{}  ·  reset {}",
-                            q.used_percent
-                                .map(|p| format!("{p:.0}%"))
-                                .unwrap_or_else(|| "—".into()),
-                            tr(&fmt::until(q.resets_at))
-                        ),
-                    )),
-                }
+            // Most pressing first: windows still running before expired ones,
+            // then by used percent (unknown last). Stable, so ties keep the
+            // store's app/window order.
+            let now = globaltokentracker_core::store::now_ms();
+            let live =
+                |q: &globaltokentracker_core::store::QuotaRow| q.resets_at.is_none_or(|t| t >= now);
+            let mut ranked: Vec<&globaltokentracker_core::store::QuotaRow> =
+                vm.quotas.iter().collect();
+            ranked.sort_by(|a, b| {
+                live(b).cmp(&live(a)).then_with(|| {
+                    b.used_percent
+                        .partial_cmp(&a.used_percent)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
+            let mut rows: Vec<View> = ranked
+                .iter()
+                .take(QUOTA_STRIP_ROWS)
+                .map(|q| quota_strip_row(theme, q))
+                .collect();
+            if ranked.len() > QUOTA_STRIP_ROWS {
+                rows.push(
+                    TextBlock::new()
+                        .text(tf!(
+                            "另有 {} 项 · 见配额页",
+                            ranked.len() - QUOTA_STRIP_ROWS
+                        ))
+                        .font_size(theme.label_size)
+                        .foreground(theme.subtle)
+                        .into(),
+                );
             }
             if rows.is_empty() {
                 rows.push(
@@ -576,19 +688,54 @@ fn overview_widget(
     }
 }
 
-/// Chrome-strip geometry — labels are width-pinned so the overlay panel can
-/// sit under its button without measuring. Strip order: 工具 → 模型 → 刷新
-/// (data filters first, the cadence setting last).
+/// Chrome-strip geometry — labels and pills are width-pinned so the overlay
+/// panel can sit under its button without measuring. Strip order: 工具 → 模型
+/// → 刷新 (data filters first, the cadence setting last).
 const CHROME_LEFT: f64 = 24.0;
-const LABEL_W: f64 = 28.0;
 const GROUP_GAP: f64 = 8.0;
 const PICKER_GAP: f64 = 20.0;
-const TOOLS_BTN_W: f64 = 104.0;
-const MODELS_BTN_W: f64 = 104.0;
-const REFRESH_BTN_W: f64 = 120.0;
-const TOOLS_PANEL_X: f64 = CHROME_LEFT + LABEL_W + GROUP_GAP;
-const MODELS_PANEL_X: f64 = TOOLS_PANEL_X + TOOLS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
-const REFRESH_PANEL_X: f64 = MODELS_PANEL_X + MODELS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
+
+/// Pinned widths + the panel x under each pill. They follow the language and
+/// the body font: "Refresh"/"Models" and "12/15 selected" are wider than
+/// 刷新/模型 and 已选 12/15, and a larger font widens both — fixed 28/104/120
+/// clipped the labels to "Refres" and "Mode".
+struct ChromeGeom {
+    label_w: f64,
+    tools_w: f64,
+    models_w: f64,
+    refresh_w: f64,
+    tools_x: f64,
+    models_x: f64,
+    refresh_x: f64,
+}
+
+fn chrome_geom(theme: &Theme) -> ChromeGeom {
+    let en = i18n::lang() == i18n::Lang::En;
+    // Design widths are for the default 12pt body; only ever grow from there.
+    let k = (theme.body_size / 12.0).max(1.0);
+    let label_w = if en {
+        (theme.label_size * 4.4).ceil()
+    } else {
+        (theme.label_size * 2.0 + 6.0).ceil()
+    };
+    let (pill_w, refresh_w) = if en {
+        (140.0 * k, 168.0 * k)
+    } else {
+        (104.0 * k, 120.0 * k)
+    };
+    let tools_x = CHROME_LEFT + label_w + GROUP_GAP;
+    let models_x = tools_x + pill_w + PICKER_GAP + label_w + GROUP_GAP;
+    let refresh_x = models_x + pill_w + PICKER_GAP + label_w + GROUP_GAP;
+    ChromeGeom {
+        label_w,
+        tools_w: pill_w,
+        models_w: pill_w,
+        refresh_w,
+        tools_x,
+        models_x,
+        refresh_x,
+    }
+}
 
 /// Filter-strip state bundle — keeps `filter_chrome`/`dropdown_overlay`
 /// signatures tidy as more pickers join.
@@ -619,6 +766,7 @@ pub fn filter_chrome(
     state: &ChromeState,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
+    let g = chrome_geom(theme);
     StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(PICKER_GAP)
@@ -627,7 +775,7 @@ pub fn filter_chrome(
             picker_button(
                 theme,
                 check_summary(state.apps, s.vm.apps.len()),
-                TOOLS_BTN_W,
+                (g.label_w, g.tools_w),
                 state.open == Some(MenuKind::Tools),
                 MenuKind::Tools,
                 ctx,
@@ -635,7 +783,7 @@ pub fn filter_chrome(
             picker_button(
                 theme,
                 check_summary(state.models, s.vm.models.len()),
-                MODELS_BTN_W,
+                (g.label_w, g.models_w),
                 state.open == Some(MenuKind::Models),
                 MenuKind::Models,
                 ctx,
@@ -643,7 +791,7 @@ pub fn filter_chrome(
             picker_button(
                 theme,
                 tr(refresh_label(state.refresh_secs)).to_string(),
-                REFRESH_BTN_W,
+                (g.label_w, g.refresh_w),
                 state.open == Some(MenuKind::Refresh),
                 MenuKind::Refresh,
                 ctx,
@@ -656,7 +804,7 @@ pub fn filter_chrome(
 fn picker_button(
     theme: &Theme,
     value: String,
-    width: f64,
+    (label_w, width): (f64, f64),
     open: bool,
     kind: MenuKind,
     ctx: &mut ViewContext<Shell>,
@@ -673,7 +821,7 @@ fn picker_button(
             // The label sits above the click-away backdrop, so it dismisses an
             // open picker itself (transparent fill keeps it hit-testable).
             Border::new()
-                .width(LABEL_W)
+                .width(label_w)
                 .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
                 .on_pointer_pressed(ctx.callback(|_: PointerEventInfo| Msg::CloseMenu))
                 .content(
@@ -845,14 +993,12 @@ pub fn dropdown_overlay(
     open: MenuKind,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
+    let g = chrome_geom(theme);
     let (x, items) = match open {
-        MenuKind::Tools => (TOOLS_PANEL_X, tools_menu_items(s, theme, state.apps, ctx)),
-        MenuKind::Models => (
-            MODELS_PANEL_X,
-            models_menu_items(s, theme, state.models, ctx),
-        ),
+        MenuKind::Tools => (g.tools_x, tools_menu_items(s, theme, state.apps, ctx)),
+        MenuKind::Models => (g.models_x, models_menu_items(s, theme, state.models, ctx)),
         MenuKind::Refresh => (
-            REFRESH_PANEL_X,
+            g.refresh_x,
             refresh_menu_items(theme, state.refresh_secs, ctx),
         ),
     };
@@ -1051,35 +1197,94 @@ pub fn overview_page(
 
 // ---------------------------------------------------------------- detail
 
-/// Shared column shape for header + every data row — identical widths on each
-/// per-row Grid keep columns aligned without one giant 200-row measure pass.
-const DETAIL_COLS: [GridLength; 8] = [
-    GridLength::Pixel(90.0), // 时间
-    GridLength::Pixel(96.0), // 工具
-    GridLength::STAR,        // 模型
-    GridLength::Pixel(88.0), // 输入
-    GridLength::Pixel(88.0), // 输出
-    GridLength::Pixel(88.0), // 缓存
-    GridLength::Pixel(92.0), // 成本
-    GridLength::Pixel(64.0), // 时长
-];
-/// Narrow plan: the (subtle) cache column goes and the rest tighten up, so the
-/// model column keeps room instead of being squeezed to nothing.
-const DETAIL_COLS_COMPACT: [GridLength; 7] = [
-    GridLength::Pixel(84.0), // 时间
-    GridLength::Pixel(88.0), // 工具
-    GridLength::STAR,        // 模型
-    GridLength::Pixel(80.0), // 输入
-    GridLength::Pixel(80.0), // 输出
-    GridLength::Pixel(88.0), // 成本
-    GridLength::Pixel(60.0), // 时长
-];
-/// Measured row width from which every detail column fits with a model column
-/// of ≥ ~150 DIPs (626 fixed + padding). `0` = not measured yet → full plan.
-const DETAIL_FULL_MIN: f64 = 780.0;
+/// One column layout of a virtualized table: (logical column, DIP width at the
+/// design 12pt body size — `None` = the star column that takes the rest).
+/// Header and every row build from the same plan, so identical widths on each
+/// per-row Grid keep the columns aligned without one giant 200-row measure.
+type Plan = &'static [(usize, Option<f64>)];
 
-fn detail_compact(width: f64) -> bool {
-    width > 0.0 && width < DETAIL_FULL_MIN
+/// Horizontal padding inside a table row (10 + 10).
+const ROW_PAD: f64 = 20.0;
+/// What the star (model) column must keep before a plan counts as fitting.
+const STAR_MIN: f64 = 140.0;
+
+/// Fixed columns hold numbers, which grow with the body font.
+fn font_scale(theme: &Theme) -> f64 {
+    (theme.body_size / 12.0).max(1.0)
+}
+
+/// The widest plan whose fixed columns leave `STAR_MIN` for the star column at
+/// this row width and font scale; the narrowest when none does. A row width
+/// of 0 (ruler not measured yet) takes the widest.
+fn pick_plan(plans: &[Plan], width: f64, k: f64) -> Plan {
+    if width <= 0.0 {
+        return plans[0];
+    }
+    plans
+        .iter()
+        .copied()
+        .find(|p| {
+            let fixed: f64 = p.iter().filter_map(|(_, w)| *w).sum();
+            fixed * k + ROW_PAD + STAR_MIN <= width
+        })
+        .unwrap_or(plans[plans.len() - 1])
+}
+
+/// Grid columns of a plan plus the physical index of each of the table's `N`
+/// logical columns (`None` = left out by this plan).
+fn plan_layout<const N: usize>(plan: Plan, k: f64) -> (Vec<GridLength>, [Option<i32>; N]) {
+    let mut at = [None; N];
+    let mut cols = Vec::with_capacity(plan.len());
+    for (i, (logical, w)) in plan.iter().enumerate() {
+        at[*logical] = Some(i as i32);
+        cols.push(w.map_or(GridLength::STAR, |v| GridLength::Pixel(v * k)));
+    }
+    (cols, at)
+}
+
+/// Detail plans over the logical columns time, tool, model, input, output,
+/// cache, cost, duration — as the window narrows the (subtle) cache column
+/// goes first, then the duration, then the tool.
+const DETAIL_PLANS: [Plan; 4] = [
+    &[
+        (0, Some(90.0)),
+        (1, Some(96.0)),
+        (2, None),
+        (3, Some(88.0)),
+        (4, Some(88.0)),
+        (5, Some(88.0)),
+        (6, Some(92.0)),
+        (7, Some(64.0)),
+    ],
+    &[
+        (0, Some(84.0)),
+        (1, Some(88.0)),
+        (2, None),
+        (3, Some(80.0)),
+        (4, Some(80.0)),
+        (6, Some(88.0)),
+        (7, Some(60.0)),
+    ],
+    &[
+        (0, Some(84.0)),
+        (1, Some(88.0)),
+        (2, None),
+        (3, Some(80.0)),
+        (4, Some(80.0)),
+        (6, Some(88.0)),
+    ],
+    &[
+        (0, Some(84.0)),
+        (2, None),
+        (3, Some(80.0)),
+        (4, Some(80.0)),
+        (6, Some(88.0)),
+    ],
+];
+
+fn detail_layout(theme: &Theme, width: f64) -> (Vec<GridLength>, [Option<i32>; 8]) {
+    let k = font_scale(theme);
+    plan_layout(pick_plan(&DETAIL_PLANS, width, k), k)
 }
 
 fn dcell(col: i32, v: View) -> View {
@@ -1100,43 +1305,8 @@ fn dtext(theme: &Theme, text: String, right: bool) -> TextBlock {
     }
 }
 
-/// Grid columns + the physical index of each logical detail column
-/// (time, tool, model, in, out, cache, cost, duration) for a row width;
-/// `None` = hidden in this plan.
-fn detail_layout(width: f64) -> (Vec<GridLength>, [Option<i32>; 8]) {
-    if detail_compact(width) {
-        (
-            DETAIL_COLS_COMPACT.to_vec(),
-            [
-                Some(0),
-                Some(1),
-                Some(2),
-                Some(3),
-                Some(4),
-                None,
-                Some(5),
-                Some(6),
-            ],
-        )
-    } else {
-        (
-            DETAIL_COLS.to_vec(),
-            [
-                Some(0),
-                Some(1),
-                Some(2),
-                Some(3),
-                Some(4),
-                Some(5),
-                Some(6),
-                Some(7),
-            ],
-        )
-    }
-}
-
 fn detail_header(theme: &Theme, width: f64) -> View {
-    let (cols, at) = detail_layout(width);
+    let (cols, at) = detail_layout(theme, width);
     let h = |text: &str, logical: usize, right: bool| -> Option<View> {
         at[logical].map(|col| {
             dcell(
@@ -1170,7 +1340,7 @@ fn detail_header(theme: &Theme, width: f64) -> View {
 }
 
 fn event_row(theme: &Theme, r: &EventRow, zebra: bool, width: f64) -> View {
-    let (cols, at) = detail_layout(width);
+    let (cols, at) = detail_layout(theme, width);
     let model = r
         .model
         .clone()
@@ -1410,6 +1580,7 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
     if let Some(acc) = &q.account {
         title.push(w::badge(theme, acc.clone(), w::BadgeTone::Muted));
     }
+    let credits = q.window_kind == "credits";
     let mut head: Vec<View> = vec![cell(
         0,
         StackPanel::new()
@@ -1417,7 +1588,21 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
             .spacing(8.0)
             .keyed_children(keyed(title)),
     )];
-    if let Some(pct) = q.used_percent {
+    // Right-hand pill: the balance for credit rows (they have no percent),
+    // the used percent otherwise.
+    if credits {
+        if let Some(u) = q.used {
+            head.push(cell(
+                1,
+                w::badge(
+                    theme,
+                    tf!("余额 {}", i18n::compact(u as u64)),
+                    w::BadgeTone::Muted,
+                )
+                .tooltip(tf!("余额 {}", fmt::tokens_exact(u as u64))),
+            ));
+        }
+    } else if let Some(pct) = q.used_percent {
         head.push(cell(
             1,
             w::badge(
@@ -1447,14 +1632,11 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
                 .into(),
         );
     }
-    // `credits` rows carry remaining balance in `used` (see quota.rs) — never
-    // dress it as "已用". Compact 万/亿 keeps the meta line scannable; exact
-    // counts go on the tooltip for reconciliation.
-    let (usage, usage_exact) = if q.window_kind == "credits" {
-        (
-            q.used.map(|u| tf!("余额 {}", i18n::compact(u as u64))),
-            q.used.map(|u| tf!("余额 {}", fmt::tokens_exact(u as u64))),
-        )
+    // `credits` rows carry remaining balance in `used` (see quota.rs) — it is
+    // the pill above, never an "已用" figure. Compact 万/亿 keeps the meta line
+    // scannable; exact counts go on the tooltip for reconciliation.
+    let (usage, usage_exact) = if credits {
+        (None, None)
     } else {
         let pair = |(u, l): (f64, f64)| {
             (
@@ -1486,16 +1668,18 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
             (None, None) => (None, None),
         }
     };
-    let mut meta = tf!(
-        "重置 {} · 采集 {}",
-        tr(&fmt::until(q.resets_at)),
-        fmt::ts_short(Some(q.captured_at))
-    );
-    if let Some(u) = usage {
-        meta = tf!("{u} · {meta}", u, meta);
+    // usage · reset · collected — a part a tool doesn't report is left out
+    // instead of printing "重置 —".
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    parts.extend(usage);
+    let reset = reset_text(q.resets_at);
+    if !reset.is_empty() {
+        parts.push(reset);
     }
+    parts.push(tf!("采集 {}", fmt::ts_short(Some(q.captured_at))));
     let mut meta_v: View = TextBlock::new()
-        .text(meta)
+        .text(parts.join(" · "))
+        .text_wrapping(TextWrapping::Wrap)
         .font_size(theme.label_size)
         .foreground(theme.subtle)
         .into();
@@ -1572,7 +1756,14 @@ pub fn quota_page(
             );
         let mut inner: Vec<View> = vec![header_btn];
         if open {
-            inner.extend(g.rows.iter().map(|q| quota_row(theme, q)));
+            // A hairline between windows keeps rows with and without a bar
+            // reading as separate entries.
+            for (i, q) in g.rows.iter().enumerate() {
+                if i > 0 && theme.line_separators {
+                    inner.push(Border::new().height(1.0).background(theme.divider).into());
+                }
+                inner.push(quota_row(theme, q));
+            }
         }
         list.push(w::card(theme, vstack(10.0, inner)));
     }
@@ -1625,7 +1816,7 @@ pub fn sources_page(
                                     .children((
                                         SymbolIcon::new().symbol(Symbol::World),
                                         TextBlock::new()
-                                            .text(h.source.clone())
+                                            .text(app_display(&h.source).to_string())
                                             .font_weight(FontWeight::SEMI_BOLD)
                                             .vertical_alignment(VerticalAlignment::Center),
                                     )),
@@ -1672,34 +1863,40 @@ pub fn sources_page(
 // ---------------------------------------------------------------- prices
 
 // -------------------------------------------------------------- prices
-// Column grid: model | input | output | cache-read | cache-write | source.
-const PRICE_COLS: [GridLength; 6] = [
-    GridLength::STAR,
-    GridLength::Pixel(96.0),
-    GridLength::Pixel(96.0),
-    GridLength::Pixel(96.0),
-    GridLength::Pixel(96.0),
-    GridLength::Pixel(110.0),
+// Logical columns: model | input | output | cache-read | cache-write | source.
+// Narrower windows drop cache-write (mostly 0), then cache-read.
+const PRICE_PLANS: [Plan; 4] = [
+    &[
+        (0, None),
+        (1, Some(96.0)),
+        (2, Some(96.0)),
+        (3, Some(96.0)),
+        (4, Some(96.0)),
+        (5, Some(110.0)),
+    ],
+    &[
+        (0, None),
+        (1, Some(76.0)),
+        (2, Some(76.0)),
+        (3, Some(76.0)),
+        (4, Some(76.0)),
+        (5, Some(96.0)),
+    ],
+    &[
+        (0, None),
+        (1, Some(76.0)),
+        (2, Some(76.0)),
+        (3, Some(76.0)),
+        (5, Some(96.0)),
+    ],
+    &[(0, None), (1, Some(76.0)), (2, Some(76.0)), (5, Some(96.0))],
 ];
-/// Same six columns, tighter — for rows narrower than `PRICE_FULL_MIN`.
-const PRICE_COLS_COMPACT: [GridLength; 6] = [
-    GridLength::STAR,
-    GridLength::Pixel(76.0),
-    GridLength::Pixel(76.0),
-    GridLength::Pixel(76.0),
-    GridLength::Pixel(76.0),
-    GridLength::Pixel(96.0),
-];
-/// Row width from which the full plan leaves the model column ≥ ~150 DIPs.
-const PRICE_FULL_MIN: f64 = 680.0;
 
-fn price_cols(width: f64) -> [GridLength; 6] {
-    if width > 0.0 && width < PRICE_FULL_MIN {
-        PRICE_COLS_COMPACT
-    } else {
-        PRICE_COLS
-    }
+fn price_layout(theme: &Theme, width: f64) -> (Vec<GridLength>, [Option<i32>; 6]) {
+    let k = font_scale(theme);
+    plan_layout(pick_plan(&PRICE_PLANS, width, k), k)
 }
+
 /// $/1M values vary from 0.0001 to thousands — trim, don't pad.
 fn price_num(v: f64) -> String {
     let s = format!("{v:.4}");
@@ -1712,70 +1909,124 @@ fn price_num(v: f64) -> String {
 }
 
 fn price_head(theme: &Theme, width: f64) -> View {
-    let head_cell = |i: i32, h: &str| {
-        dcell(
-            i,
-            dtext(theme, h.into(), i > 0)
-                .font_size(theme.label_size)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .foreground(theme.subtle)
-                .into(),
-        )
+    let (cols, at) = price_layout(theme, width);
+    let head_cell = |logical: usize, h: &str| -> Option<View> {
+        at[logical].map(|i| {
+            let cell = dcell(
+                i,
+                dtext(theme, h.into(), logical > 0)
+                    .font_size(theme.label_size)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .foreground(theme.subtle)
+                    .into(),
+            );
+            if logical == 5 {
+                cell.tooltip(t!(
+                    "与所示价格一致的来源数 / 给出报价的来源总数。橙色 = 来源之间有分歧；悬停行查看各家报价。"
+                ))
+            } else {
+                cell
+            }
+        })
     };
-    let cells: [View; 6] = [
+    let cells: Vec<View> = [
         head_cell(0, t!("模型")),
         head_cell(1, t!("输入")),
         head_cell(2, t!("输出")),
         head_cell(3, t!("缓存读")),
         head_cell(4, t!("缓存写")),
-        head_cell(5, t!("来源")),
-    ];
+        head_cell(5, t!("佐证")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Border::new()
         .padding(Thickness::xy(10.0, 6.0))
         .border_brush(theme.divider)
         .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-        .content(Grid::new().columns(price_cols(width)).children(cells))
+        .content(Grid::new().columns(cols).keyed_children(keyed(cells)))
 }
 
-fn price_row(
-    theme: &Theme,
-    p: &globaltokentracker_core::store::PriceRow,
-    zebra: bool,
-    width: f64,
-) -> View {
-    let tone = if p.source == "seed" {
+/// The "佐证" cell: how many sources back the shown price, out of those that
+/// quoted one. Orange = at least one source says something else.
+fn corroboration(theme: &Theme, p: &PriceRow) -> View {
+    let tone = if p.total == 0 || p.source == "seed" || p.total == 1 {
         w::BadgeTone::Muted
+    } else if p.disputed() {
+        w::BadgeTone::Warn
     } else {
         w::BadgeTone::Accent
     };
-    let cells: [View; 6] = [
-        dcell(
-            0,
-            dtext(theme, p.model.clone(), false).into(),
-        ),
-        dcell(1, dtext(theme, price_num(p.input), true).into()),
-        dcell(2, dtext(theme, price_num(p.output), true).into()),
-        dcell(
+    let text = if p.total == 0 {
+        "—".to_string()
+    } else {
+        format!("{}/{}", p.agree, p.total)
+    };
+    Border::new()
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .content(w::badge(theme, text, tone))
+}
+
+/// Hover text of a price row: the chosen price and every source's quote
+/// (✓ backs it, ✗ says otherwise, – has no price, · is not counted).
+fn price_tooltip(p: &PriceRow) -> String {
+    let money = |i: f64, o: f64| format!("{} / {}", price_num(i), price_num(o));
+    let mut lines = vec![p.model.clone()];
+    let mut head = money(p.input, p.output);
+    if p.cache_read > 0.0 {
+        head.push_str(&tf!(" · 缓存读 {}", price_num(p.cache_read)));
+    }
+    if p.cache_write > 0.0 {
+        head.push_str(&tf!(" · 缓存写 {}", price_num(p.cache_write)));
+    }
+    lines.push(head);
+    if p.total > 0 {
+        lines.push(tf!("采信 {}（{}/{} 家一致）", p.source, p.agree, p.total));
+    }
+    lines.push(String::new());
+    for q in &p.quotes {
+        let (mark, detail) = match q.stance {
+            Stance::Agrees => ("✓", money(q.input, q.output)),
+            Stance::Dissents => ("✗", money(q.input, q.output)),
+            Stance::NoData => ("–", t!("无报价").to_string()),
+            Stance::Ignored => ("·", tf!("{}（未计票）", money(q.input, q.output))),
+        };
+        let alias = if q.key == p.model {
+            String::new()
+        } else {
+            format!("  [{}]", q.key)
+        };
+        lines.push(format!("{mark} {:<11} {detail}{alias}", q.source));
+    }
+    lines.join("\n")
+}
+
+fn price_row(theme: &Theme, p: &PriceRow, zebra: bool, width: f64) -> View {
+    let (cols, at) = price_layout(theme, width);
+    let put = |logical: usize, v: View| at[logical].map(|i| dcell(i, v));
+    let cells: Vec<View> = [
+        put(0, dtext(theme, p.model.clone(), false).into()),
+        put(1, dtext(theme, price_num(p.input), true).into()),
+        put(2, dtext(theme, price_num(p.output), true).into()),
+        put(
             3,
             dtext(theme, price_num(p.cache_read), true)
                 .foreground(theme.subtle)
                 .into(),
         ),
-        dcell(
+        put(
             4,
             dtext(theme, price_num(p.cache_write), true)
                 .foreground(theme.subtle)
                 .into(),
         ),
-        dcell(
-            5,
-            Border::new()
-                .horizontal_alignment(HorizontalAlignment::Right)
-                .content(w::badge(theme, p.source.clone(), tone)),
-        ),
-    ];
+        put(5, corroboration(theme, p)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     // Same chrome as detail rows: separators gated by theme, alternating
-    // ~4% zebra, full model id on hover.
+    // ~4% zebra, the evidence on hover.
     let mut row = Border::new().padding(Thickness::xy(10.0, 5.0));
     if theme.line_separators {
         row = row
@@ -1785,49 +2036,98 @@ fn price_row(
     if zebra {
         row = row.background(Brush::Solid(Color::argb(10, 128, 128, 128)));
     }
-    row.content(Grid::new().columns(price_cols(width)).children(cells))
-        .tooltip(p.model.clone())
+    row.content(Grid::new().columns(cols).keyed_children(keyed(cells)))
+        .tooltip(price_tooltip(p))
 }
 
-/// Rows the price table shows (the query fetches more for the count line).
-const PRICE_ROWS_SHOWN: usize = 400;
+/// The prices page's search state (owned by the shell).
+pub struct PriceSearch<'a> {
+    pub query: &'a str,
+    pub disputed: bool,
+    /// The rows that match — the whole book when nothing is filtered.
+    pub shown: &'a std::sync::Arc<Vec<PriceRow>>,
+}
 
 pub fn prices_page(
     table: Option<&PriceTable>,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
     args: &TableArgs,
+    search: &PriceSearch,
 ) -> Vec<View> {
     let Some(table) = table else {
         return vec![loading(theme, true)];
     };
-    let rows = &table.rows;
-    // Virtualized like the detail table — the 400-row cap now only bounds
-    // what's browsable, not what gets mounted.
-    let list: View = virtual_rows(theme, rows.clone(), PRICE_ROWS_SHOWN, args.width, price_row);
+    let total = table.rows.len();
+    let shown = search.shown.len();
+    let filtering = !search.query.trim().is_empty() || search.disputed;
+    // Virtualized like the detail table: only the rows scrolled into view are
+    // ever mounted, so the whole book (thousands of models) is browsable.
+    let list: View = virtual_rows(theme, search.shown.clone(), shown, args.width, price_row);
     let ruler = table_ruler(ctx, "prices-ruler", args.ruler);
+
+    // Search box (fed back its own text — see `Shell::price_query`) + the
+    // dispute filter.
+    let search_box: View = TextBox::new()
+        .text(search.query.to_string())
+        .placeholder_text(t!("搜索模型，如 opus 4.6 或 gpt mini"))
+        .on_text_changed(ctx.callback(Msg::PriceQuery))
+        .width(380.0)
+        .into();
+    let only_disputed: View = CheckBox::new()
+        .is_checked(search.disputed)
+        .on_is_checked_changed(ctx.callback(Msg::PriceDisputed))
+        .content(
+            TextBlock::new()
+                .text(t!("仅看有分歧的"))
+                .font_size(theme.body_size),
+        );
+    let sync = match table.synced_at {
+        Some(t) => tf!(
+            "联网同步于 {} 小时前",
+            (globaltokentracker_core::store::now_ms() - t) / 3_600_000
+        ),
+        None => t!("仅本地种子，尚未联网同步").to_string(),
+    };
+    let summary = if filtering {
+        tf!("匹配 {} / {} 个模型 · {}", shown, total, sync)
+    } else {
+        tf!("{} 个模型 · {}", total, sync)
+    };
+    let controls: View = vstack(
+        8.0,
+        vec![
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(16.0)
+                .children((search_box, only_disputed)),
+            TextBlock::new()
+                .text(summary)
+                .font_size(theme.body_size)
+                .foreground(theme.subtle)
+                .into(),
+        ],
+    );
+
+    let body: Vec<View> = if shown == 0 {
+        vec![
+            ruler,
+            price_head(theme, args.width),
+            TextBlock::new()
+                .text(t!("没有匹配的模型"))
+                .font_size(theme.body_size)
+                .foreground(theme.subtle)
+                .margin(Thickness::xy(10.0, 16.0))
+                .into(),
+        ]
+    } else {
+        vec![ruler, price_head(theme, args.width), list]
+    };
     vec![
         header(theme, t!("价目表（$/1M tokens）"), vec![]),
-        TextBlock::new()
-            .text(tf!(
-                "{} 个模型 · 前 400 条 · {}",
-                rows.len(),
-                match table.synced_at {
-                    Some(t) => tf!(
-                        "联网同步于 {} 小时前",
-                        (globaltokentracker_core::store::now_ms() - t) / 3_600_000
-                    ),
-                    None => t!("仅本地种子，尚未联网同步").to_string(),
-                }
-            ))
-            .font_size(theme.body_size)
-            .foreground(theme.subtle)
-            .into(),
+        controls,
         // Card chrome around the table — same as the detail page.
-        w::card(
-            theme,
-            vstack(0.0, vec![ruler, price_head(theme, args.width), list]),
-        ),
+        w::card(theme, vstack(0.0, body)),
     ]
 }
 
@@ -1887,24 +2187,34 @@ fn setting_row(
             .text(tr(label))
             .font_size(theme.body_size)
             .font_weight(FontWeight::SEMI_BOLD)
+            .text_wrapping(TextWrapping::Wrap)
             .vertical_alignment(VerticalAlignment::Center)
             .into(),
     ];
     if let Some(n) = note {
+        // Wraps inside the label column — a long English note used to run
+        // under the control column and get cut off.
         left.push(
             TextBlock::new()
                 .text(tr(n))
                 .font_size(theme.label_size)
                 .foreground(theme.subtle)
+                .text_wrapping(TextWrapping::Wrap)
                 .into(),
         );
     }
     Grid::new()
-        .columns([GridLength::Pixel(300.0), GridLength::STAR])
+        .columns([
+            GridLength::Pixel(300.0 * font_scale(theme)),
+            GridLength::STAR,
+        ])
         .children([
             cell(
                 0,
-                StackPanel::new().spacing(2.0).keyed_children(keyed(left)),
+                StackPanel::new()
+                    .spacing(2.0)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .keyed_children(keyed(left)),
             ),
             cell(
                 1,
@@ -1969,6 +2279,16 @@ fn size_control(theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
         .children([slider, readout])
 }
 
+/// Toggle whose On/Off captions follow the UI language — the control's own
+/// captions come from the OS locale, which left "开"/"关" next to English rows.
+fn switch(theme: &Theme, is_on: bool, toggled: Callback<bool>) -> View {
+    let caption = |text: &str| TextBlock::new().text(text).font_size(theme.body_size);
+    ToggleSwitch::new().is_on(is_on).on_toggled(toggled).slots([
+        SlotView::new(ToggleSwitchSlot::OnContent, caption(t!("开"))),
+        SlotView::new(ToggleSwitchSlot::OffContent, caption(t!("关"))),
+    ])
+}
+
 const UPDATE_CHANNEL_OPTIONS: &[(&str, &str)] = &[("stable", "正式版"), ("alpha", "预览版")];
 
 fn release_notes_link(rel: &Release) -> Option<View> {
@@ -2002,7 +2322,11 @@ fn short_error(msg: &str) -> String {
 }
 
 fn update_action_label(error: Option<&str>) -> &'static str {
-    if error.is_some() { t!("重试") } else { t!("立即更新") }
+    if error.is_some() {
+        t!("重试")
+    } else {
+        t!("立即更新")
+    }
 }
 
 fn update_status_row(
@@ -2012,23 +2336,32 @@ fn update_status_row(
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let busy = matches!(state, UpdateState::Checking | UpdateState::Downloading(_));
-    let mut controls: Vec<View> = vec![
-        TextBlock::new()
-            .text(update_status_text(state))
-            .font_size(theme.body_size)
-            .max_width(360.0)
-            .text_wrapping(windows_reactor::TextWrapping::Wrap)
-            .vertical_alignment(VerticalAlignment::Center)
-            .into(),
+    let mut controls: Vec<View> = Vec::new();
+    // Idle has no status text; an empty TextBlock would still cost a spacing
+    // gap and push the button off the column every other control sits on.
+    let status = update_status_text(state);
+    if !status.is_empty() {
+        controls.push(
+            TextBlock::new()
+                .text(status)
+                .font_size(theme.body_size)
+                .max_width(360.0)
+                .text_wrapping(windows_reactor::TextWrapping::Wrap)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        );
+    }
+    let check_at = controls.len();
+    controls.push(
         Button::new()
             .is_enabled(!busy)
             .on_click(ctx.callback(|_| Msg::CheckUpdate { manual: true }))
             .content(t!("立即检查")),
-    ];
+    );
     if let UpdateState::Available(rel) = state {
         if let Some(e) = error {
             controls.insert(
-                1,
+                check_at,
                 TextBlock::new()
                     .text(tf!("更新失败：{}", short_error(e)))
                     .font_size(theme.label_size)
@@ -2175,10 +2508,7 @@ pub fn settings_page(
         theme,
         "自动检查更新",
         Some("启动时及每 24 小时检查一次"),
-        ToggleSwitch::new()
-            .is_on(config.update_auto)
-            .on_toggled(ctx.callback(Msg::SetUpdateAuto))
-            .into(),
+        switch(theme, config.update_auto, ctx.callback(Msg::SetUpdateAuto)),
     );
     let status_row = update_status_row(theme, update, update_error, ctx);
 
@@ -2232,10 +2562,7 @@ pub fn settings_page(
         theme,
         "开机自启动",
         Some("登录 Windows 后自动启动（最小化到托盘）"),
-        ToggleSwitch::new()
-            .is_on(config.autostart)
-            .on_toggled(ctx.callback(Msg::SetAutostart))
-            .into(),
+        switch(theme, config.autostart, ctx.callback(Msg::SetAutostart)),
     );
     let close_row = setting_row(
         theme,
@@ -2270,4 +2597,156 @@ pub fn settings_page(
             ),
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kept(plan: Plan) -> Vec<usize> {
+        plan.iter().map(|(logical, _)| *logical).collect()
+    }
+
+    fn fixed(plan: Plan) -> f64 {
+        plan.iter().filter_map(|(_, w)| *w).sum()
+    }
+
+    #[test]
+    fn detail_table_sheds_columns_as_the_row_narrows() {
+        // Not measured yet → the widest plan (the ruler arrives a frame later).
+        assert_eq!(
+            kept(pick_plan(&DETAIL_PLANS, 0.0, 1.0)),
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(
+            kept(pick_plan(&DETAIL_PLANS, 900.0, 1.0)),
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        // Cache goes first, then duration, then the tool column.
+        assert_eq!(
+            kept(pick_plan(&DETAIL_PLANS, 700.0, 1.0)),
+            [0, 1, 2, 3, 4, 6, 7]
+        );
+        assert_eq!(
+            kept(pick_plan(&DETAIL_PLANS, 600.0, 1.0)),
+            [0, 1, 2, 3, 4, 6]
+        );
+        assert_eq!(kept(pick_plan(&DETAIL_PLANS, 500.0, 1.0)), [0, 2, 3, 4, 6]);
+        // Nothing fits → the narrowest plan, never an empty layout.
+        assert_eq!(kept(pick_plan(&DETAIL_PLANS, 200.0, 1.0)), [0, 2, 3, 4, 6]);
+        // A larger body font makes the fixed columns wider: the same 640-wide
+        // row that keeps 7 columns at 12pt drops to 5 at 17pt (k ≈ 1.42).
+        assert_eq!(
+            kept(pick_plan(&DETAIL_PLANS, 660.0, 1.0)),
+            [0, 1, 2, 3, 4, 6, 7]
+        );
+        assert_eq!(
+            kept(pick_plan(&DETAIL_PLANS, 660.0, 17.0 / 12.0)),
+            [0, 2, 3, 4, 6]
+        );
+    }
+
+    #[test]
+    fn a_picked_plan_always_leaves_the_star_column_its_minimum() {
+        for plans in [&DETAIL_PLANS[..], &PRICE_PLANS[..]] {
+            let narrowest = plans[plans.len() - 1];
+            for k in [1.0, 1.25, 17.0 / 12.0] {
+                for width in (300..1400).step_by(20) {
+                    let width = f64::from(width);
+                    let p = pick_plan(plans, width, k);
+                    if !std::ptr::eq(p, narrowest) {
+                        assert!(
+                            fixed(p) * k + ROW_PAD + STAR_MIN <= width,
+                            "width {width} k {k}: fixed {} leaves too little",
+                            fixed(p)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_price_row_tooltip_lays_out_every_sources_say() {
+        use globaltokentracker_core::pricing::consensus::Stance;
+        use globaltokentracker_core::store::PriceQuote;
+        let quote = |source: &str, key: &str, input: f64, output: f64, stance| PriceQuote {
+            source: source.into(),
+            key: key.into(),
+            input,
+            output,
+            cache_read: 0.0,
+            stance,
+        };
+        let row = PriceRow::new(
+            "claude-opus-4-6".into(),
+            (5.0, 25.0, 0.5, 0.0),
+            "portkey".into(),
+            2,
+            3,
+            vec![
+                quote("portkey", "claude-opus-4-6", 5.0, 25.0, Stance::Agrees),
+                quote("openrouter", "claude-opus-4.6", 5.0, 25.0, Stance::Agrees),
+                quote("litellm", "claude-opus-4-6", 6.0, 30.0, Stance::Dissents),
+                quote("models.dev", "claude-opus-4-6", 0.0, 0.0, Stance::NoData),
+                quote("seed", "claude-opus-4-6", 5.0, 25.0, Stance::Ignored),
+            ],
+        );
+        let tip = price_tooltip(&row);
+        let lines: Vec<&str> = tip.lines().collect();
+        assert_eq!(lines[0], "claude-opus-4-6");
+        assert!(
+            lines[1].starts_with("5 / 25") && lines[1].contains("0.5"),
+            "{tip}"
+        );
+        assert!(
+            lines[2].contains("portkey") && lines[2].contains("2/3"),
+            "{tip}"
+        );
+        // Backing quotes ✓, the dissenter ✗, no price –, the unvoting seed ·.
+        let line = |src: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(src))
+                .copied()
+                .unwrap_or("")
+        };
+        assert!(line("portkey  ").starts_with('✓'), "{tip}");
+        assert!(line("openrouter").starts_with('✓'), "{tip}");
+        assert!(line("openrouter").contains("[claude-opus-4.6]"), "{tip}");
+        assert!(
+            line("litellm").starts_with('✗') && line("litellm").contains("6 / 30"),
+            "{tip}"
+        );
+        assert!(line("models.dev").starts_with('–'), "{tip}");
+        assert!(
+            line("seed").starts_with('·') && line("seed").contains("未计票"),
+            "{tip}"
+        );
+        assert!(row.disputed());
+    }
+
+    #[test]
+    fn plan_layout_maps_logical_columns_to_grid_columns() {
+        let (cols, at) = plan_layout::<8>(DETAIL_PLANS[1], 1.0);
+        assert_eq!(cols.len(), 7);
+        // Cache (logical 5) is hidden; cost/duration slide left by one.
+        assert_eq!(
+            at,
+            [
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                None,
+                Some(5),
+                Some(6)
+            ]
+        );
+        // Pixel widths scale with the font; the star column stays a star.
+        let (wide, _) = plan_layout::<8>(DETAIL_PLANS[1], 2.0);
+        assert!(matches!(wide[0], GridLength::Pixel(w) if (w - 168.0).abs() < 1e-9));
+        assert!(wide[2] == GridLength::STAR);
+    }
 }

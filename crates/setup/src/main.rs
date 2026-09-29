@@ -458,25 +458,147 @@ pub fn install_steps(
     Ok(())
 }
 
+/// Start-menu folder holding the app and uninstall shortcuts.
+fn start_menu_dir() -> Result<PathBuf> {
+    Ok(env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .context("APPDATA not set")?
+        .join(r"Microsoft\Windows\Start Menu\Programs")
+        .join(APP))
+}
+
+/// `<profile>\.globaltokentracker` — the ledger, settings and backups the app
+/// keeps outside the program directory. An uninstall leaves it alone unless
+/// asked to purge it.
+fn user_data_dir_in(profile: &Path) -> PathBuf {
+    profile.join(".globaltokentracker")
+}
+
+fn user_data_dir() -> Option<PathBuf> {
+    env::var_os("USERPROFILE").map(|p| user_data_dir_in(Path::new(&p)))
+}
+
+/// Bytes under `dir` (files only; symlinks are not followed). Bounded, so a
+/// pathological tree can't stall the window that asks for the number.
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut seen = 0usize;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            seen += 1;
+            if seen > 50_000 {
+                return total;
+            }
+            let Ok(md) = fs::symlink_metadata(e.path()) else {
+                continue;
+            };
+            if md.is_dir() {
+                stack.push(e.path());
+            } else if md.is_file() {
+                total += md.len();
+            }
+        }
+    }
+    total
+}
+
+/// "31.6 MB" style size for the uninstall summary.
+#[allow(clippy::cast_precision_loss)] // a size label; sub-byte precision is irrelevant
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+/// What an uninstall of `dest` would touch — read-only, for the confirmation
+/// screen. Items that are not present are simply not listed.
+pub struct UninstallPlan {
+    pub program_bytes: u64,
+    pub shortcuts: bool,
+    pub on_path: bool,
+    pub registered: bool,
+    /// The user-data directory, when it exists.
+    pub data_dir: Option<PathBuf>,
+    pub data_bytes: u64,
+}
+
+pub fn uninstall_plan(dest: &Path) -> UninstallPlan {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let on_path = hkcu
+        .open_subkey("Environment")
+        .ok()
+        .and_then(|k| read_path_value(&k).ok().flatten())
+        .is_some_and(|(cur, _)| path_with(&cur, &dest.display().to_string()).is_none());
+    let data_dir = user_data_dir().filter(|d| d.is_dir());
+    let data_bytes = data_dir.as_deref().map_or(0, dir_size);
+    UninstallPlan {
+        program_bytes: dir_size(dest),
+        shortcuts: start_menu_dir().is_ok_and(|d| d.exists()),
+        on_path,
+        registered: hkcu.open_subkey(UNINSTALL_KEY).is_ok(),
+        data_dir,
+        data_bytes,
+    }
+}
+
+/// Delete the user-data directory. Refuses anything but exactly
+/// `<profile>\.globaltokentracker`, so a bad argument can never turn "delete my
+/// data" into "delete my profile".
+fn remove_user_data(dir: &Path, profile: &Path) -> Result<()> {
+    if dir != user_data_dir_in(profile) {
+        bail!("拒绝删除非用户数据目录：{}", dir.display());
+    }
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("删除用户数据目录 {}", dir.display())),
+    }
+}
+
+/// `purge_data`: also delete the user-data directory (ledger, settings,
+/// backups). Off for `--quiet` and by default in the GUI. A failed purge does
+/// not fail the uninstall — the program is already gone by then; the caller
+/// can see whether the directory is still there.
 pub fn uninstall_steps(
     dest: &Path,
+    purge_data: bool,
     step: &mut dyn FnMut(u32, &str),
     log: &dyn Fn(String),
 ) -> Result<()> {
     step(10, "结束正在运行的实例…");
     stop_running();
-    step(40, "移除快捷方式与注册项…");
-    let start = env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .context("APPDATA not set")?
-        .join(r"Microsoft\Windows\Start Menu\Programs")
-        .join(APP);
-    let _ = fs::remove_dir_all(&start);
+    step(35, "移除快捷方式…");
+    let _ = fs::remove_dir_all(start_menu_dir()?);
+    step(55, "移除卸载注册项…");
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let _ = hkcu.delete_subkey_all(UNINSTALL_KEY);
+    step(75, "清理用户 PATH…");
     remove_user_path(dest, log);
+    if purge_data {
+        step(90, "删除用户数据…");
+        let profile = env::var_os("USERPROFILE").map(PathBuf::from);
+        match (user_data_dir(), profile) {
+            (Some(dir), Some(profile)) => match remove_user_data(&dir, &profile) {
+                Ok(()) => log(format!("已删除用户数据 {}", dir.display())),
+                Err(e) => log(format!("用户数据未能删除：{e:#}")),
+            },
+            _ => log("USERPROFILE 未设置，跳过用户数据删除".into()),
+        }
+    } else {
+        log("用户数据保留在 %USERPROFILE%\\.globaltokentracker".into());
+    }
     step(100, "已卸载");
-    log("用户数据保留在 %USERPROFILE%\\.globaltokentracker".into());
     Ok(())
 }
 
@@ -653,7 +775,7 @@ fn main() -> Result<()> {
     let mut step = |pct: u32, msg: &str| println!("==> [{pct:3}%] {msg}");
     if uninstall_flag {
         println!("{APP} 卸载 —— 移除 {}", dest.display());
-        uninstall_steps(&dest, &mut step, &log)?;
+        uninstall_steps(&dest, false, &mut step, &log)?;
         schedule_dir_delete(&dest)?; // fires after this process exits
         println!("已移除程序、快捷方式与卸载项；用户数据保留在 %USERPROFILE%\\.globaltokentracker");
     } else {
@@ -699,6 +821,61 @@ mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn no_backup(_: &str, _: &RegType) -> Result<()> {
         Ok(())
+    }
+
+    #[test]
+    fn human_size_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(33_120_256), "31.6 MB");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = env::temp_dir().join(format!("gtt-setup-{tag}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn dir_size_sums_nested_files() {
+        let d = scratch_dir("size");
+        fs::create_dir_all(d.join("a/b")).unwrap();
+        fs::write(d.join("x.bin"), [0u8; 100]).unwrap();
+        fs::write(d.join("a/y.bin"), [0u8; 50]).unwrap();
+        fs::write(d.join("a/b/z.bin"), [0u8; 7]).unwrap();
+        assert_eq!(dir_size(&d), 157);
+        assert_eq!(dir_size(&d.join("missing")), 0);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn purge_only_touches_the_data_dir() {
+        let profile = scratch_dir("purge");
+        let data = user_data_dir_in(&profile);
+        fs::create_dir_all(data.join("backups")).unwrap();
+        fs::write(data.join("ledger.db"), b"x").unwrap();
+        let bystander = profile.join("Documents");
+        fs::create_dir_all(&bystander).unwrap();
+        fs::write(bystander.join("keep.txt"), b"x").unwrap();
+
+        // Anything but `<profile>\.globaltokentracker` is refused untouched.
+        assert!(remove_user_data(&profile, &profile).is_err());
+        assert!(remove_user_data(&bystander, &profile).is_err());
+        assert!(bystander.join("keep.txt").exists());
+        assert!(data.join("ledger.db").exists());
+
+        remove_user_data(&data, &profile).unwrap();
+        assert!(!data.exists());
+        assert!(bystander.join("keep.txt").exists());
+        // Already gone → still Ok (idempotent).
+        remove_user_data(&data, &profile).unwrap();
+        fs::remove_dir_all(&profile).unwrap();
     }
 
     #[test]

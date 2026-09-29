@@ -68,7 +68,8 @@ GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 
 #### 计量与计价
 
 - 非缓存输入 / 缓存读 / 缓存写 / 输出 分桶精确计量
-- `llmpricing.dev` 价目表每 12h 同步 + 每次启动强制一次
+- 价目表**多方佐证**：9 个公开来源（models.dev、LiteLLM、llmpricing.dev、OpenRouter、Vercel AI Gateway、Helicone、Langfuse、llm-prices.com、Portkey）每 12h 同步；同一模型以**多数来源一致的价格**为准，单个来源的错价（如某源把 gpt-5 标成半价）不会进账
+- 价格页可**按模型搜索**（忽略大小写与分隔符：`opus 4.6`、`gpt mini`），每行显示“几家来源一致 / 几家报价”，悬停看各家报价；可只看有分歧的模型
 - 离线种子兜底，断网仍可计价
 - USD 估算与订阅 credits/百分比严格分列，不混算
 
@@ -111,6 +112,7 @@ GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 
 | MiniMax Code / Kimi Code | 本地日志 | ✅ 精确 |
 | Cline | `ui_messages.json` + 编辑器 globalStorage | ✅ 精确（含工具自报成本） |
 | Command Code | 本地 JSONL | ✅ 精确（含工具自报成本） |
+| Antigravity（应用 / IDE / `agy` CLI） | 本地会话库 `~/.gemini/antigravity*/…/*.db` | ✅ 精确（含思考 token；无缓存写数据） |
 | CodeBuddy IDE | `state.vscdb` / 会话库 | 🟡 会话级 + 模型倍率 |
 | Cursor / Qoder | 凭据 + 官方配额 API | 🟡 配额为主 |
 
@@ -185,7 +187,7 @@ powershell -ExecutionPolicy Bypass -File installer\package.ps1
 
 ## 隐私说明
 
-- **唯一的网络请求**是向 `llmpricing.dev` 拉取公开价目表（每 12 小时一次 + 每次启动一次）；断网时回落内置离线种子，功能不受影响。
+- 价目表同步只向上述 9 个公开来源发 **GET**，不携带任何用量、路径或账号信息（每 12 小时一次 + 每次启动一次）；断网时回落内置离线种子，功能不受影响。另有版本更新检查（GitHub Releases）与可选的官方配额查询，均只读取、不上传日志内容。
 - **OTLP 接收器仅监听 `127.0.0.1:4318`**，只收本机回环，不接受局域网连接。
 - 所有源日志**只读**，应用不会修改、删除或上传任何工具的数据文件。
 - 账本与配置存于 `%USERPROFILE%\.globaltokentracker`，卸载和升级均保留；程序目录内不存任何用户数据。
@@ -204,4 +206,4 @@ powershell -ExecutionPolicy Bypass -File installer\package.ps1
 
 - [cc-switch](https://github.com/farion1231/cc-switch) · [TokenTracker](https://github.com/xiufengsun/TokenTracker) · [cursor-usage](https://github.com/chocolatemale/cursor-usage) · [tokcat](https://github.com/handlecusion/tokcat) · [agent-trail](https://github.com/camtrik/agent-trail)
 - [windows-reactor](https://crates.io/crates/windows-reactor)（Rust ↔ WinUI 3 反应式绑定）
-- 价目数据来源：[llmpricing.dev](https://llmpricing.dev) · [models.dev](https://models.dev) · [LiteLLM](https://github.com/BerriAI/litellm)
+- 价目数据来源：[models.dev](https://models.dev) · [LiteLLM](https://github.com/BerriAI/litellm) · [llmpricing.dev](https://llmpricing.dev) · [OpenRouter](https://openrouter.ai/models) · [Vercel AI Gateway](https://vercel.com/ai-gateway) · [Helicone](https://www.helicone.ai/llm-cost) · [Langfuse](https://github.com/langfuse/langfuse) · [llm-prices.com](https://www.llm-prices.com) · [Portkey](https://github.com/Portkey-AI/models)

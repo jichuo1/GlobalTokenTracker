@@ -139,8 +139,52 @@ fn parse_hex(s: &str) -> Option<Color> {
     }
 }
 
+/// Whether the window renders light: an explicit mode wins; "system" (or
+/// unset) follows the apps theme in the registry.
+pub fn is_light(window_theme: &str) -> bool {
+    match window_theme {
+        "light" => true,
+        "dark" => false,
+        _ => system_apps_light(),
+    }
+}
+
+#[cfg(windows)]
+fn system_apps_light() -> bool {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    let name: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain([0]).collect();
+    let mut data = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    status == 0 && data == 1
+}
+
+#[cfg(not(windows))]
+fn system_apps_light() -> bool {
+    false
+}
+
 impl Theme {
-    pub fn resolve(cfg: &ThemeConfig) -> Self {
+    /// `light`: the canvas colors below can't be read back from the named
+    /// theme brushes, so their defaults come in a dark and a light set (see
+    /// `is_light`) — without it the charts kept dark-skin constants on a
+    /// white card (grey chart boxes, a pale accent that disagreed with the
+    /// legend swatches).
+    pub fn resolve(cfg: &ThemeConfig, light: bool) -> Self {
         Self {
             accent: brush_of(cfg.accent.as_deref(), Brush::Theme(ThemeBrush::Accent)),
             accent_soft: brush_of(
@@ -170,22 +214,34 @@ impl Theme {
                 .page_bg
                 .as_deref()
                 .map(|s| brush_of(Some(s), Brush::Theme(ThemeBrush::SolidBackground))),
-            // Win11 dark accent #76B9ED; hex overrides map exactly.
-            accent_cf: colorf_of(cfg.accent.as_deref(), ColorF::from_rgb8(0x76, 0xB9, 0xED)),
+            // Win11 accent — dark #76B9ED, light #0067C0; hex overrides map exactly.
+            accent_cf: colorf_of(
+                cfg.accent.as_deref(),
+                if light {
+                    ColorF::from_rgb8(0x00, 0x67, 0xC0)
+                } else {
+                    ColorF::from_rgb8(0x76, 0xB9, 0xED)
+                },
+            ),
             subtle_cf: colorf_of(
                 cfg.subtle.as_deref(),
-                ColorF::from_rgba8(0x9E, 0x9E, 0x9E, 0xFF),
+                if light {
+                    ColorF::from_rgba8(0x6B, 0x6B, 0x6B, 0xFF)
+                } else {
+                    ColorF::from_rgba8(0x9E, 0x9E, 0x9E, 0xFF)
+                },
             ),
             divider_cf: colorf_of(
                 cfg.divider.as_deref(),
                 ColorF::from_rgba8(0x80, 0x80, 0x80, 0x44),
             ),
-            // Fluent dark CardBackgroundFillColorDefault = white @ ~5% — the
-            // canvas paints this over the same page the card brush blends
-            // onto, landing pixel-identical. Hex card_bg overrides map 1:1.
+            // Fluent CardBackgroundFillColorDefault — white @ ~5% (dark) /
+            // @ ~70% (light): the canvas paints this over the same page the
+            // card brush blends onto, landing pixel-identical. Hex card_bg
+            // overrides map 1:1.
             card_cf: colorf_of(
                 cfg.card_bg.as_deref(),
-                ColorF::from_rgba8(0xFF, 0xFF, 0xFF, 0x0D),
+                ColorF::from_rgba8(0xFF, 0xFF, 0xFF, if light { 0xB3 } else { 0x0D }),
             ),
             font_family: cfg.font_family.clone().unwrap_or_else(|| "Segoe UI".into()),
             radius: cfg.radius.unwrap_or(8.0),

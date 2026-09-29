@@ -244,6 +244,14 @@ CREATE TABLE daily_rollups (
 - 路径（gemini-cli 源码证实）：`~/.gemini/tmp/<projectIdentifier>/chats/session-<ts>-<id8>.jsonl`（子代理在 `<父sessionId>/` 子目录）。`type=="gemini"` 行的 `tokens{input, output, cached, thoughts, tool, total}` + `model`。**tokens 可为 null（免费轮次），缺失即跳过**；`total` 不可信，按 `input+output+cached+tool` 重算；`input` 含 `cached`，计价前拆出。零配置默认落盘。
 - OTel 备选：`settings.json.telemetry{enabled, target, otllpEndpoint, otlpProtocol(grpc|http), outfile}`；指标 `gemini_cli.token.usage`（type: input/output/thought/cache/tool）。⚠️ `GEMINI_TELEMETRY_LOG_PROMPTS` 默认 true（隐私提示）；outfile 是带缩进的 JSON 流（非 NDJSON），解析按缩进块。
 
+### 6.8b Antigravity（已实现：`adapters/antigravity.rs`）
+- 来源：Antigravity 2.0 应用 / IDE 扩展 / `agy` CLI 共用同一存储——每个会话一个 SQLite：`<base>/antigravity-cli/conversations/<uuid>.db`、`<base>/antigravity/conversations/<uuid>.db`、`<base>/antigravity/<uuid>.db`（`<base>` = `~/.gemini`，或 `$GEMINI_CLI_HOME/.gemini`）。旧版 IDE 的 `.pb` 会话不可读，忽略；`conversation_summaries.db` 只是索引（无 `gen_metadata`），跳过。
+- 格式非官方公开，来自社区逆向（tokscale `antigravity_cli.rs`、CodexBar `docs/antigravity.md`、tokscale #1184/#1327）：`gen_metadata(idx,data,size)` 每行一次生成，protobuf；`#1`=chatModel：`#4` 用量（`#1` 固定系统提示≈1132 + `#2` 新增输入 → input；`#5` cacheRead；`#9` 文本输出；`#10` 思考输出；`#11` responseId），`#19` 机器模型 id、`#21` 显示名，`#9.#4` 生成时间戳（仅 agy ≤ 1.1.17）。
+- 时间：`#9.#4` → `steps` 表（`step_type=15`，`metadata.#1` 时间戳，按 `metadata.#9.#11`=responseId 或 `metadata.#20.#3`=gen idx 对上）→ 会话创建时间（`trajectory_metadata_blob.#2`）→ 文件 mtime；所有时间过 2020-01-01…now+1h 的可信窗口。agy ≥ 1.1.18 只能走 `steps` 表。
+- 口径：`input=#1+#2`（已不含缓存）；`output=#9+#10`（思考按输出计费，价格公式只乘 `output_tokens`），`reasoning=#10` 为子集；无缓存写数据。机器模型 id（`gemini-pro-default`、`gemini-3-flash-a`、`MODEL_PLACEHOLDER_M26`…）按社区映射表归到价目表键；路由占位 `gemini-default` 无法确定模型时保持未计价，不猜。
+- 去重：按 responseId 全局去重（`/fork`、IDE→CLI 导入会把早先的生成复制进新库）；先上报的会话保有该行，副本跳过，归属不随重扫翻转。
+- 本机现状：`~/.gemini/antigravity` 已安装但 `conversations/` 为空，尚无真实会话可对照；格式依据均为第三方逆向，遇 agy 升级改字段时应先看 `gen_metadata` 解码为空的迹象。
+
 ### 6.9 官方配额/订阅通道（P2，凭据文件可用性已验证）
 
 | 工具 | 端点 | 凭据 | 实测状态 |
@@ -285,7 +293,7 @@ Devin（`sessions.db` 仅元数据+上下文估算）、Copilot CLI、Windsurf�
 2. BFS 候选队列逐级剥离：`openai./anthropic./moonshot./bedrock./global.` 前缀、`rfind("claude-")`、`-v<数字>`、`-YYYYMMDD` 日期后缀、`-minimal/-low/-medium/-high/-xhigh` 推理档后缀。
 3. 精确匹配全部失败才前缀匹配（`LIKE '<cand>-%'` 取最短命中），且设 dash 数门槛防误吞（`claude-`≥3、`gpt-/gemini-/qwen-/glm-/kimi-`≥2 个横线——防止 `gpt-5.6` 吞掉 `gpt-5.6-sol`）。
 4. 解析结果写 `model_aliases` 缓存 + `resolved_via` 审计。
-5. 匹配顺序：`price_overrides`（用户）→ models.dev（provider 锚定）→ LiteLLM（带前缀键）→ OpenRouter canonical_slug → **unpriced**。
+5. 匹配顺序：`price_overrides`（用户）→ **价目簿共识**（9 个来源按 `pricing/consensus.rs` 投票，见 S79；取代原先“models.dev → LiteLLM → …”的固定优先级）→ **unpriced**。
 
 ### 7.3 unpriced 模型处理（实测存在：`gpt-reserve`、`codex-auto-review`、`stealth/custom-alpha`）
 - 优先用**响应体里的真实模型名**计价（`request_model` 与 `model` 分列的原因；cc-switch 的 `pricing_model_source='response'` 同思路）。

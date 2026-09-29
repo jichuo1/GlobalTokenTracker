@@ -24,9 +24,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const SUBCLASS_ID: usize = 0x4754_5431; // "GTT1"
 
-/// Smallest outer window size (DIPs, frame included) — a 720-wide client is
-/// the narrowest the detail table and the centered nav are laid out for.
-pub const MIN_OUTER_W: i32 = 736;
+/// Smallest outer window size (DIPs, frame included) — below this the brand
+/// text and the centered nav (wider in English) run into each other, and the
+/// tables run out of columns to drop.
+pub const MIN_OUTER_W: i32 = 780;
 pub const MIN_OUTER_H: i32 = 560;
 
 thread_local! {

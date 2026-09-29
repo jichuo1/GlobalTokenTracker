@@ -1,4 +1,6 @@
-//! Price-feed importers: models.dev, LiteLLM, llmpricing.dev.
+//! Price-feed importers: models.dev, LiteLLM, llmpricing.dev, and the six
+//! independent cross-check feeds (OpenRouter, Vercel AI Gateway, Helicone,
+//! Langfuse, llm-prices.com, Portkey).
 //!
 //! These used to download all three documents and parse each into a full
 //! `serde_json::Value` tree — three multi-MB DOMs alive at once, a 50–80MB
@@ -475,6 +477,547 @@ pub(super) fn import_llmpricing(conn: &Connection, body: &str, now: i64) -> Resu
     Ok(n)
 }
 
+// ------------------------------------------------- independent cross-check feeds
+//
+// models.dev, LiteLLM and llmpricing.dev are not enough to trust a price: they
+// disagree with each other on a fifth of the models they share, and llmpricing
+// republishes some of the others. These six are curated or served by
+// unrelated parties and mostly quote *first-party list prices* (gateways pass
+// them through unchanged), which is what makes them useful as votes — see
+// `consensus`. Every importer filters out the rows that would poison a vote:
+// reseller markups, free-tier variants, long-context surcharge rows that share
+// an id with the base model.
+
+/// A JSON number, or a string holding one (`"0.00000075"`); anything else →
+/// `None`. OpenRouter and Vercel quote decimal *strings*.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Amount(Option<f64>);
+
+impl<'de> Deserialize<'de> for Amount {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Amount;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<Amount, E> {
+                Ok(Amount(Some(v)))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<Amount, E> {
+                Ok(Amount(Some(v as f64)))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<Amount, E> {
+                Ok(Amount(Some(v as f64)))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Amount, E> {
+                Ok(Amount(v.trim().parse::<f64>().ok()))
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<Amount, E> {
+                Ok(Amount(None))
+            }
+            fn visit_unit<E>(self) -> Result<Amount, E> {
+                Ok(Amount(None))
+            }
+            fn visit_none<E>(self) -> Result<Amount, E> {
+                Ok(Amount(None))
+            }
+            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Amount, D2::Error> {
+                d.deserialize_any(self)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, a: A) -> Result<Amount, A::Error> {
+                skip_seq(a).map(|()| Amount(None))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, a: A) -> Result<Amount, A::Error> {
+                skip_map(a).map(|()| Amount(None))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// A finite, non-negative price; a sentinel (`-1` = "dynamic"), NaN or a
+/// negative number is "absent".
+fn sane(v: Option<f64>) -> Option<f64> {
+    v.filter(|x| x.is_finite() && *x >= 0.0)
+}
+
+/// Writes one source's rows: a fixed source tag, keys normalized, a quote with
+/// neither an input nor an output price skipped.
+struct Sink<'c> {
+    st: rusqlite::Statement<'c>,
+    source: &'static str,
+    now: i64,
+    n: usize,
+}
+
+impl<'c> Sink<'c> {
+    fn new(conn: &'c Connection, source: &'static str, now: i64) -> Result<Self> {
+        let st = conn.prepare(
+            "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write, source, fetched_at)
+             VALUES (?7, ?1, ?2, ?3, ?4, ?5, ?7, ?6)",
+        )?;
+        Ok(Self {
+            st,
+            source,
+            now,
+            n: 0,
+        })
+    }
+
+    /// $/1M values. Cache columns stay NULL when the feed has no figure
+    /// (honest absence, not a guessed multiplier).
+    fn put(
+        &mut self,
+        id: &str,
+        input: Option<f64>,
+        output: Option<f64>,
+        cache_read: Option<f64>,
+        cache_write: Option<f64>,
+    ) -> Result<()> {
+        let (input, output) = (sane(input), sane(output));
+        let key = normalize_key(id);
+        if key.is_empty() || (input.is_none() && output.is_none()) {
+            return Ok(());
+        }
+        self.st.execute(rusqlite::params![
+            key,
+            input.unwrap_or(0.0),
+            output.unwrap_or(0.0),
+            sane(cache_read),
+            sane(cache_write),
+            self.now,
+            self.source,
+        ])?;
+        self.n += 1;
+        Ok(())
+    }
+}
+
+// -------------------------------------------------------------- OpenRouter
+
+/// `{data:[{id, pricing:{prompt, completion, input_cache_read,
+/// input_cache_write}}]}` — decimal strings, $/token.
+#[derive(Deserialize, Default)]
+struct OrRoot {
+    #[serde(default)]
+    data: Items<Loose<OrModel>>,
+}
+
+#[derive(Deserialize, Default)]
+struct OrModel {
+    #[serde(default)]
+    id: Text,
+    #[serde(default)]
+    pricing: Loose<OrPricing>,
+}
+
+#[derive(Deserialize, Default)]
+struct OrPricing {
+    #[serde(default)]
+    prompt: Amount,
+    #[serde(default)]
+    completion: Amount,
+    #[serde(default)]
+    input_cache_read: Amount,
+    #[serde(default)]
+    input_cache_write: Amount,
+}
+
+/// OpenRouter is a gateway that passes provider list prices through. Its
+/// `:free` / `:thinking` / `:nitro` … variants share an id with the base model
+/// once `normalize_key` drops the suffix, and the free ones are priced 0 —
+/// they would overwrite the real row, so any id with a variant tag is skipped.
+pub(super) fn import_openrouter(conn: &Connection, body: &str, now: i64) -> Result<usize> {
+    let root: Loose<OrRoot> = serde_json::from_str(body)?;
+    let mut sink = Sink::new(conn, "openrouter", now)?;
+    let per_1m = |a: Amount| a.0.map(|x| x * 1e6);
+    for m in root.0.unwrap_or_default().data.0 {
+        let Some(m) = m.0 else { continue };
+        let Some(id) = m.id.0.filter(|id| !id.contains(':')) else {
+            continue;
+        };
+        let p = m.pricing.0.unwrap_or_default();
+        sink.put(
+            &id,
+            per_1m(p.prompt),
+            per_1m(p.completion),
+            per_1m(p.input_cache_read),
+            per_1m(p.input_cache_write),
+        )?;
+    }
+    Ok(sink.n)
+}
+
+// ------------------------------------------------------ Vercel AI Gateway
+
+/// `{data:[{id, pricing:{input, output, input_cache_read, input_cache_write}}]}`
+/// — decimal strings, $/token. Non-language models carry other shapes, which
+/// simply lack `input`/`output` and are skipped.
+#[derive(Deserialize, Default)]
+struct VcRoot {
+    #[serde(default)]
+    data: Items<Loose<VcModel>>,
+}
+
+#[derive(Deserialize, Default)]
+struct VcModel {
+    #[serde(default)]
+    id: Text,
+    #[serde(default)]
+    pricing: Loose<VcPricing>,
+}
+
+#[derive(Deserialize, Default)]
+struct VcPricing {
+    #[serde(default)]
+    input: Amount,
+    #[serde(default)]
+    output: Amount,
+    #[serde(default)]
+    input_cache_read: Amount,
+    #[serde(default)]
+    input_cache_write: Amount,
+}
+
+pub(super) fn import_vercel(conn: &Connection, body: &str, now: i64) -> Result<usize> {
+    let root: Loose<VcRoot> = serde_json::from_str(body)?;
+    let mut sink = Sink::new(conn, "vercel", now)?;
+    let per_1m = |a: Amount| a.0.map(|x| x * 1e6);
+    for m in root.0.unwrap_or_default().data.0 {
+        let Some(m) = m.0 else { continue };
+        let Some(id) = m.id.0 else { continue };
+        let p = m.pricing.0.unwrap_or_default();
+        sink.put(
+            &id,
+            per_1m(p.input),
+            per_1m(p.output),
+            per_1m(p.input_cache_read),
+            per_1m(p.input_cache_write),
+        )?;
+    }
+    Ok(sink.n)
+}
+
+// ---------------------------------------------------------------- Helicone
+
+/// `{data:[{provider, model, operator, input_cost_per_1m, output_cost_per_1m,
+/// prompt_cache_read_per_1m, prompt_cache_write_per_1m}]}` — $/1M.
+#[derive(Deserialize, Default)]
+struct HcRoot {
+    #[serde(default)]
+    data: Items<Loose<HcRow>>,
+}
+
+#[derive(Deserialize, Default)]
+struct HcRow {
+    #[serde(default)]
+    provider: Text,
+    #[serde(default)]
+    model: Text,
+    #[serde(default)]
+    operator: Text,
+    #[serde(default)]
+    input_cost_per_1m: Num,
+    #[serde(default)]
+    output_cost_per_1m: Num,
+    #[serde(default)]
+    prompt_cache_read_per_1m: Num,
+    #[serde(default)]
+    prompt_cache_write_per_1m: Num,
+}
+
+/// Helicone's table lists every host of a model, resellers included — its
+/// OpenRouter rows carry OpenRouter's 5.5% credit fee (Claude Opus 4.6 at
+/// $5.275), its Azure and Together rows are their own prices. Only the model
+/// makers' own rows are first-party list prices, so only those are read.
+const HELICONE_FIRST_PARTY: &[&str] = &[
+    "OPENAI",
+    "ANTHROPIC",
+    "GOOGLE",
+    "MISTRAL",
+    "X",
+    "DEEPSEEK",
+    "COHERE",
+    "LLAMA",
+    "PERPLEXITY",
+];
+
+pub(super) fn import_helicone(conn: &Connection, body: &str, now: i64) -> Result<usize> {
+    let root: Loose<HcRoot> = serde_json::from_str(body)?;
+    let mut sink = Sink::new(conn, "helicone", now)?;
+    let mut rows: Vec<HcRow> = root
+        .0
+        .unwrap_or_default()
+        .data
+        .0
+        .into_iter()
+        .filter_map(|r| r.0)
+        .filter(|r| {
+            r.provider
+                .0
+                .as_deref()
+                .is_some_and(|p| HELICONE_FIRST_PARTY.contains(&p))
+        })
+        .collect();
+    // `equals` rows name one exact model; `startsWith` / `includes` are family
+    // patterns. Write patterns first so an exact row of the same id wins the
+    // `INSERT OR REPLACE`.
+    rows.sort_by_key(|r| r.operator.0.as_deref() == Some("equals"));
+    for r in rows {
+        let Some(id) = r.model.0 else { continue };
+        sink.put(
+            &id,
+            r.input_cost_per_1m.0,
+            r.output_cost_per_1m.0,
+            r.prompt_cache_read_per_1m.0,
+            r.prompt_cache_write_per_1m.0,
+        )?;
+    }
+    Ok(sink.n)
+}
+
+// ---------------------------------------------------------------- Langfuse
+
+/// A JSON array of `{modelName, pricingTiers:[{isDefault, prices:{input,
+/// output, input_cache_read, …}}]}` — $/token, maintained by hand in
+/// Langfuse's repository.
+#[derive(Deserialize, Default)]
+struct LfModel {
+    #[serde(default, rename = "modelName")]
+    model_name: Text,
+    #[serde(default, rename = "pricingTiers")]
+    tiers: Items<Loose<LfTier>>,
+}
+
+#[derive(Deserialize, Default)]
+struct LfTier {
+    #[serde(default, rename = "isDefault")]
+    is_default: Flag,
+    #[serde(default)]
+    prices: Loose<LfPrices>,
+}
+
+/// Only a JSON `true` counts; anything else is `false`.
+#[derive(Clone, Copy, Default)]
+struct Flag(bool);
+
+impl<'de> Deserialize<'de> for Flag {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Flag;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<Flag, E> {
+                Ok(Flag(v))
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<Flag, E> {
+                Ok(Flag(false))
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<Flag, E> {
+                Ok(Flag(false))
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<Flag, E> {
+                Ok(Flag(false))
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Flag, E> {
+                Ok(Flag(false))
+            }
+            fn visit_unit<E>(self) -> Result<Flag, E> {
+                Ok(Flag(false))
+            }
+            fn visit_none<E>(self) -> Result<Flag, E> {
+                Ok(Flag(false))
+            }
+            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Flag, D2::Error> {
+                d.deserialize_any(self)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, a: A) -> Result<Flag, A::Error> {
+                skip_seq(a).map(|()| Flag(false))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, a: A) -> Result<Flag, A::Error> {
+                skip_map(a).map(|()| Flag(false))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct LfPrices {
+    #[serde(default)]
+    input: Num,
+    #[serde(default)]
+    output: Num,
+    #[serde(default)]
+    input_cache_read: Num,
+    #[serde(default)]
+    cache_read_input_tokens: Num,
+    #[serde(default)]
+    input_cached_tokens: Num,
+    #[serde(default)]
+    input_cache_creation: Num,
+    #[serde(default)]
+    cache_write_tokens: Num,
+    #[serde(default)]
+    input_cache_write_tokens: Num,
+}
+
+pub(super) fn import_langfuse(conn: &Connection, body: &str, now: i64) -> Result<usize> {
+    let models: Items<Loose<LfModel>> = serde_json::from_str(body)?;
+    let mut sink = Sink::new(conn, "langfuse", now)?;
+    let per_1m = |n: Num| n.0.map(|x| x * 1e6);
+    for m in models.0 {
+        let Some(m) = m.0 else { continue };
+        let Some(name) = m.model_name.0 else { continue };
+        let tiers: Vec<LfTier> = m.tiers.0.into_iter().filter_map(|t| t.0).collect();
+        // The default tier is the standard price; "Fast mode", ">200k" … tiers
+        // are surcharges on the same id.
+        let default = tiers.iter().position(|t| t.is_default.0).unwrap_or(0);
+        let Some(p) = tiers.into_iter().nth(default).and_then(|t| t.prices.0) else {
+            continue;
+        };
+        // Legacy rows price a single blended `total` — no input/output split
+        // to vote with.
+        if p.input.0.is_none() && p.output.0.is_none() {
+            continue;
+        }
+        let first = |a: Num, b: Num, c: Num| a.0.or(b.0).or(c.0).map(|x| x * 1e6);
+        sink.put(
+            &name,
+            per_1m(p.input),
+            per_1m(p.output),
+            first(
+                p.input_cache_read,
+                p.cache_read_input_tokens,
+                p.input_cached_tokens,
+            ),
+            first(
+                p.input_cache_creation,
+                p.cache_write_tokens,
+                p.input_cache_write_tokens,
+            ),
+        )?;
+    }
+    Ok(sink.n)
+}
+
+// -------------------------------------------------------------- llm-prices
+
+/// `{prices:[{id, name, input, output, input_cached}]}` — $/1M, hand-curated
+/// by Simon Willison. Long-context surcharge tiers are separate rows whose
+/// display name says `>200k` / `>272k`; they are not the model's base price.
+#[derive(Deserialize, Default)]
+struct LmRoot {
+    #[serde(default)]
+    prices: Items<Loose<LmRow>>,
+}
+
+#[derive(Deserialize, Default)]
+struct LmRow {
+    #[serde(default)]
+    id: Text,
+    #[serde(default)]
+    name: Text,
+    #[serde(default)]
+    input: Num,
+    #[serde(default)]
+    output: Num,
+    #[serde(default)]
+    input_cached: Num,
+}
+
+pub(super) fn import_llm_prices(conn: &Connection, body: &str, now: i64) -> Result<usize> {
+    let root: Loose<LmRoot> = serde_json::from_str(body)?;
+    let mut sink = Sink::new(conn, "llm-prices", now)?;
+    for r in root.0.unwrap_or_default().prices.0 {
+        let Some(r) = r.0 else { continue };
+        let Some(id) = r.id.0 else { continue };
+        if r.name.0.as_deref().is_some_and(|n| n.contains('>')) {
+            continue;
+        }
+        sink.put(&id, r.input.0, r.output.0, r.input_cached.0, None)?;
+    }
+    Ok(sink.n)
+}
+
+// ----------------------------------------------------------------- Portkey
+
+/// One provider file of Portkey's public model-pricing repository:
+/// `{"<model>": {pricing_config: {pay_as_you_go: {request_token:{price},
+/// response_token:{price}, cache_read_input_token:{price},
+/// cache_write_input_token:{price}}}}, "default": {…}}` — **cents per token**.
+#[derive(Deserialize, Default)]
+struct PkEntry {
+    #[serde(default)]
+    pricing_config: Loose<PkConfig>,
+}
+
+#[derive(Deserialize, Default)]
+struct PkConfig {
+    #[serde(default)]
+    pay_as_you_go: Loose<PkPayg>,
+}
+
+#[derive(Deserialize, Default)]
+struct PkPayg {
+    #[serde(default)]
+    request_token: Loose<PkPrice>,
+    #[serde(default)]
+    response_token: Loose<PkPrice>,
+    #[serde(default)]
+    cache_read_input_token: Loose<PkPrice>,
+    #[serde(default)]
+    cache_write_input_token: Loose<PkPrice>,
+}
+
+#[derive(Deserialize, Default)]
+struct PkPrice {
+    #[serde(default)]
+    price: Num,
+}
+
+/// Portkey files are per *host*; only the model makers' own files are used
+/// (see `PORTKEY_FILES`), and `only_prefixes` narrows a file that also lists
+/// other makers' models (DashScope resells Kimi and GLM at its own prices).
+pub(super) fn import_portkey(
+    conn: &Connection,
+    body: &str,
+    now: i64,
+    only_prefixes: &[&str],
+) -> Result<usize> {
+    let entries: Entries<Loose<PkEntry>> = serde_json::from_str(body)?;
+    let mut sink = Sink::new(conn, "portkey", now)?;
+    // cents/token → $/1M.
+    let per_1m = |p: Loose<PkPrice>| p.0.and_then(|p| p.price.0).map(|c| c * 1e4);
+    for (id, entry) in entries.0 {
+        if id == "default"
+            || (!only_prefixes.is_empty()
+                && !only_prefixes
+                    .iter()
+                    .any(|p| id.to_ascii_lowercase().starts_with(p)))
+        {
+            continue;
+        }
+        let Some(cfg) = entry.0.and_then(|e| e.pricing_config.0) else {
+            continue;
+        };
+        let Some(p) = cfg.pay_as_you_go.0 else {
+            continue;
+        };
+        sink.put(
+            &id,
+            per_1m(p.request_token),
+            per_1m(p.response_token),
+            per_1m(p.cache_read_input_token),
+            per_1m(p.cache_write_input_token),
+        )?;
+    }
+    Ok(sink.n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +1248,311 @@ mod tests {
             assert_eq!(dump(&a), dump(&b), "{file}: rows differ");
             eprintln!("{file}: {na} rows, identical to the Value implementation");
         }
+    }
+
+    // -- the six cross-check feeds ------------------------------------------
+
+    /// `(model_id, input, output, cache_read, cache_write, source)` rows of one
+    /// source, model-sorted.
+    type Row = (String, f64, f64, Option<f64>, Option<f64>, String);
+
+    fn rows_of(s: &Store, source: &str) -> Vec<Row> {
+        let mut st = s
+            .conn()
+            .prepare(
+                "SELECT model_id, input, output, cache_read, cache_write, source
+                 FROM prices WHERE source = ?1 ORDER BY model_id",
+            )
+            .unwrap();
+        st.query_map([source], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap()
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9 * a.abs().max(1.0)
+    }
+
+    #[test]
+    fn openrouter_prices_are_decimal_strings_per_token() {
+        let s = Store::open_memory().unwrap();
+        let body = json!({"data": [
+            {"id": "anthropic/claude-opus-4.6", "pricing": {"prompt": "0.000005", "completion": "0.000025",
+                "input_cache_read": "0.0000005", "input_cache_write": "0.00000625", "web_search": "0.01"}},
+            // A free variant shares its id with the paid model once ":free" is
+            // dropped — it must not overwrite the real row.
+            {"id": "deepseek/deepseek-r1:free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "deepseek/deepseek-r1", "pricing": {"prompt": "0.0000007", "completion": "0.0000025"}},
+            // "-1" marks dynamic-priced routers; no cache fields at all.
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+            {"id": "google/gemini-3.8-flash", "pricing": {"prompt": 7.5e-7, "completion": 3.75e-6}},
+            {"id": "no-pricing"},
+            {"id": "junk", "pricing": "free"},
+            {"id": 7, "pricing": {"prompt": "1"}},
+            "text", null
+        ]})
+        .to_string();
+        assert_eq!(import_openrouter(s.conn(), &body, 9).unwrap(), 3);
+        let rows = rows_of(&s, "openrouter");
+        let get = |id: &str| {
+            rows.iter()
+                .find(|r| r.0 == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        let o = get("claude-opus-4.6");
+        assert!(near(o.1, 5.0) && near(o.2, 25.0), "{o:?}");
+        assert!(near(o.3.unwrap(), 0.5) && near(o.4.unwrap(), 6.25), "{o:?}");
+        let r1 = get("deepseek-r1");
+        assert!(
+            near(r1.1, 0.7) && near(r1.2, 2.5),
+            "free variant clobbered it: {r1:?}"
+        );
+        assert!(near(get("gemini-3.8-flash").1, 0.75));
+        assert_eq!(get("gemini-3.8-flash").3, None); // absent, not zero
+        assert!(rows.iter().all(|r| r.0 != "auto" && r.0 != "junk"));
+        assert!(import_openrouter(s.conn(), "not json", 1).is_err());
+        assert_eq!(import_openrouter(s.conn(), "[1,2]", 1).unwrap(), 0);
+    }
+
+    #[test]
+    fn vercel_prices_use_input_output_names() {
+        let s = Store::open_memory().unwrap();
+        let body = json!({"object": "list", "data": [
+            {"id": "anthropic/claude-3-haiku", "type": "language",
+             "pricing": {"input": "0.00000025", "output": "0.00000125",
+                         "input_cache_read": "0.00000003", "input_cache_write": "0.0000003"}},
+            {"id": "openai/text-embedding-3-small", "type": "embedding", "pricing": {"input": "0.00000002"}},
+            {"id": "bfl/flux", "type": "image", "pricing": {"per_image": "0.04"}},
+            {"id": "x/no-pricing"}
+        ]})
+        .to_string();
+        assert_eq!(import_vercel(s.conn(), &body, 1).unwrap(), 2);
+        let rows = rows_of(&s, "vercel");
+        assert_eq!(rows.len(), 2);
+        let h = rows.iter().find(|r| r.0 == "claude-3-haiku").unwrap();
+        assert!(
+            near(h.1, 0.25) && near(h.2, 1.25) && near(h.3.unwrap(), 0.03),
+            "{h:?}"
+        );
+        let e = rows
+            .iter()
+            .find(|r| r.0 == "text-embedding-3-small")
+            .unwrap();
+        assert!(near(e.1, 0.02) && e.2 == 0.0, "input-only model: {e:?}");
+    }
+
+    #[test]
+    fn helicone_reads_only_the_model_makers_own_rows() {
+        let s = Store::open_memory().unwrap();
+        let body = json!({"metadata": {}, "data": [
+            {"provider": "ANTHROPIC", "model": "claude-opus-4-6", "operator": "includes",
+             "input_cost_per_1m": 5, "output_cost_per_1m": 25,
+             "prompt_cache_read_per_1m": 0.5, "prompt_cache_write_per_1m": 6.25},
+            // OpenRouter's row carries its 5.5% credit fee — not a list price.
+            {"provider": "OPENROUTER", "model": "anthropic/claude-opus-4.6", "operator": "equals",
+             "input_cost_per_1m": 5.275, "output_cost_per_1m": 26.375},
+            {"provider": "AZURE", "model": "gpt-5", "operator": "equals",
+             "input_cost_per_1m": 1.4, "output_cost_per_1m": 11},
+            // Same id twice: the exact (`equals`) row beats the family pattern.
+            {"provider": "OPENAI", "model": "gpt-5", "operator": "equals",
+             "input_cost_per_1m": 1.25, "output_cost_per_1m": 10},
+            {"provider": "OPENAI", "model": "gpt-5", "operator": "startsWith",
+             "input_cost_per_1m": 9, "output_cost_per_1m": 9},
+            {"provider": "OPENAI", "model": "no-prices", "operator": "equals"},
+            "junk"
+        ]})
+        .to_string();
+        assert_eq!(import_helicone(s.conn(), &body, 1).unwrap(), 3);
+        let rows = rows_of(&s, "helicone");
+        let ids: Vec<_> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(ids, ["claude-opus-4-6", "gpt-5"]);
+        let g = rows.iter().find(|r| r.0 == "gpt-5").unwrap();
+        assert!(near(g.1, 1.25) && near(g.2, 10.0), "exact row lost: {g:?}");
+        let o = rows.iter().find(|r| r.0 == "claude-opus-4-6").unwrap();
+        assert!(near(o.3.unwrap(), 0.5) && near(o.4.unwrap(), 6.25));
+    }
+
+    #[test]
+    fn langfuse_uses_the_default_tier_and_skips_blended_rows() {
+        let s = Store::open_memory().unwrap();
+        let body = json!([
+            {"modelName": "gpt-4o", "pricingTiers": [
+                {"isDefault": false, "prices": {"input": 5e-6, "output": 2e-5}},
+                {"isDefault": true, "prices": {"input": 2.5e-6, "output": 1e-5,
+                    "input_cache_read": 1.25e-6, "input_cache_creation": 2.5e-6}}]},
+            {"modelName": "claude-x", "pricingTiers": [
+                {"isDefault": true, "prices": {"input": 3e-6, "output": 1.5e-5,
+                    "cache_read_input_tokens": 3e-7, "cache_write_tokens": 3.75e-6}}]},
+            // Legacy blended price: nothing to vote with.
+            {"modelName": "text-ada-001", "pricingTiers": [{"isDefault": true, "prices": {"total": 4e-6}}]},
+            // No default flag → the first tier.
+            {"modelName": "first-tier", "pricingTiers": [{"prices": {"input": 1e-6, "output": 2e-6}}]},
+            {"modelName": "no-tiers"},
+            {"pricingTiers": []},
+            7, null
+        ])
+        .to_string();
+        assert_eq!(import_langfuse(s.conn(), &body, 1).unwrap(), 3);
+        let rows = rows_of(&s, "langfuse");
+        let g = |id: &str| rows.iter().find(|r| r.0 == id).unwrap();
+        let o = g("gpt-4o");
+        assert!(
+            near(o.1, 2.5)
+                && near(o.2, 10.0)
+                && near(o.3.unwrap(), 1.25)
+                && near(o.4.unwrap(), 2.5)
+        );
+        let c = g("claude-x");
+        assert!(near(c.3.unwrap(), 0.3) && near(c.4.unwrap(), 3.75), "{c:?}");
+        assert!(near(g("first-tier").1, 1.0));
+        assert!(rows.iter().all(|r| r.0 != "text-ada-001"));
+    }
+
+    #[test]
+    fn llm_prices_skips_the_long_context_surcharge_rows() {
+        let s = Store::open_memory().unwrap();
+        let body = json!({"updated_at": "2026-09-28", "prices": [
+            {"id": "gpt-5.4", "name": "GPT-5.4 ≤272k", "input": 2.5, "output": 15.0, "input_cached": 0.25},
+            {"id": "gpt-5.4-272k", "name": "GPT-5.4 >272k", "input": 5.0, "output": 22.5, "input_cached": 0.5},
+            {"id": "gpt-5-nano", "name": "GPT-5 Nano", "input": 0.05, "output": 0.4, "input_cached": null},
+            {"id": "no-price", "name": "x"},
+            5
+        ]})
+        .to_string();
+        assert_eq!(import_llm_prices(s.conn(), &body, 1).unwrap(), 2);
+        let rows = rows_of(&s, "llm-prices");
+        assert_eq!(rows.len(), 2);
+        let g = rows.iter().find(|r| r.0 == "gpt-5.4").unwrap();
+        assert!(near(g.1, 2.5) && near(g.3.unwrap(), 0.25));
+        assert_eq!(rows.iter().find(|r| r.0 == "gpt-5-nano").unwrap().3, None);
+    }
+
+    #[test]
+    fn portkey_prices_are_cents_per_token() {
+        let s = Store::open_memory().unwrap();
+        let body = json!({
+            "default": {"pricing_config": {"pay_as_you_go": {"request_token": {"price": 0}}}},
+            "gpt-4o": {"pricing_config": {
+                "pay_as_you_go": {"request_token": {"price": 0.00025}, "response_token": {"price": 0.001},
+                                  "cache_read_input_token": {"price": 0.000125},
+                                  "cache_write_input_token": {"price": 0}},
+                "calculate": {"request": {"operation": "sum", "operands": [{"value": "x"}]}}}},
+            "qwen3-max": {"pricing_config": {"pay_as_you_go": {"request_token": {"price": 0.00012},
+                                                                "response_token": {"price": 0.0006}}}},
+            "kimi-k2.5": {"pricing_config": {"pay_as_you_go": {"request_token": {"price": 0.0000574},
+                                                                "response_token": {"price": 0.0003011}}}},
+            "no-config": {},
+            "zero": {"pricing_config": {"pay_as_you_go": {"request_token": {"price": 0}, "response_token": {"price": 0}}}}
+        })
+        .to_string();
+        // Every model of a maker's own file…
+        assert_eq!(import_portkey(s.conn(), &body, 1, &[]).unwrap(), 4);
+        let rows = rows_of(&s, "portkey");
+        let g = |id: &str| rows.iter().find(|r| r.0 == id).unwrap();
+        let o = g("gpt-4o");
+        assert!(
+            near(o.1, 2.5) && near(o.2, 10.0) && near(o.3.unwrap(), 1.25),
+            "{o:?}"
+        );
+        assert!(rows.iter().all(|r| r.0 != "default"));
+
+        // …or only the maker's own prefix out of a reseller's file.
+        let s2 = Store::open_memory().unwrap();
+        assert_eq!(
+            import_portkey(s2.conn(), &body, 1, &["qwen", "qwq"]).unwrap(),
+            1
+        );
+        let only = rows_of(&s2, "portkey");
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].0, "qwen3-max");
+        assert!(near(only[0].1, 1.2) && near(only[0].2, 6.0));
+        assert!(import_portkey(s2.conn(), "{oops", 1, &[]).is_err());
+    }
+
+    /// The real feeds, all nine: each imports rows and agrees with the prices
+    /// everyone knows. Needs downloaded files (see the ignored test above):
+    /// `GTT_FEED_DIR=<dir with openrouter.json vercel.json helicone.json
+    ///  langfuse.json llmprices.json portkey_<provider>.json>`.
+    #[test]
+    #[ignore = "needs GTT_FEED_DIR with the downloaded feeds"]
+    fn real_cross_check_feeds_import_and_agree_on_known_prices() {
+        let Some(dir) = std::env::var_os("GTT_FEED_DIR") else {
+            eprintln!("GTT_FEED_DIR not set — skipped");
+            return;
+        };
+        let dir = std::path::Path::new(&dir);
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+        let s = Store::open_memory().unwrap();
+        let mut counts = vec![
+            (
+                "openrouter",
+                import_openrouter(s.conn(), &read("openrouter.json"), 1).unwrap(),
+            ),
+            (
+                "vercel",
+                import_vercel(s.conn(), &read("vercel.json"), 1).unwrap(),
+            ),
+            (
+                "helicone",
+                import_helicone(s.conn(), &read("helicone.json"), 1).unwrap(),
+            ),
+            (
+                "langfuse",
+                import_langfuse(s.conn(), &read("langfuse.json"), 1).unwrap(),
+            ),
+            (
+                "llm-prices",
+                import_llm_prices(s.conn(), &read("llmprices.json"), 1).unwrap(),
+            ),
+        ];
+        let mut portkey = 0;
+        for (p, prefixes) in [
+            ("anthropic", &[][..]),
+            ("openai", &[][..]),
+            ("google", &[][..]),
+            ("x-ai", &[][..]),
+            ("dashscope", &["qwen", "qwq"][..]),
+        ] {
+            if let Ok(body) = std::fs::read_to_string(dir.join(format!("portkey_{p}.json"))) {
+                portkey += import_portkey(s.conn(), &body, 1, prefixes).unwrap();
+            }
+        }
+        counts.push(("portkey", portkey));
+        for (src, n) in &counts {
+            eprintln!("{src}: {n} rows");
+            assert!(
+                *n > 100 || *src == "llm-prices" || *src == "langfuse",
+                "{src}: only {n}"
+            );
+            assert!(*n > 0, "{src} imported nothing");
+        }
+        // Everyone that knows Claude Opus 4.6 quotes $5 / $25.
+        let opus: Vec<(String, f64, f64)> =
+            ["openrouter", "vercel", "langfuse", "llm-prices", "portkey"]
+                .iter()
+                .filter_map(|src| {
+                    rows_of(&s, src)
+                        .into_iter()
+                        .find(|r| r.0.replace('.', "-") == "claude-opus-4-6")
+                        .map(|r| (src.to_string(), r.1, r.2))
+                })
+                .collect();
+        eprintln!("claude-opus-4-6: {opus:?}");
+        assert!(opus.len() >= 4, "{opus:?}");
+        assert!(
+            opus.iter().all(|(_, i, o)| near(*i, 5.0) && near(*o, 25.0)),
+            "{opus:?}"
+        );
     }
 
     #[test]
