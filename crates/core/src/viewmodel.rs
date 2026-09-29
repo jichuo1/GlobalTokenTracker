@@ -275,7 +275,67 @@ pub fn utc_offset_ms(s: &str) -> Option<i64> {
     Some(if b[0] == b'-' { -ms } else { ms })
 }
 
+impl OverviewVm {
+    /// Recompute everything that depends on the range / tool / model filters
+    /// from the in-memory cube — microseconds, no SQL. The range-independent
+    /// extras (quotas, unpriced list, tz) stay as they are. `false` when the
+    /// cube cannot answer exactly (see `Cube::overview_parts`); `self` is then
+    /// untouched and the caller takes the SQL path.
+    pub fn apply_cube(
+        &mut self,
+        cube: &crate::cube::Cube,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> bool {
+        let Some(p) = cube.overview_parts(range, apps, models) else {
+            return false;
+        };
+        self.range = range;
+        self.today = p.today;
+        self.span = p.span;
+        self.all = p.all;
+        self.by_app = p.by_app;
+        self.by_model = p.by_model;
+        self.daily = p.daily;
+        self.apps = p.apps;
+        self.models = p.models;
+        true
+    }
+}
+
 impl Store {
+    /// `overview`, but the aggregates come from `cube`; only the cheap
+    /// range-independent extras are queried. Falls back to the SQL path when
+    /// the cube declines.
+    pub fn overview_from_cube(
+        &self,
+        cube: &crate::cube::Cube,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<OverviewVm> {
+        let Some(p) = cube.overview_parts(range, apps, models) else {
+            return self.overview(range, apps, models);
+        };
+        let quotas = self.latest_quotas()?;
+        Ok(OverviewVm {
+            today: p.today,
+            span: p.span,
+            all: p.all,
+            range,
+            by_app: p.by_app,
+            by_model: p.by_model,
+            daily: p.daily,
+            apps: p.apps,
+            models: p.models,
+            quota_groups: group_quotas(quotas.clone()),
+            quotas,
+            unpriced: self.unpriced_models()?,
+            tz_offset: local_utc_offset(),
+        })
+    }
+
     pub fn overview(
         &self,
         range: Range,

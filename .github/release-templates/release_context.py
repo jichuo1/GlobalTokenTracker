@@ -47,6 +47,11 @@ class ReleaseContext:
     commits: list[CommitInfo]
     sections: list[tuple[str, str]] = field(default_factory=list)
     truncated: bool = False
+    # True when the baseline tag exists but is not an ancestor of `commit`
+    # (e.g. the tag still points into history rewritten by filter-branch).
+    # Net-diff sections still compare its tree correctly; the commit list is
+    # bounded by the tag date instead of a real ancestry range.
+    baseline_orphaned: bool = False
 
     def commit_shas(self) -> set[str]:
         return {commit.sha for commit in self.commits}
@@ -94,18 +99,56 @@ def find_previous_tag(repo_root: Path, commit: str, release_tag: str, channel: s
     return max(candidates)[1] if candidates else None
 
 
-def list_commits(repo_root: Path, revision_range: str) -> list[CommitInfo]:
+def find_orphaned_tag(repo_root: Path, commit: str, release_tag: str, channel: str) -> str | None:
+    """Highest-versioned channel tag that is NOT merged into `commit`.
+
+    Survives history rewrites: after filter-branch the old release tag keeps
+    pointing at a pre-rewrite commit, so `tag --merged` finds nothing and the
+    caller would otherwise treat the release as "first ever" and summarize the
+    entire history. An orphan tag's tree is still a valid diff base
+    (`git diff tag..commit` compares trees, not ancestry); only the commit
+    list can't be ranged by it — callers bound it by the tag date instead.
+    """
+    pattern = ALPHA_TAG_PATTERN if channel == "alpha" else STABLE_TAG_PATTERN
+    current = _parse_tag(release_tag, pattern)
+    tags = run_git(repo_root, "tag", "--list", "v[0-9]*").splitlines()
+    candidates = []
+    for tag in (tag.strip() for tag in tags):
+        parsed = _parse_tag(tag, pattern)
+        if parsed is None or tag == release_tag:
+            continue
+        if channel == "stable" and current is not None and parsed >= current:
+            continue
+        merged = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", tag, commit],
+            cwd=repo_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode == 0
+        if not merged:
+            candidates.append((parsed, tag))
+    return max(candidates)[1] if candidates else None
+
+
+def tag_commit_date(repo_root: Path, tag: str) -> str:
+    """Committer date (YYYY-MM-DD) of the commit the tag points at."""
+    return run_git(repo_root, "log", "-1", "--format=%cd", "--date=short", tag).strip()
+
+
+def list_commits(repo_root: Path, revision_range: str, since: str | None = None) -> list[CommitInfo]:
     # 记录分隔符避免提交正文里的换行和制表符破坏解析。
-    raw = run_git(
-        repo_root,
+    args = [
         "log",
         "--reverse",
         "--no-merges",
         "--date=short",
         "--format=%x1e%H%x1f%ad%x1f%s%x1f%b%x1f",
         "--numstat",
-        revision_range,
-    )
+    ]
+    if since:
+        args.append(f"--since={since}")
+    args.append(revision_range)
+    raw = run_git(repo_root, *args)
     commits: list[CommitInfo] = []
     for record in raw.split("\x1e"):
         if not record.strip():
@@ -284,9 +327,25 @@ def build_context(
     fetch_published: bool = True,
 ) -> ReleaseContext:
     previous_tag = find_previous_tag(repo_root, commit, release_tag, channel)
+    # History rewrites (filter-branch etc.) leave old release tags pointing
+    # at commits no longer reachable from HEAD. With no baseline at all the
+    # context silently covers the ENTIRE history — that's how release notes
+    # end up summarizing every change ever made. An orphan tag is still a
+    # correct net-diff base (git diff compares trees, not ancestry); only the
+    # commit list can't be ranged on it, so it falls back to "--since=<tag
+    # date>" which approximates the real delta.
+    baseline_orphaned = False
+    commit_since: str | None = None
+    if previous_tag is None:
+        orphan = find_orphaned_tag(repo_root, commit, release_tag, channel)
+        if orphan is not None:
+            previous_tag = orphan
+            baseline_orphaned = True
+            commit_since = tag_commit_date(repo_root, orphan)
     revision_range = f"{previous_tag}..{commit}" if previous_tag else commit
-    commits = list_commits(repo_root, revision_range)
+    commits = list_commits(repo_root, revision_range, since=commit_since)
     context = ReleaseContext(channel, release_tag, previous_tag, commit, commits)
+    context.baseline_orphaned = baseline_orphaned
     budget = int(config.get("max_context_chars", 60000))
     strip_prefixes = config.get("path_strip_prefixes", [])
 

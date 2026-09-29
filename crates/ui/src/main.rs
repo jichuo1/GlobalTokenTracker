@@ -7,6 +7,7 @@
 //! (`diag!`, panic stderr) only exist when GTT_DEBUG=1; then we attach to the
 //! parent console, or allocate one for a double-clicked debug launch.
 
+mod alloc_probe; // TEMP-PROBE
 mod autostart;
 mod close_hook;
 mod config;
@@ -25,7 +26,7 @@ use globaltokentracker_core::power;
 use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_db_path};
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::{Range, day_start_ms};
-use globaltokentracker_core::{Engine, OverviewVm, Store};
+use globaltokentracker_core::{Cube, Engine, OverviewVm, Store};
 use gpu_slide::{Flight, LayerHost, MAX_SLIDE, Phase, Slide};
 use i18n::tr;
 use pages::*;
@@ -47,6 +48,12 @@ pub enum LoadOutcome {
 /// (`PageData`), so a scan never gates them and they never gate a scan.
 pub struct Snapshot {
     pub vm: OverviewVm,
+    /// In-memory aggregates behind `vm` — range / tool / model changes are
+    /// re-folded from it (microseconds) instead of re-querying the ledger.
+    /// Shared: a refresh clones the `Arc`, never the groups.
+    pub cube: Arc<Cube>,
+    /// `Shell::filter_gen` this snapshot's detail rows were loaded under.
+    pub filter_gen: u64,
     pub detail: DetailBundle,
     /// A price refresh is due (startup force or >12h stale) — run it as its
     /// own background task so network latency never gates the first paint.
@@ -149,6 +156,12 @@ pub struct Shell {
     /// Visible aggregates must rebuild even if the next scan lands nothing —
     /// set by filter/range/page changes, quota polls and repricing.
     views_stale: bool,
+    /// The next load rebuilds the aggregation cube from scratch (manual
+    /// refresh, repricing changed old rows) instead of refreshing touched days.
+    cube_rebuild: bool,
+    /// Bumped on every tool/model filter change — a load that started under an
+    /// older value has stale detail rows and must re-fetch them.
+    filter_gen: u64,
     /// Overview reflow column count — driven by the width ruler's
     /// Metrics events (4 until the first measurement lands).
     overview_cols: usize,
@@ -232,6 +245,9 @@ pub enum Msg {
     /// Filter-strip pill clicked — opens its overlay, or closes it when the
     /// same one is already open; a different picker's overlay replaces it.
     ToggleMenu(MenuKind),
+    /// Pointer pressed outside an open picker (click-away backdrop / a
+    /// filter-strip label) — light-dismiss.
+    CloseMenu,
     /// Quota group header clicked — fold/unfold the app's quota windows.
     ToggleQuotaGroup(String),
     /// Width-ruler observer: overview grids should use this many columns.
@@ -372,15 +388,31 @@ pub(crate) fn window_icon_path() -> &'static str {
     .as_str()
 }
 
-fn load_all(
+/// What one background load needs to know.
+struct LoadReq {
     range: Range,
     apps: Option<Vec<String>>,
     models: Option<Vec<String>>,
     force_prices: bool,
-    // True when the caller knows visible data must be rebuilt even if the
-    // scan lands nothing (filter/range/page change, reprice, quota poll).
+    /// True when the caller knows visible data must be rebuilt even if the
+    /// scan lands nothing (filter/range/page change, reprice, quota poll).
     force_views: bool,
-) -> Result<LoadOutcome, String> {
+    /// Aggregates from the previous load (`None` → build from scratch: first
+    /// load, manual refresh, repricing).
+    prev_cube: Option<Arc<Cube>>,
+    filter_gen: u64,
+}
+
+fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
+    let LoadReq {
+        range,
+        apps,
+        models,
+        force_prices,
+        force_views,
+        prev_cube,
+        filter_gen,
+    } = req;
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let engine = Engine::new(store).map_err(|e| e.to_string())?;
     let t = std::time::Instant::now();
@@ -388,6 +420,7 @@ fn load_all(
     let scan_ms = t.elapsed().as_millis();
     // A failed scan can't prove "nothing changed" — rebuild views anyway.
     let changed = report
+        .as_ref()
         .map(|r| r.events_ingested > 0 || r.quotas > 0)
         .unwrap_or(true);
     // Price refresh runs as its own background task (see PricesDone) so a
@@ -396,22 +429,48 @@ fn load_all(
     // app_state attempt stamp throttles failures to the same TTL.
     let price_due = force_prices
         || globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false);
-    if !force_views && !changed {
+    // A local midnight since the cube was built makes its "today" stale.
+    let stale_day = prev_cube.as_ref().is_some_and(|c| c.is_day_stale());
+    if !force_views && !changed && !stale_day {
         return Ok(LoadOutcome::Unchanged { scan_ms, price_due });
     }
+    // Aggregates: only the local days this pass wrote are recomputed (plus
+    // today/yesterday, for writers we don't hear about); anything the scan
+    // can't vouch for → one full pass (~70ms on a 63k-event ledger).
+    let t_cube = std::time::Instant::now();
+    let cube = match (&prev_cube, &report) {
+        (Some(c), Ok(r)) if !r.rollup_full => c.refreshed(&engine.store, &r.rollup_days),
+        _ => Cube::build(&engine.store),
+    }
+    .map_err(|e| e.to_string())?;
+    let cube = Arc::new(cube);
+    diag!(
+        "[cube] {} groups, {}ms ({})",
+        cube.group_count(),
+        t_cube.elapsed().as_millis(),
+        if prev_cube.is_some() {
+            "refresh"
+        } else {
+            "build"
+        }
+    );
     let vm = engine
         .store
-        .overview(range, apps.as_deref(), models.as_deref())
+        .overview_from_cube(&cube, range, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
-    let d = engine
+    // Rows only — the total comes from the cube (no COUNT(*) over the ledger).
+    let rows = engine
         .store
-        .detail(0, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
+        .events_page(DETAIL_PAGE_SIZE, 0, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
+    let total = cube.event_count(apps.as_deref(), models.as_deref());
     Ok(LoadOutcome::Fresh(Box::new(Snapshot {
         vm,
+        cube,
+        filter_gen,
         detail: DetailBundle {
-            rows: Arc::new(d.rows),
-            total: d.total_events,
+            rows: Arc::new(rows),
+            total,
             page: 0,
         },
         price_due,
@@ -521,7 +580,15 @@ impl Component for Shell {
         // refresh when >12h stale.
         context.spawn_background(move |_| {
             power::worker("gtt-scan");
-            match load_all(range, app_filter, model_filter, true, true) {
+            match load_all(LoadReq {
+                range,
+                apps: app_filter,
+                models: model_filter,
+                force_prices: true,
+                force_views: true,
+                prev_cube: None,
+                filter_gen: 0,
+            }) {
                 Ok(s) => Msg::Loaded(s),
                 Err(e) => Msg::Failed(e),
             }
@@ -583,6 +650,8 @@ impl Component for Shell {
             quota_collapsed: std::collections::BTreeSet::new(),
             prices_refreshing: false,
             views_stale: true,
+            cube_rebuild: false,
+            filter_gen: 0,
             overview_cols: 4,
             flight: None,
             flight_seq: 0,
@@ -603,32 +672,30 @@ impl Component for Shell {
                 let price_due = match outcome {
                     LoadOutcome::Fresh(s) => {
                         diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
-                        // Tool names can vanish from the ledger (pruned data);
-                        // keep the persisted filter honest — drop dead names
-                        // and collapse back to None on full coverage.
-                        if let Some(f) = &mut self.app_filter {
-                            f.retain(|a| s.vm.apps.contains(a));
-                            if s.vm.apps.iter().all(|a| f.contains(a)) {
-                                self.app_filter = None;
-                            }
-                            if self.app_filter != self.config.apps {
-                                self.config.apps = self.app_filter.clone();
-                                self.config.save();
-                            }
-                        }
-                        if let Some(f) = &mut self.model_filter {
-                            f.retain(|m| s.vm.models.contains(m));
-                            if s.vm.models.iter().all(|m| f.contains(m)) {
-                                self.model_filter = None;
-                            }
-                            if self.model_filter != self.config.models {
-                                self.config.models = self.model_filter.clone();
-                                self.config.save();
-                            }
-                        }
                         let price_due = s.price_due;
                         fresh = true;
                         self.snap = Some(*s);
+                        // The load ran against the range/filters captured when
+                        // it started; the user may have moved on since —
+                        // re-aim at the current ones (a cube fold).
+                        let (apps, models) = (self.app_filter.clone(), self.model_filter.clone());
+                        let range = self.range;
+                        let gen_now = self.filter_gen;
+                        let mut detail_stale = false;
+                        if let Some(sn) = self.snap.as_mut()
+                            && (sn.vm.range != range || sn.filter_gen != gen_now)
+                        {
+                            sn.vm
+                                .apply_cube(&sn.cube, range, apps.as_deref(), models.as_deref());
+                            sn.detail.total =
+                                sn.cube.event_count(apps.as_deref(), models.as_deref());
+                            detail_stale = sn.filter_gen != gen_now;
+                            sn.filter_gen = gen_now;
+                        }
+                        self.prune_filters();
+                        if detail_stale {
+                            self.load_detail_page(0, context);
+                        }
                         // Test hook: GTT_NAVTEST=<nav label> fires one page
                         // switch after first paint — scripted input can't
                         // reach the content island for real verification.
@@ -730,6 +797,9 @@ impl Component for Shell {
                 // Manual refresh dismisses an open picker — the user moved on.
                 self.open_menu = None;
                 self.views_stale = true;
+                // A manual refresh is also the "trust nothing" button: rebuild
+                // the aggregates from the raw events.
+                self.cube_rebuild = true;
                 self.start_scan(context);
             }
             Msg::SetRange(r) => {
@@ -791,17 +861,15 @@ impl Component for Shell {
                 };
                 self.config.apps = self.app_filter.clone();
                 self.config.save();
-                self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.filter_gen += 1;
+                self.refresh_views(context, true);
             }
             Msg::SetApps(filter) => {
                 self.app_filter = filter;
                 self.config.apps = self.app_filter.clone();
                 self.config.save();
-                self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.filter_gen += 1;
+                self.refresh_views(context, true);
             }
             Msg::ToggleModel(model, on) => {
                 let all: Vec<String> = self
@@ -828,17 +896,15 @@ impl Component for Shell {
                 };
                 self.config.models = self.model_filter.clone();
                 self.config.save();
-                self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.filter_gen += 1;
+                self.refresh_views(context, true);
             }
             Msg::SetModels(filter) => {
                 self.model_filter = filter;
                 self.config.models = self.model_filter.clone();
                 self.config.save();
-                self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.filter_gen += 1;
+                self.refresh_views(context, true);
             }
             Msg::SetRefreshSecs(secs) => {
                 if REFRESH_OPTIONS.iter().any(|(s, _)| *s == secs)
@@ -860,6 +926,7 @@ impl Component for Shell {
                 // Single-select semantics: a pick light-dismisses the panel.
                 self.open_menu = None;
             }
+            Msg::CloseMenu => self.open_menu = None,
             Msg::ToggleMenu(kind) => {
                 self.open_menu = if self.open_menu == Some(kind) {
                     None
@@ -1042,17 +1109,7 @@ impl Component for Shell {
             }
             Msg::DetailPage(page) => {
                 self.open_menu = None;
-                let apps = self.app_filter.clone();
-                let models = self.model_filter.clone();
-                context.spawn_background(move |_| {
-                    power::worker("gtt-detail");
-                    match Store::open(&db_path()).and_then(|s| {
-                        s.detail(page, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
-                    }) {
-                        Ok(d) => Msg::DetailLoaded(Arc::new(d.rows), d.total_events, page),
-                        Err(e) => Msg::Failed(e.to_string()),
-                    }
-                });
+                self.load_detail_page(page, context);
             }
             Msg::DetailLoaded(rows, total, page) => {
                 if let Some(s) = &mut self.snap {
@@ -1163,6 +1220,8 @@ impl Component for Shell {
                         self.views_stale = true;
                         self.load_page_data(Page::Prices, context);
                         if r.repriced > 0 {
+                            // Costs of events on arbitrary days changed.
+                            self.cube_rebuild = true;
                             self.start_scan(context);
                         }
                     }
@@ -1366,29 +1425,46 @@ impl Component for Shell {
         // Root must be a Grid: a vertical StackPanel offers children infinite
         // height, which makes the page ScrollViewer measure at full content
         // size and never scroll. Star row bounds the scroll area.
+        // Click-away backdrop: while a picker is open, a transparent layer over
+        // the chrome row + page swallows the press and closes the menu. It sits
+        // ABOVE the page but BELOW the chrome and the dropdown card, so the
+        // pickers themselves (switch menus with one click) and the card keep
+        // working. The Transparent (not null) background is what makes it
+        // hit-testable.
+        let mut root: Vec<KeyedView> = vec![
+            KeyedView::new(
+                "titlebar",
+                TitleBar::new()
+                    .preferred_height(WindowTitleBarHeight::Tall)
+                    .grid_row(0),
+            ),
+            KeyedView::new("nav", nav),
+            KeyedView::new("brand", brand),
+            KeyedView::new(
+                "pagehost",
+                Border::new()
+                    .grid_row(2)
+                    .border_brush(theme.divider)
+                    .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
+                    .content(content),
+            ),
+        ];
+        if self.open_menu.is_some() && matches!(self.page, Page::Overview | Page::Detail) {
+            root.push(KeyedView::new(
+                "backdrop",
+                Border::new()
+                    .grid_row(1)
+                    .grid_row_span(2)
+                    .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
+                    .on_pointer_pressed(context.callback(|_: PointerEventInfo| Msg::CloseMenu)),
+            ));
+        }
+        root.push(KeyedView::new("chrome", chrome));
+        root.push(KeyedView::new("overlay", overlay));
+        root.push(KeyedView::new("closedlg", close_dialog));
         Grid::new()
             .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
-            .keyed_children([
-                KeyedView::new(
-                    "titlebar",
-                    TitleBar::new()
-                        .preferred_height(WindowTitleBarHeight::Tall)
-                        .grid_row(0),
-                ),
-                KeyedView::new("nav", nav),
-                KeyedView::new("brand", brand),
-                KeyedView::new("chrome", chrome),
-                KeyedView::new(
-                    "pagehost",
-                    Border::new()
-                        .grid_row(2)
-                        .border_brush(theme.divider)
-                        .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
-                        .content(content),
-                ),
-                KeyedView::new("overlay", overlay),
-                KeyedView::new("closedlg", close_dialog),
-            ])
+            .keyed_children(root)
     }
 }
 
@@ -1657,9 +1733,7 @@ impl Shell {
             self.config.range_end_ms = Some(end_ms);
         }
         self.config.save();
-        self.views_stale = true;
-        self.scanning = false;
-        self.start_scan(context);
+        self.refresh_views(context, false);
     }
 
     fn start_scan(&mut self, context: &ComponentContext<Self>) {
@@ -1667,17 +1741,133 @@ impl Shell {
             diag!("[scan] start");
             self.scanning = true;
             let force_views = std::mem::take(&mut self.views_stale);
-            let range = self.range;
-            let apps = self.app_filter.clone();
-            let models = self.model_filter.clone();
+            let prev_cube = if std::mem::take(&mut self.cube_rebuild) {
+                None
+            } else {
+                self.snap.as_ref().map(|s| Arc::clone(&s.cube))
+            };
+            let req = LoadReq {
+                range: self.range,
+                apps: self.app_filter.clone(),
+                models: self.model_filter.clone(),
+                force_prices: false,
+                force_views,
+                prev_cube,
+                filter_gen: self.filter_gen,
+            };
             context.spawn_background(move |_| {
                 power::worker("gtt-scan");
-                match load_all(range, apps, models, false, force_views) {
+                match load_all(req) {
                     Ok(s) => Msg::Loaded(s),
                     Err(e) => Msg::Failed(e),
                 }
             });
         }
+    }
+
+    /// The statistics range or the tool/model scope changed: re-fold the
+    /// numbers from the in-memory cube right here on the UI thread — no file
+    /// scan, no SQL, no background hop. (This used to be a full scan plus ten
+    /// aggregate queries: 400–550ms.) Only the detail rows still come from the
+    /// ledger, as a one-row-page query.
+    fn refresh_views(&mut self, context: &ComponentContext<Self>, filters_changed: bool) {
+        let (apps, models) = (self.app_filter.clone(), self.model_filter.clone());
+        let range = self.range;
+        let t_fold = std::time::Instant::now();
+        let applied = self.snap.as_mut().is_some_and(|s| {
+            let ok =
+                s.vm.apply_cube(&s.cube, range, apps.as_deref(), models.as_deref());
+            if ok && filters_changed {
+                s.detail.total = s.cube.event_count(apps.as_deref(), models.as_deref());
+            }
+            ok
+        });
+        diag!(
+            "[view] {} → {:?} in {}us (cube: {applied})",
+            if filters_changed { "filters" } else { "range" },
+            range,
+            t_fold.elapsed().as_micros(),
+        );
+        if applied {
+            if filters_changed {
+                self.prune_filters();
+                self.load_detail_page(0, context);
+            }
+        } else {
+            // Nothing loaded yet, or the cube can't answer this window exactly
+            // (a custom edge off the day boundary): the SQL path, in the
+            // background. Restart even if a scan is in flight — it captured
+            // the old range/filters.
+            diag!("[view] cube declined — background reload");
+            self.views_stale = true;
+            self.scanning = false;
+            self.start_scan(context);
+        }
+    }
+
+    /// Tool names / models can vanish from the ledger (pruned data) or fall
+    /// out of scope when the tool selection narrows; keep the persisted
+    /// filters honest — drop dead names and collapse back to `None` on full
+    /// coverage.
+    fn prune_filters(&mut self) {
+        let Some((apps, models)) = self
+            .snap
+            .as_ref()
+            .map(|s| (s.vm.apps.clone(), s.vm.models.clone()))
+        else {
+            return;
+        };
+        if let Some(f) = &mut self.app_filter {
+            f.retain(|a| apps.contains(a));
+            if apps.iter().all(|a| f.contains(a)) {
+                self.app_filter = None;
+            }
+            if self.app_filter != self.config.apps {
+                self.config.apps = self.app_filter.clone();
+                self.config.save();
+            }
+        }
+        if let Some(f) = &mut self.model_filter {
+            f.retain(|m| models.contains(m));
+            if models.iter().all(|m| f.contains(m)) {
+                self.model_filter = None;
+            }
+            if self.model_filter != self.config.models {
+                self.config.models = self.model_filter.clone();
+                self.config.save();
+            }
+        }
+    }
+
+    /// Fetch one page of detail rows under the current filters. The total
+    /// comes from the cube, so the background query is just the page.
+    fn load_detail_page(&self, page: i64, context: &ComponentContext<Self>) {
+        let apps = self.app_filter.clone();
+        let models = self.model_filter.clone();
+        let total = self
+            .snap
+            .as_ref()
+            .map(|s| s.cube.event_count(apps.as_deref(), models.as_deref()));
+        context.spawn_background(move |_| {
+            power::worker("gtt-detail");
+            let res = Store::open(&db_path()).and_then(|s| {
+                let rows = s.events_page(
+                    DETAIL_PAGE_SIZE,
+                    page * DETAIL_PAGE_SIZE,
+                    apps.as_deref(),
+                    models.as_deref(),
+                )?;
+                let total = match total {
+                    Some(t) => t,
+                    None => s.event_count(apps.as_deref(), models.as_deref())?,
+                };
+                Ok((rows, total))
+            });
+            match res {
+                Ok((rows, total)) => Msg::DetailLoaded(Arc::new(rows), total, page),
+                Err(e) => Msg::Failed(e.to_string()),
+            }
+        });
     }
 
     /// Schedule the next chart-mount step in `delay_ms`, or finish the
@@ -1716,7 +1906,11 @@ impl Shell {
     }
 }
 
+#[global_allocator] // TEMP-PROBE
+static ALLOC: alloc_probe::Counting = alloc_probe::Counting;
+
 fn main() {
+    alloc_probe::spawn_reporter(); // TEMP-PROBE
     #[cfg(windows)]
     if diag_enabled() {
         diag_console();

@@ -442,7 +442,7 @@ fn overview_widget(
                         key: i as u8,
                         handle: &args.donuts[i],
                         // Trend takes stage 1, donut `i` stage 2+i.
-                        defer: args.canvas_ready < 2 + i,
+                        defer: args.canvas_ready < 2 + i || std::env::var_os("GTT_EXP_ONE").is_some(), // TEMP-EXP
                     },
                     ctx,
                 ));
@@ -668,12 +668,19 @@ fn picker_button(
         .orientation(Orientation::Horizontal)
         .spacing(GROUP_GAP)
         .children((
-            TextBlock::new()
-                .text(label)
-                .font_size(theme.label_size)
-                .foreground(theme.subtle)
+            // The label sits above the click-away backdrop, so it dismisses an
+            // open picker itself (transparent fill keeps it hit-testable).
+            Border::new()
                 .width(LABEL_W)
-                .vertical_alignment(VerticalAlignment::Center),
+                .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
+                .on_pointer_pressed(ctx.callback(|_: PointerEventInfo| Msg::CloseMenu))
+                .content(
+                    TextBlock::new()
+                        .text(label)
+                        .font_size(theme.label_size)
+                        .foreground(theme.subtle)
+                        .vertical_alignment(VerticalAlignment::Center),
+                ),
             Button::new()
                 .automation_name(a11y)
                 .width(width)

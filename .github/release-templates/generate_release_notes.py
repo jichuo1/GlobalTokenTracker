@@ -155,6 +155,13 @@ def build_user_prompt(context: ReleaseContext) -> str:
         f"本次发布：{context.release_tag}；对比基线：{previous}；"
         f"目标提交：{context.commit[:7]}；范围内非合并提交 {len(context.commits)} 个。"
     )
+    if context.baseline_orphaned:
+        header += (
+            f"\n注意：基线标签 {context.previous_tag} 不在当前提交历史中"
+            "（历史曾被重写）。「提交记录」只是按日期近似收敛的开发过程参考，"
+            "可能混入基线之前的提交——一律以各「净变化」节为准判断本次实际改动，"
+            "基线之前已有的功能不得写成新增。"
+        )
     if context.truncated:
         header += "\n部分证据因篇幅被截断，截断部分请勿推测。"
     return f"{header}\n\n{context.render()}"
@@ -476,6 +483,11 @@ def generate(
                 repo_root, config, channel=channel, release_tag=release_tag, commit=commit,
                 repository=repository,
             )
+            if context.baseline_orphaned:
+                warnings.append(
+                    f"基线标签 {context.previous_tag} 不在当前历史中（疑似历史重写后未迁移 tag）；"
+                    "已改用其树做净变化对比、提交记录按日期近似收敛。建议将该 tag 重贴到等价提交。"
+                )
             outcome = generate_with_llm(context, config, slots, log, warnings)
             if outcome is not None:
                 notes, label = outcome
