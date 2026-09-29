@@ -989,3 +989,22 @@
   - 渠道切换竞态：`UpdateChecked` 携带发起时的 `channel`；到达时若已不是当前渠道则丢弃（不动横幅/seen-tag），并在"手动检查待处理"或自动检查开启时立即按新渠道重发，杜绝旧渠道结果被当作新渠道答案展示。
   - 下载反馈：`Downloading(Release)`、`UpdateDownloaded(Release, Result)`；下载/启动安装器失败时回到 `Available(rel)` 并记 `update_error`（新检查结果或再次点击时清除）。横幅在 `Available`/`Downloading` 均显示：下载中以"正在下载并校验…"替换按钮，失败显示单行截断（80 字符）的"更新失败：…"与"重试"；设置页状态行同步。
   - 调试钩子 `GTT_UPDATE_FAIL_DOWNLOAD=1`：`update::download` 在任何网络访问前直接报错（与 `GTT_UPDATE_AS` 同处文档）。实测：开发版 UI 经 UIA 点击横幅"立即更新"→ 横幅显示失败原因 + "重试"（`target\shot-update-error.png`）；`cargo test --workspace` 全绿、`cargo clippy --workspace --all-targets -- -D warnings` 0。
+
+## S80 安装器 PATH 比较先展开 %VAR%：消除 `%LOCALAPPDATA%\…` 与绝对路径的重复条目 ✅
+
+- **范围**：仅 `crates/setup`——`path_eq` 比较前先做 Windows 环境变量展开；新增 4 个纯字符串单测；`Cargo.toml` 给 `windows` 增加 `Win32_System_Environment` 特性（`Cargo.lock` 无变化）。未动注册表读写流程、备份逻辑与 UI。
+- **现象 / 根因**：`HKCU\Environment\Path`（`REG_EXPAND_SZ`）里已有 `%LOCALAPPDATA%\Programs\GlobalTokenTracker` 时，`path_with` 只做大小写不敏感、去尾部 `\` 的字面比较，认不出它与 `C:\Users\<u>\AppData\Local\Programs\GlobalTokenTracker` 是同一目录 → 再追加一条，PATH 出现重复；卸载时 `path_without` 同样只删字面匹配的那条，另一条残留。`remove_dir_from_path` 的“结果为空则拒写”守卫也走 `path_eq`，同源。
+- **修复**：新增 `expand_env`（`ExpandEnvironmentStringsW`，与 `REG_EXPAND_SZ` 在登录时的展开规则一致：变量名不分大小写、未知变量原样保留）；`path_eq` 改为两侧先展开，再套用原有规范化（去首尾空白 / 尾部 `\` / ASCII 忽略大小写）。`path_with`、`path_without`、`remove_dir_from_path` 守卫、`uninstall_plan` 的 `on_path` 判断都经 `path_eq`，无需改动即同步生效。
+- **取舍**
+  - 不含 `%` 的字符串直接返回，不进 FFI（PATH 里绝大多数条目如此）；缓冲区起始 512 个 UTF-16 单元，不够按 API 返回的所需长度重试；API 失败回落为原串，即退化为旧的字面比较，不会报错或误删。
+  - 展开用**安装器进程**的环境，而非登录时的环境。`LOCALAPPDATA`/`USERPROFILE` 等系统/用户变量二者一致；PATH 里引用了进程环境中不存在的自定义变量时保持字面，等同旧行为（只可能漏判为“不同”，不会把不同目录判成相同）。
+  - 仍是纯文本比较：不解析 `..`、`/`、8.3 短名、符号链接；一个变量展开成多个以 `;` 分隔的目录时，整段与单个目录比较不相等（保守：宁可不删，也不会连带删掉别的目录）。
+  - 只改比较，不改写入：新增条目仍写绝对路径；不主动去重用户已有的重复条目。
+- **测试**（4 个，均为纯字符串，不读写注册表；`%LOCALAPPDATA%` 取自进程环境，未设置则明确 panic 而非静默跳过）：`expand_env` 规则（变量名大小写、未知变量保留、无 `%`、空串、超过 512 单元的重试路径）；`path_eq` 展开后仍叠加原规范化，且不同目录、未解析变量不会误判相等；`path_with` 在已有 `%LOCALAPPDATA%` 写法（及反向）时返回 `None`，无关的 `%USERPROFILE%` 条目不算命中；`path_without` 把 `%LOCALAPPDATA%` 与绝对（含尾 `\`）两种写法都删掉、其余条目与顺序不变，只剩两种写法时得空串。
+- **验证**
+  - 红/绿：临时把 `path_eq` 换回字面比较，三个新增的比较类用例全部失败；恢复后通过。
+  - `cargo test -p globaltokentracker-setup`：13/13 通过（既有 9 + 新增 4）。
+  - `cargo clippy -p globaltokentracker-setup --all-targets -- -D warnings`：0 告警。
+  - `cargo fmt --check` 在 `main.rs` 的新增代码处无差异；其余差异为文件内既有、未处理。
+  - 真实环境：测试前后对 `HKCU\Environment\Path` 的只读输出取哈希，前后一致（**未改动用户 PATH**）；既有注册表用例只用 `HKCU\Software\GlobalTokenTracker-test-*` 临时键，测后残留 0。
+- **遗留（如实）**：本机 HKCU PATH 已有的重复条目按要求未处理；此后卸载会把两种写法一并清掉，安装不会再新增重复，但不会自动合并已有的。已发布的旧版安装器仍有此缺陷。

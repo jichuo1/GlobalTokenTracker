@@ -251,10 +251,42 @@ fn open_user_env() -> Result<winreg::RegKey> {
     )?)
 }
 
+/// Expand `%VAR%` references with the Windows rules (`ExpandEnvironmentStringsW`,
+/// the same expansion a `REG_EXPAND_SZ` PATH gets at logon): unknown variables
+/// stay literal. Any API failure returns the input unchanged, i.e. comparison
+/// degrades to the old literal behaviour rather than erroring.
+fn expand_env(s: &str) -> String {
+    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+    use windows::core::PCWSTR;
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let src: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut buf = vec![0u16; 512];
+    loop {
+        // SAFETY: `src` is NUL-terminated and outlives the call; `buf` is a
+        // valid writable slice whose length the API honours.
+        let need =
+            unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut buf)) } as usize;
+        if need == 0 {
+            return s.to_string();
+        }
+        if need <= buf.len() {
+            // `need` counts the terminating NUL.
+            return String::from_utf16_lossy(&buf[..need - 1]);
+        }
+        buf.resize(need, 0);
+    }
+}
+
+/// Same directory? Both sides are `%VAR%`-expanded first (a PATH entry written
+/// as `%LOCALAPPDATA%\Programs\X` is the same directory as its absolute
+/// spelling), then compared ASCII-case-insensitively without surrounding
+/// whitespace / trailing `\`. Purely textual otherwise: no `..`, `/`, or
+/// 8.3-short-name resolution.
 fn path_eq(a: &str, b: &str) -> bool {
-    a.trim()
-        .trim_end_matches('\\')
-        .eq_ignore_ascii_case(b.trim().trim_end_matches('\\'))
+    let key = |p: &str| expand_env(p).trim().trim_end_matches('\\').to_string();
+    key(a).eq_ignore_ascii_case(&key(b))
 }
 
 fn path_with(cur: &str, dir: &str) -> Option<String> {
@@ -690,6 +722,88 @@ mod tests {
         );
         assert_eq!(path_without("a;b", DIR), None);
         assert_eq!(path_without(DIR, DIR).as_deref(), Some(""));
+    }
+
+    /// The default install dir spelled with `%LOCALAPPDATA%` and absolutely.
+    /// Pure strings: nothing here reads or writes the registry.
+    fn env_spellings() -> (String, String) {
+        let local = env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set");
+        (
+            r"%LOCALAPPDATA%\Programs\GlobalTokenTracker".to_string(),
+            format!(r"{local}\Programs\GlobalTokenTracker"),
+        )
+    }
+
+    #[test]
+    fn expand_env_follows_windows_rules() {
+        let local = env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set");
+        assert_eq!(expand_env(r"%LOCALAPPDATA%\x"), format!(r"{local}\x"));
+        // Variable names are case-insensitive.
+        assert_eq!(expand_env(r"%localappdata%\x"), format!(r"{local}\x"));
+        // Unknown variables stay literal, like the API.
+        assert_eq!(expand_env(r"%GTT_NO_SUCH_VAR%\x"), r"%GTT_NO_SUCH_VAR%\x");
+        assert_eq!(expand_env(r"C:\plain"), r"C:\plain");
+        assert_eq!(expand_env(""), "");
+        // Longer than the initial 512-unit buffer → exercises the grow-and-retry path.
+        let tail = "x".repeat(600);
+        assert_eq!(
+            expand_env(&format!(r"%LOCALAPPDATA%\{tail}")),
+            format!(r"{local}\{tail}")
+        );
+    }
+
+    #[test]
+    fn eq_expands_env_before_comparing() {
+        let (var, abs) = env_spellings();
+        assert!(path_eq(&var, &abs));
+        assert!(path_eq(&abs, &var));
+        // Existing normalisation still applies on top of expansion.
+        assert!(path_eq(&format!(" {var}\\ "), &abs));
+        assert!(path_eq(
+            &var.to_ascii_lowercase(),
+            &abs.to_ascii_uppercase()
+        ));
+        // A different directory is still different.
+        assert!(!path_eq(r"%LOCALAPPDATA%\Programs\Other", &abs));
+        // An unresolvable variable only equals its own literal spelling.
+        assert!(path_eq(r"%GTT_NO_SUCH_VAR%\x", r"%gtt_no_such_var%\X\"));
+        assert!(!path_eq(r"%GTT_NO_SUCH_VAR%\x", &abs));
+    }
+
+    #[test]
+    fn with_recognises_env_spelling() {
+        let (var, abs) = env_spellings();
+        // Already present as %LOCALAPPDATA%\… → adding the absolute path is a no-op.
+        assert_eq!(path_with(&format!(r"C:\x;{var};C:\y"), &abs), None);
+        assert_eq!(path_with(&var, &abs), None);
+        // …and the other way round.
+        assert_eq!(path_with(&format!(r"C:\x;{abs};C:\y"), &var), None);
+        // Unrelated %VAR% entries don't count as a match.
+        assert_eq!(
+            path_with(r"%USERPROFILE%\bin", &abs).as_deref(),
+            Some(format!(r"%USERPROFILE%\bin;{abs}").as_str())
+        );
+    }
+
+    #[test]
+    fn without_removes_both_spellings() {
+        let (var, abs) = env_spellings();
+        let cur = format!(r"C:\x;{var};%USERPROFILE%\bin;{abs}\;C:\y");
+        let expect = r"C:\x;%USERPROFILE%\bin;C:\y";
+        // Uninstall passes the absolute dir; the variable spelling goes too.
+        assert_eq!(path_without(&cur, &abs).as_deref(), Some(expect));
+        assert_eq!(path_without(&cur, &var).as_deref(), Some(expect));
+        // Only the variable spelling present.
+        assert_eq!(
+            path_without(&format!("a;{var};b"), &abs).as_deref(),
+            Some("a;b")
+        );
+        // Nothing but the two spellings → empty (the "refuse to write an empty
+        // PATH" guard in remove_dir_from_path judges by path_eq as well).
+        assert_eq!(
+            path_without(&format!("{var};{abs}"), &abs).as_deref(),
+            Some("")
+        );
     }
 
     struct Scratch {
