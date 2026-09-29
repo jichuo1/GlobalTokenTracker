@@ -7,7 +7,6 @@
 //! (`diag!`, panic stderr) only exist when GTT_DEBUG=1; then we attach to the
 //! parent console, or allocate one for a double-clicked debug launch.
 
-mod alloc_probe; // TEMP-PROBE
 mod autostart;
 mod close_hook;
 mod config;
@@ -16,6 +15,7 @@ mod gpu_slide;
 mod i18n;
 mod pages;
 mod theme;
+mod updater;
 mod tray;
 mod watch;
 mod widgets;
@@ -24,6 +24,7 @@ use config::{REFRESH_OPTIONS, UiConfig};
 use globaltokentracker_core::adapters;
 use globaltokentracker_core::power;
 use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_db_path};
+use globaltokentracker_core::update::Channel;
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::{Range, day_start_ms};
 use globaltokentracker_core::{Cube, Engine, OverviewVm, Store};
@@ -33,6 +34,7 @@ use pages::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use theme::Theme;
+use updater::UpdateState;
 use windows_reactor::*;
 
 /// Result of one background refresh. `Unchanged` means the scan ingested
@@ -59,6 +61,9 @@ pub struct Snapshot {
     /// own background task so network latency never gates the first paint.
     pub price_due: bool,
     pub scan_ms: u128,
+    /// False for the startup snapshot, which is built from the ledger as it
+    /// already is — the first frame doesn't wait for a scan; one follows.
+    pub scanned: bool,
 }
 
 /// `Arc` rows: the virtualized table's row closure owns a cheap handle
@@ -189,6 +194,18 @@ pub struct Shell {
     /// 1-DIP full-width ruler panel on the overview page; its surface
     /// metrics report the real content width for adaptive grids.
     ruler: ElementRef<SwapChainPanel>,
+    update: UpdateState,
+    /// Bumped whenever the auto-check chain is re-armed — a timer carrying an
+    /// older value belongs to a cancelled chain and is ignored.
+    update_gen: u64,
+    update_banner_dismissed: bool,
+    /// An update-check request is in flight (auto checks leave `update`
+    /// untouched, so `Checking` alone can't guard against overlap).
+    update_checking: bool,
+    /// Tag the banner was last shown for — a newer tag re-shows it.
+    update_seen_tag: Option<String>,
+    /// Last download/install failure — shown on the banner and settings row.
+    update_error: Option<String>,
 }
 
 /// Which filter-strip picker is open — `Tools`/`Models` are multi-select
@@ -290,6 +307,22 @@ pub enum Msg {
     /// Background price-source fetch finished — repriced>0 triggers one
     /// follow-up scan so newly-priced events show their USD.
     PricesDone(Result<globaltokentracker_core::pricing::RefreshReport, String>),
+    /// Settings "立即检查" (manual) or the scheduled check (auto).
+    CheckUpdate { manual: bool },
+    /// Auto-check timer of chain `gen` fired.
+    UpdateTimer(u64),
+    UpdateChecked {
+        channel: globaltokentracker_core::update::Channel,
+        manual: bool,
+        res: Result<Option<globaltokentracker_core::update::Release>, String>,
+    },
+    /// "立即更新": download + verify the installer, then run it.
+    StartUpdate,
+    UpdateDownloaded(globaltokentracker_core::update::Release, Result<PathBuf, String>),
+    /// Settings: update channel — "stable" | "alpha".
+    SetUpdateChannel(&'static str),
+    SetUpdateAuto(bool),
+    DismissUpdateBanner,
 }
 
 const DETAIL_PAGE_SIZE: i64 = 200;
@@ -401,6 +434,9 @@ struct LoadReq {
     /// load, manual refresh, repricing).
     prev_cube: Option<Arc<Cube>>,
     filter_gen: u64,
+    /// Run the file scan first. Off for the startup load: the ledger already
+    /// holds everything from the last session, so show it now and scan after.
+    scan: bool,
 }
 
 fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
@@ -412,12 +448,17 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         force_views,
         prev_cube,
         filter_gen,
+        scan,
     } = req;
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
-    let engine = Engine::new(store).map_err(|e| e.to_string())?;
-    let t = std::time::Instant::now();
-    let report = engine.scan_once();
-    let scan_ms = t.elapsed().as_millis();
+    let (store, report, scan_ms) = if scan {
+        let engine = Engine::new(store).map_err(|e| e.to_string())?;
+        let t = std::time::Instant::now();
+        let report = engine.scan_once();
+        (engine.store, report, t.elapsed().as_millis())
+    } else {
+        (store, Ok(Default::default()), 0)
+    };
     // A failed scan can't prove "nothing changed" — rebuild views anyway.
     let changed = report
         .as_ref()
@@ -427,8 +468,8 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
     // slow network never gates first paint or a refresh tick. `price_due`
     // fires once per launch (force_prices) and whenever >12h stale; the
     // app_state attempt stamp throttles failures to the same TTL.
-    let price_due = force_prices
-        || globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false);
+    let price_due =
+        force_prices || globaltokentracker_core::pricing::prices_stale(&store).unwrap_or(false);
     // A local midnight since the cube was built makes its "today" stale.
     let stale_day = prev_cube.as_ref().is_some_and(|c| c.is_day_stale());
     if !force_views && !changed && !stale_day {
@@ -439,8 +480,8 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
     // can't vouch for → one full pass (~70ms on a 63k-event ledger).
     let t_cube = std::time::Instant::now();
     let cube = match (&prev_cube, &report) {
-        (Some(c), Ok(r)) if !r.rollup_full => c.refreshed(&engine.store, &r.rollup_days),
-        _ => Cube::build(&engine.store),
+        (Some(c), Ok(r)) if !r.rollup_full => c.refreshed(&store, &r.rollup_days),
+        _ => Cube::build(&store),
     }
     .map_err(|e| e.to_string())?;
     let cube = Arc::new(cube);
@@ -454,13 +495,11 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
             "build"
         }
     );
-    let vm = engine
-        .store
+    let vm = store
         .overview_from_cube(&cube, range, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
     // Rows only — the total comes from the cube (no COUNT(*) over the ledger).
-    let rows = engine
-        .store
+    let rows = store
         .events_page(DETAIL_PAGE_SIZE, 0, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
     let total = cube.event_count(apps.as_deref(), models.as_deref());
@@ -475,6 +514,7 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         },
         price_due,
         scan_ms,
+        scanned: scan,
     })))
 }
 
@@ -546,6 +586,15 @@ fn arm_watcher(context: &ComponentContext<Shell>) {
     });
 }
 
+/// Arms one update-check timer of chain `gen`.
+fn arm_update(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
+    context.spawn_background(move |_| {
+        power::worker("gtt-update");
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        Msg::UpdateTimer(gen_id)
+    });
+}
+
 /// One blocking tray-event poll per arm; re-armed on every message.
 fn arm_tray(context: &ComponentContext<Shell>) {
     context.spawn_background(|_| {
@@ -579,7 +628,10 @@ impl Component for Shell {
         // 每次打开软件自动获取一次), off the UI thread. Subsequent scans only
         // refresh when >12h stale.
         context.spawn_background(move |_| {
-            power::worker("gtt-scan");
+            // The startup snapshot is what the user is waiting for: named but
+            // NOT efficiency-marked, so it runs on the performance cores (the
+            // cube build took ~170ms on an E-core vs ~70ms on a P-core).
+            power::name_thread("gtt-scan");
             match load_all(LoadReq {
                 range,
                 apps: app_filter,
@@ -588,6 +640,7 @@ impl Component for Shell {
                 force_views: true,
                 prev_cube: None,
                 filter_gen: 0,
+                scan: false,
             }) {
                 Ok(s) => Msg::Loaded(s),
                 Err(e) => Msg::Failed(e),
@@ -621,6 +674,9 @@ impl Component for Shell {
         // OTLP receiver: dedicated blocking thread (never the reactor pool).
         // Port busy or GTT_NO_OTEL → file-based sources only.
         let _otel = globaltokentracker_core::otel::spawn(db_path());
+        if config.update_auto {
+            arm_update(context, 0, updater::FIRST_CHECK_SECS);
+        }
         Self {
             snap: None,
             sources: None,
@@ -662,6 +718,12 @@ impl Component for Shell {
             close_prompt: false,
             close_remember: false,
             ruler: ElementRef::new(),
+            update: UpdateState::Idle,
+            update_gen: 0,
+            update_banner_dismissed: false,
+            update_checking: false,
+            update_seen_tag: None,
+            update_error: None,
         }
     }
 
@@ -669,11 +731,23 @@ impl Component for Shell {
         match message {
             Msg::Loaded(outcome) => {
                 let mut fresh = false;
+                let mut startup_snapshot = false;
                 let price_due = match outcome {
                     LoadOutcome::Fresh(s) => {
                         diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
                         let price_due = s.price_due;
                         fresh = true;
+                        diag!(
+                            "[startup] snapshot applied at {}ms (scanned={})",
+                            START.get().map_or(0, |t| t.elapsed().as_millis()),
+                            s.scanned
+                        );
+                        if !s.scanned {
+                            // Built without a scan: the snapshot is current as
+                            // of the ledger, but a scan still has to follow.
+                            startup_snapshot = true;
+                            self.views_stale = false;
+                        }
                         self.snap = Some(*s);
                         // The load ran against the range/filters captured when
                         // it started; the user may have moved on since —
@@ -771,7 +845,11 @@ impl Component for Shell {
                         )
                     });
                 }
-                if self.pending_rescan {
+                if startup_snapshot {
+                    // The first frame is out; now catch up with whatever the
+                    // tools wrote since (its Loaded arms the refresh timer).
+                    self.start_scan(context);
+                } else if self.pending_rescan {
                     self.pending_rescan = false;
                     self.start_scan(context);
                 } else {
@@ -800,6 +878,7 @@ impl Component for Shell {
                 // A manual refresh is also the "trust nothing" button: rebuild
                 // the aggregates from the raw events.
                 self.cube_rebuild = true;
+                globaltokentracker_core::adapters::forget_scan_memos();
                 self.start_scan(context);
             }
             Msg::SetRange(r) => {
@@ -1023,6 +1102,121 @@ impl Component for Shell {
                 self.config.save();
             }
             Msg::Noop => {}
+            Msg::CheckUpdate { manual } => {
+                if matches!(self.update, UpdateState::Downloading(_)) {
+                    return;
+                }
+                if manual {
+                    self.update = UpdateState::Checking;
+                }
+                if self.update_checking {
+                    return;
+                }
+                self.update_checking = true;
+                let channel = Channel::from_key(&self.config.update_channel);
+                context.spawn_background(move |_| {
+                    power::worker("gtt-update");
+                    Msg::UpdateChecked {
+                        manual,
+                        channel,
+                        res: globaltokentracker_core::update::check(channel)
+                            .map_err(|e| format!("{e:#}")),
+                    }
+                });
+            }
+            Msg::UpdateTimer(g) => {
+                if g != self.update_gen || !self.config.update_auto {
+                    return;
+                }
+                arm_update(context, g, updater::CHECK_INTERVAL_SECS);
+                self.update(Msg::CheckUpdate { manual: false }, context);
+            }
+            Msg::UpdateChecked {
+                manual,
+                channel,
+                res,
+            } => {
+                self.update_checking = false;
+                // A check that was in flight when the user hit 立即更新 must
+                // not clobber the Downloading state.
+                if matches!(self.update, UpdateState::Downloading(_)) {
+                    return;
+                }
+                if channel != Channel::from_key(&self.config.update_channel) {
+                    // Answer for a channel the user has since left.
+                    let pending = matches!(self.update, UpdateState::Checking);
+                    if pending || self.config.update_auto {
+                        self.update(Msg::CheckUpdate { manual: pending }, context);
+                    }
+                    return;
+                }
+                // A manual request that arrived while an auto check was in
+                // flight left `Checking` behind — treat its result as manual.
+                let manual = manual || matches!(self.update, UpdateState::Checking);
+                self.update_error = None;
+                match res {
+                    Ok(Some(rel)) => {
+                        diag!("[update] available {}", rel.tag);
+                        if self.update_seen_tag.as_deref() != Some(rel.tag.as_str()) {
+                            self.update_banner_dismissed = false;
+                            self.update_seen_tag = Some(rel.tag.clone());
+                        }
+                        self.update = UpdateState::Available(rel);
+                    }
+                    Ok(None) => {
+                        diag!("[update] up to date");
+                        self.update = UpdateState::UpToDate;
+                    }
+                    Err(e) => {
+                        diag!("[update] check failed: {e}");
+                        if manual {
+                            self.update = UpdateState::Failed(e);
+                        }
+                    }
+                }
+            }
+            Msg::StartUpdate => {
+                if let UpdateState::Available(rel) = &self.update {
+                    let rel = rel.clone();
+                    self.update_error = None;
+                    self.update = UpdateState::Downloading(rel.clone());
+                    context.spawn_background(move |_| {
+                        power::worker("gtt-update");
+                        let res = globaltokentracker_core::update::download(&rel)
+                            .map_err(|e| format!("{e:#}"));
+                        Msg::UpdateDownloaded(rel, res)
+                    });
+                }
+            }
+            Msg::UpdateDownloaded(rel, res) => {
+                let err = match res {
+                    Ok(path) => match updater::spawn_installer(&path) {
+                        Ok(()) => {
+                            self.quit_now(context);
+                            return;
+                        }
+                        Err(e) => e.to_string(),
+                    },
+                    Err(e) => e,
+                };
+                diag!("[update] install failed: {err}");
+                self.update = UpdateState::Available(rel);
+                self.update_error = Some(err);
+            }
+            Msg::SetUpdateChannel(v) => {
+                self.config.update_channel = v.to_string();
+                self.config.save();
+                self.update(Msg::CheckUpdate { manual: true }, context);
+            }
+            Msg::SetUpdateAuto(on) => {
+                self.config.update_auto = on;
+                self.config.save();
+                self.update_gen += 1;
+                if on {
+                    arm_update(context, self.update_gen, updater::FIRST_CHECK_SECS);
+                }
+            }
+            Msg::DismissUpdateBanner => self.update_banner_dismissed = true,
             Msg::NavGo(id) => self.nav_go(id, context),
             Msg::NavSettled(id) => {
                 if self.flight.as_ref().is_some_and(|f| f.id == id)
@@ -1368,7 +1562,17 @@ impl Component for Shell {
             }
             _ => Border::new().into(),
         };
-        let chrome = Border::new().grid_row(1).content(chrome);
+        let mut chrome_rows: Vec<KeyedView> = Vec::with_capacity(2);
+        if let UpdateState::Available(rel) | UpdateState::Downloading(rel) = &self.update
+            && !self.update_banner_dismissed
+        {
+            chrome_rows.push(KeyedView::new(
+                "update",
+                update_banner(theme, &self.update, rel, self.update_error.as_deref(), context),
+            ));
+        }
+        chrome_rows.push(KeyedView::new("filters", chrome));
+        let chrome = StackPanel::new().grid_row(1).keyed_children(chrome_rows);
         // Dropdown overlay renders last so its card floats above the page;
         // closed → an empty background-less Border (XAML skips hit-testing
         // null-background elements, so it never swallows clicks).
@@ -1523,7 +1727,7 @@ impl Shell {
                     ruler: &self.table_rulers[1],
                 },
             ),
-            Page::Settings => settings_page(&self.config, theme, context),
+            Page::Settings => settings_page(&self.config, &self.update, self.update_error.as_deref(), theme, context),
         }
     }
 
@@ -1754,6 +1958,7 @@ impl Shell {
                 force_views,
                 prev_cube,
                 filter_gen: self.filter_gen,
+                scan: true,
             };
             context.spawn_background(move |_| {
                 power::worker("gtt-scan");
@@ -1906,11 +2111,11 @@ impl Shell {
     }
 }
 
-#[global_allocator] // TEMP-PROBE
-static ALLOC: alloc_probe::Counting = alloc_probe::Counting;
+/// Process start — the reference for the `[startup]` diagnostics.
+static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 fn main() {
-    alloc_probe::spawn_reporter(); // TEMP-PROBE
+    START.get_or_init(std::time::Instant::now);
     #[cfg(windows)]
     if diag_enabled() {
         diag_console();

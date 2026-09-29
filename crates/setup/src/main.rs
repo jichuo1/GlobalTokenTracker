@@ -38,6 +38,7 @@ const UNINSTALL_KEY: &str =
 /// console window from our GUI process — it flickers on screen and, under
 /// some endpoint-protection policies, console allocation hangs the child.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 fn local_appdata() -> Result<PathBuf> {
     env::var_os("LOCALAPPDATA")
@@ -546,12 +547,14 @@ fn usage() {
     println!("  globaltokentracker-setup --quiet [--uninstall] [--dir <路径>]");
     println!("                                             静默命令行安装/卸载");
     println!("  globaltokentracker-setup --cli               强制命令行模式");
+    println!("  globaltokentracker-setup --quiet --launch    静默安装后启动程序");
 }
 
 fn main() -> Result<()> {
     let mut uninstall_flag = false;
     let mut quiet = false;
     let mut force_cli = false;
+    let mut launch = false;
     let mut help = false;
     let mut dir: Option<String> = None;
     let mut it = env::args().skip(1);
@@ -561,6 +564,7 @@ fn main() -> Result<()> {
             "--uninstall" | "-u" => uninstall_flag = true,
             "--quiet" | "-q" => quiet = true,
             "--cli" => force_cli = true,
+            "--launch" => launch = true,
             "--dir" => match it.next() {
                 Some(d) if !d.starts_with("--") => dir = Some(d),
                 _ => {
@@ -629,6 +633,19 @@ fn main() -> Result<()> {
         install_steps(&dest, true, true, &mut step, &log)?;
         if let Some((_, old)) = &prior {
             cleanup_prior_install(old, &dest, &log);
+        }
+        if launch && quiet {
+            let ui = dest.join("globaltokentracker-ui.exe");
+            match Command::new(&ui)
+                .creation_flags(DETACHED_PROCESS)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(_) => log("已启动 globaltokentracker-ui".into()),
+                Err(e) => log(format!("启动 globaltokentracker-ui 失败：{e}")),
+            }
         }
         println!();
         println!("{APP} {VER} 安装完成。");

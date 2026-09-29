@@ -4,11 +4,13 @@
 //! LiteLLM (prefixed keys) → unpriced. Never guess, never spread across a
 //! family — unpriced is flagged, counted 0, and routed to the overrides UI.
 
+mod feeds;
 mod seed;
 
 use crate::model::{CostSource, UsageEvent};
 use crate::store::{Store, now_ms};
 use anyhow::{Context, Result};
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -256,91 +258,52 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
         llmpricing: 0,
         repriced: 0,
     };
-    // Each source is independent: a single outage must not block the others.
-    // All failing → Err, book untouched.
+    // Each source is independent: a single outage (or a malformed document)
+    // must not block the others. All failing → Err, book untouched. Feeds are
+    // handled strictly one at a time — download, parse into the few typed
+    // fields we need, write, drop — so the transient heap is one document's
+    // worth instead of three full JSON DOMs at once (was a 50–80MB spike at
+    // every launch).
+    type Import = fn(&rusqlite::Connection, &str, i64) -> Result<usize>;
+    let feeds: [(&str, &str, Import); 3] = [
+        (MODELS_DEV_URL, "models.dev", feeds::import_models_dev),
+        (LITELLM_URL, "litellm", feeds::import_litellm),
+        (LLMPRICING_URL, "llmpricing", feeds::import_llmpricing),
+    ];
     let mut errs = Vec::new();
-    let mut get_json = |url: &str, tag: &str| match http_get(url) {
-        Ok(b) => match serde_json::from_str::<Value>(&b) {
-            Ok(v) => Some(v),
+    let mut succeeded = 0;
+    for (url, tag, import) in feeds {
+        let body = match http_get(url) {
+            Ok(b) => b,
             Err(e) => {
-                errs.push(format!("{tag} parse: {e}"));
-                None
+                errs.push(format!("{tag} fetch: {e}"));
+                continue;
             }
-        },
-        Err(e) => {
-            errs.push(format!("{tag} fetch: {e}"));
-            None
+        };
+        // Its own transaction: nothing is written unless the whole document
+        // parsed, and the write lock is never held across a download.
+        let written = (|| -> Result<usize> {
+            let tx = store.conn().unchecked_transaction()?;
+            let n = import(&tx, &body, now)?;
+            tx.commit()?;
+            Ok(n)
+        })();
+        drop(body);
+        match written {
+            Ok(n) => {
+                succeeded += 1;
+                match tag {
+                    "models.dev" => report.models_dev = n,
+                    "litellm" => report.litellm = n,
+                    _ => report.llmpricing = n,
+                }
+            }
+            Err(e) => errs.push(format!("{tag} parse: {e}")),
         }
-    };
-    let md = get_json(MODELS_DEV_URL, "models.dev");
-    let ll = get_json(LITELLM_URL, "litellm");
-    let lp = get_json(LLMPRICING_URL, "llmpricing");
-    if md.is_none() && ll.is_none() && lp.is_none() {
+    }
+    if succeeded == 0 {
         anyhow::bail!("all price sources failed: {}", errs.join("; "));
     }
-    let tx = store.conn().unchecked_transaction()?;
-
-    // models.dev: {provider: {models: {id: {cost: {input,output,cache_read,cache_write}}}}}
-    if let Some(md) = md {
-        let mut st = tx.prepare(
-            "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write, source, fetched_at)
-             VALUES ('models.dev', ?1, ?2, ?3, ?4, ?5, 'models.dev', ?6)",
-        )?;
-        for prov in md.as_object().into_iter().flatten() {
-            for (id, m) in prov.1["models"].as_object().into_iter().flatten() {
-                let c = &m["cost"];
-                if !c.is_object() {
-                    continue;
-                }
-                let f = |k: &str| c[k].as_f64().unwrap_or(0.0);
-                st.execute(rusqlite::params![
-                    normalize_key(id),
-                    f("input"),
-                    f("output"),
-                    f("cache_read"),
-                    f("cache_write"),
-                    now
-                ])?;
-                report.models_dev += 1;
-            }
-        }
-    }
-
-    // LiteLLM: {model: {input_cost_per_token, output_cost_per_token,
-    //   cache_read_input_token_cost, cache_creation_input_token_cost,
-    //   input_cost_per_token_above_200k_tokens,
-    //   cache_creation_input_token_cost_above_1hr,
-    //   input_cost_per_token_batches}} — all $/token → ×1e6 to $/1M.
-    if let Some(ll) = ll {
-        let mut st = tx.prepare(
-            "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write,
-                    tier_above_200k_input, tier_1h_cache_write, tier_batch, source, fetched_at)
-             VALUES ('litellm', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'litellm', ?9)",
-        )?;
-        let m = |v: &Value, k: &str| v[k].as_f64().map(|x| x * 1e6);
-        for (id, v) in ll.as_object().into_iter().flatten() {
-            if !v["input_cost_per_token"].is_number() {
-                continue; // skip spec entries ("sample_spec", defaults)
-            }
-            st.execute(rusqlite::params![
-                normalize_key(id),
-                m(v, "input_cost_per_token").unwrap_or(0.0),
-                m(v, "output_cost_per_token").unwrap_or(0.0),
-                m(v, "cache_read_input_token_cost").unwrap_or(0.0),
-                m(v, "cache_creation_input_token_cost").unwrap_or(0.0),
-                m(v, "input_cost_per_token_above_200k_tokens"),
-                m(v, "cache_creation_input_token_cost_above_1hr"),
-                m(v, "input_cost_per_token_batches"),
-                now
-            ])?;
-            report.litellm += 1;
-        }
-    }
-
-    if let Some(lp) = lp {
-        report.llmpricing = upsert_llmpricing(&tx, &lp, now)?;
-    }
-    tx.commit()?;
 
     // Re-price events that were unpriced at ingest — a grown price book may
     // now cover them.
@@ -355,6 +318,7 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
 /// bargain host never understates the user's actual provider cost. The
 /// source exposes no cache-write price → column stays NULL (honest absence,
 /// not a guessed multiplier).
+#[cfg(test)]
 fn upsert_llmpricing(conn: &rusqlite::Connection, lp: &Value, now: i64) -> Result<usize> {
     let mut st = conn.prepare(
         "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write, source, fetched_at)

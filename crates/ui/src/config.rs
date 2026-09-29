@@ -61,8 +61,18 @@ pub struct UiConfig {
     /// "tray" = hide to the notification area.
     #[serde(default)]
     pub close_action: String,
+    /// Update channel: "" / "stable" = 正式版, "alpha" = 预览版.
+    #[serde(default)]
+    pub update_channel: String,
+    /// Check for updates at startup and every 24h.
+    #[serde(default = "default_true")]
+    pub update_auto: bool,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_refresh_secs() -> u64 {
@@ -83,6 +93,8 @@ impl Default for UiConfig {
             window_theme: String::new(),
             autostart: false,
             close_action: String::new(),
+            update_channel: String::new(),
+            update_auto: true,
             pages: BTreeMap::new(),
         }
     }

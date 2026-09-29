@@ -2521,8 +2521,6 @@ dependencies = [
 [[package]]
 name = "windows-canvas"
 version = "0.100.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6bc3a83c76a8113ab82864086778b6a705b4b54700ed84d642a1b1125987bef"
 dependencies = [
  "windows-core 0.100.0",
  "windows-numerics 0.100.0",

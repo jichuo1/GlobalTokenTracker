@@ -2,6 +2,11 @@
 resolver = "3"
 members = ["crates/core", "crates/cli", "crates/ui", "crates/setup"]
 
+# Vendored windows-canvas with a shared GPU device for demand canvases —
+# see vendor/windows-canvas/PATCH.md (5 chart devices → 1: -168 threads, -75MB).
+[patch.crates-io]
+windows-canvas = { path = "vendor/windows-canvas" }
+
 [workspace.package]
 version = "0.3.0"
 edition = "2024"

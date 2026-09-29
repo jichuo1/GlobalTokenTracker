@@ -917,6 +917,42 @@
   - 只在本机（Win11 26200 + 1 块 NVIDIA 独显）验证；旧版 Windows / 其它 GPU / 高 DPI 未测。合成器路径不可用时降级为直接切页而非旧的 margin 动画（已删除该路径）。
   - 未做：位移之外的绘制（文字/卡片圆角等）本就由 XAML 合成走 GPU，无可迁移项。
 
+## S71 总览统计切换提速（内存聚合立方体）+ 下拉菜单点外部关闭 + 首屏提前 ✅
+
+- **诉求**：总览"时间统计切换"要更快；工具/模型/刷新三个下拉选完后点菜单外区域应关闭。
+- **下拉关闭**：菜单是贴在页面左上的卡片，此前没有任何"点外部"机制。现在菜单展开时在页面行+筛选栏行之上、`chrome`/`overlay` 之下铺一层透明遮罩（`Border` 透明底 + `on_pointer_pressed → Msg::CloseMenu`，`grid_row_span(2)`）；根 Grid 子元素顺序调整为 pagehost → backdrop → chrome → overlay，所以点另一个选择按钮仍是一击切换菜单；筛选栏里不在按钮内的文字标签也包成透明可点区域（同样触发关闭）。**验证（UIA `Invoke` 开菜单 + 带守卫的真实鼠标点击——发点击前必须确认前台窗口和光标下窗口都是测试实例）**：工具菜单开着点"模型"按钮→切到模型菜单；点页面空白→关闭；开"刷新"后点筛选栏右侧空白→关闭；点下拉卡片内边距→保持打开（点的是内边距而非复选框，未改写持久化筛选）。
+- **切换慢的根因**：`set_range`/筛选变更 → `start_scan` → `load_all`，先跑完整 `scan_once`（~170–270ms）再跑 `overview()` 的 10 个 SQL（真实账本 63k 事件：今日 97ms / 7 天 132ms / 30 天 215ms / 全部 274ms；`bucket_models`/`by_model`/`by_app`/`totals` 各扫一遍原始宽表并对每行 `strftime`），其中 `today/all/apps/models/quotas/unpriced` 与范围无关却每次重算。合计一次切换 ~400–550ms。
+- **方案**（`core/src/cube.rs`）：一遍 `GROUP BY (本地日, 工具, 模型)` 聚合成几百到几千个分组常驻内存（真实库 247 组 ≈25KB；日索引用整数算术 `(ts+off)/86400000`，不再逐行 `strftime`），之后任意 范围×工具筛选×模型筛选 都是内存折叠；`Today` 范围的小时柱另存今日 24×工具×模型；摄入后只重算被触及的本地日（`ScanReport.rollup_days`，另外总是重算今天/昨天以覆盖收不到通知的写入者如 OTLP 接收器），时区偏移变化/脏日过多/`rollup_full` → 全量重建；手动"刷新"与 repricing（`repriced>0`）强制全量重建；跨零点（`today_day` 过期）或范围边界不在日边界（自定义区间在 DST 时区）→ `overview_parts` 返回 `None`，走原 SQL 路径兜底。
+- **UI**：`Snapshot` 新增 `cube: Arc<Cube>`；`refresh_views` 在 UI 线程同步重算（范围/筛选切换不再扫描、不再查询、不再跨线程），明细只需后台取一页行、总数取自立方体（省 `COUNT(*)` 25ms）；扫描落地时按当前范围/筛选重新对准（`filter_gen` 检测过期）；`prune_filters` 抽出复用。
+- **实测**：一次统计 **9–38µs**（旧 97–274ms，约 1 万倍）；立方体构建 68ms（独立基准）/ ~95ms（应用内，启动线程改跑性能核后，之前被标成能效核时 ~170ms）；增量刷新 1.9ms；应用内范围切换重算日志 31–38µs、8 次全部走内存路径且之后无扫描。
+- **等价性证据**：单测 96 组合（6 范围 × 4 工具筛选 × 4 模型筛选，含空筛选、别名回退、无时间戳行、未来时间戳）SQL 与立方体逐项一致；增量刷新 == 全量重建；真实账本、真实持久化筛选（模型=claude-sonnet-5-5）4 个范围 事件数/费用/桶数/名称列表 全部 MATCH，`event_count` 一致；明细翻页/末页截图核对（总数来自立方体）。
+- **顺带修的旧缺陷**：`bucket_models` 遇到没有 `ts_start` 的事件会让整个总览报错（`strftime`→NULL 读 String 失败），加 `ts_start IS NOT NULL`；原 `by_app/by_model` 的 `ORDER BY cost_usd` 按 SQLite 语义指向原始列而非聚合值（排序依据不是总费用；UI 侧会再折叠排序，未逐一确认对显示的影响），立方体路径改为按总费用降序（并列按名称）。
+- **首屏提前**：启动那次加载不再等扫描——只开库+建立方体+出快照（进程启动后 **~380–460ms** 落地，此前需等扫描 170ms + 10 个 SQL），落地后立刻起一次真正的扫描；无变化则不再重建视图。启动加载线程去掉 EcoQoS 标记（延迟敏感）。
+- **空闲 tick 真正空闲**：`upsert_event` 的冲突更新只要 `completeness` 不降就 UPDATE 并返回"已写入"，`opencode` 每轮重发同一条进行中消息 → 每个 30 秒 tick 都被判为"有新数据"，废掉了 S41 的空闲零成本。现在加 `IS NOT` 行值比较守卫（26 列），内容相同不写不计；真实变化（如新价目使 `cost_usd` 变化）仍写入。空闲扫描现在是 `+0 events (merged 1)`。
+- **已知限制**：立方体不持久化（每次启动 ~70–100ms 重建一次，在首屏快照里）；DST 时区的自定义区间边缘走 SQL 兜底；跨零点后的第一次范围切换若立方体未刷新会走一次后台重载。
+
+## S72 内存优化：图表共享 GPU 设备 + 价目 feed 流式解析 ✅
+
+- **诉求**：优化内存。
+- **量化（release，`Get-Process` + 进程内分配计数器，临时探针已移除）**：Rust 堆常驻仅 **1.1MB**（无可省）；启动瞬间峰值 **78.8MB**；进程 170–200MB 主要是原生内存。对照：配额页（无图表）58 线程/98MB 私有，总览页 **268 线程/192–197MB 私有**——**5 个 D2D canvas 各自 `GpuDevice::new_or_warp`**，NVIDIA 驱动每个设备拉起 ~42 个工作线程 + ~19MB 私有内存。实验（只挂 1 个 canvas：100 线程/117MB）证实单设备的边际成本。
+- **改动一：canvas 共享一个 GPU 设备**。`windows-canvas` 的按需重绘 canvas 无共享设备变体（连续重绘的有）。vendoring `windows-canvas 0.100.0`（283KB，`vendor/windows-canvas`，`[patch.crates-io]`，`PATCH.md` 记录来历与单一改动，带原许可文件）：`Canvas::invalidated` 改取 UI 线程内 `thread_local` 共享设备（首次创建，其后 COM 引用克隆）；设备丢失重建时 `forget_shared_if` 废弃共享缓存让后续 canvas 建新的。悬停重绘（趋势提示卡、环图扇区气泡）与静止渲染截图核对一致。
+- **改动二：价目 feed 流式解析**（`pricing/feeds.rs`）。启动时每次都会联网刷新 models.dev(5.2MB)/LiteLLM(3.0MB)/llmpricing(1.6MB)，三份同时解析成完整 `serde_json::Value` 树（6–8 倍膨胀）并同时存活 = 50–79MB 堆尖峰 + 工作集冲到 218–229MB。现在逐源"下载→按类型只取所需字段解析（其余字段跳过不物化）→独立事务写入→释放"，宽容语义与旧 `Value` 代码逐点一致（数值字段类型不对=缺省、容器类型不对=空，不报错；按文档序保证重复键后者覆盖），且写库不再跨越下载持锁。旧实现保留为 `#[cfg(test)]` 参照，畸形形状等价性测试 + **真实 feed 对拍**（`--ignored`，`GTT_FEED_DIR`）：7,852/3,662/1,794 行与旧实现逐行一致。
+- **结果（总览页稳态）**：线程 268 → **111**；私有内存 ~194MB → **~118MB**；工作集 ~166MB → **~133MB**；启动 Rust 堆峰值 78.8MB → **10.2MB**（分配次数 160 万 → 36 万），工作集启动无尖峰（曲线平直）；GPU 专用显存 85.5MB → **51.7MB**。其它页 98–107MB。
+- **未做（如实）**：剩余 ~98MB 基线是 WinUI/XAML 运行时本身；托盘隐藏时 `EmptyWorkingSet` 沿用 S67 的取舍（不做，避免恢复时硬缺页）；`GpuDevice` 设备丢失重建路径未在真实设备丢失下演练（仅代码路径审阅）。
+
+## S73 整体数据获取性能 ✅
+
+- **定位**：稳态一次扫描 167ms，大头 `codebuddy_ide` 83ms（每次对 ~57 个会话目录读游标+解析整个 `seen` 集合 JSON+`read_dir`）、`codex` 35ms（515 次 `metadata()` ≈24ms，遍历仅 1.7ms、游标查询 3.4ms）；另有 `latest_quotas` 22ms、`unpriced_models` 7ms、每次 Fresh 的 10 个聚合查询（见 S71）。
+- **改动与实测**：
+  - `latest_quotas`：新增 `idx_quota_latest(app, account, window_kind, captured_at DESC, id DESC)`，查询改为"去重键 + 每键索引 top-1"：**22.6ms → 0.9ms**（也让 `insert_quota` 的去重探测走索引）；单测用旧窗口函数 SQL 作参照（NULL 账号、`captured_at` 并列）。
+  - `unpriced_models`：局部索引 `idx_events_unpriced`（14,317 条未计价，占 23%）+ `INDEXED BY`（规划器无统计信息会选宽索引回表）：**7.0 → 2.5ms**。
+  - `codex` 等 JSONL 源：扫描前在能效池并行 `metadata()`，按序消费：**26.5 → 9.5ms**。
+  - `codebuddy_ide`：进程级"`messages` 目录 mtime 未变则整体跳过"记忆（适配器对象每次扫描重建，故为静态）；**只信任已静止 ≥2 秒的目录**（NTFS 目录时间戳粒度粗，扫描后极短时间内再变可能同戳而漏读）；先读 mtime 再列目录；手动刷新调用 `adapters::forget_scan_memos()`。同进程连扫：**161 → 118 → 111ms**。
+  - 空闲 tick 不再被 `opencode` 的重复重写判为"有变化"（见 S71）；启动首屏不等扫描（见 S71）。
+- **未做（如实）**：`codebuddy_ide.discover()` 目录遍历 41ms、`cline` 7.5ms（0 个条目）、`Engine::new` 每次重载价目 ~5–10ms、`Store::open` ~1.7ms——每个 30 秒 tick 单项几十毫秒且跑在能效核，收益低，未动。
+- **验证**：core 73 测试通过（+1 个需真实 feed 数据的 `--ignored`），ui 10 通过；`cargo clippy --workspace --all-targets -- -D warnings` 0；fmt 在 core/ui 仅剩 HEAD 既有的 `pages.rs::settings_page` 一处。
+- **过程记录**：`af6076c`（发布说明生成器修复）提交时把本轮尚未完成的临时探针（全局计数分配器 `alloc_probe.rs` + `#[global_allocator]`、`GTT_EXP_ONE` 实验开关、`bench_overview.rs` 基准示例）一并带上并已推送；本轮工作区已将它们全部移除，下次提交即回收。
+
 ## S74 安装器用户 PATH 破坏修复（读失败被当空串写回 + 类型降级） ✅
 
 - **现象**：安装/升级/卸载后电脑上其他 PATH 条目丢失或错乱。本机实证：`HKCU\Environment\Path` 仅剩 `...\Programs\GlobalTokenTracker` 一条，且类型由 `REG_EXPAND_SZ` 变成 `REG_SZ`。
@@ -933,3 +969,23 @@
 - **测试**（6 个，注册表用例全部在临时键 `HKCU\Software\GlobalTokenTracker-test-*` 上，Drop 守卫清理，不触碰真实 PATH）：纯函数增删边界；REG_EXPAND_SZ 增→删往返逐字还原且类型不变；值不存在路径；**原 bug 复现**——只写句柄下删除必须报错且值不变；备份失败阻断写入。
 - **验证**：`cargo test -p globaltokentracker-setup` 6/6 通过；`cargo clippy -p globaltokentracker-setup --all-targets -- -D warnings` 0；测试后临时键残留 0。
 - **遗留**：已被旧版破坏的用户 PATH 无法自动恢复（原值未留存），需人工恢复一次；此后每次修改都有 `path.bak`。
+
+## S75 自动检查更新 + 更新渠道切换 ✅
+
+- **范围**：启动后 15 秒及此后每 24 小时自动查询 GitHub Releases；发现新版本 → 顶部横幅 + 设置页"更新"卡片，一键"下载 → SHA-256 校验 → 静默安装 → 自动重启应用"。设置页可关闭自动检查、手动"立即检查"、在 正式版 / 预览版（alpha）间切换渠道（切换后立即复查）。
+- **设计**：
+  - core `update.rs`：`Version`（含 `-alpha.N`，正式版 > 同号 alpha）、`select_update`（纯函数：跳过 draft/无法解析的 tag/缺少 `GlobalTokenTracker-Setup-<tag>-win-x64.exe` 或 `SHA256SUMS.txt` 的发布；正式渠道仅取非 prerelease 且非 alpha；取最大版本；**仅当严格大于当前版本才返回**）、`check`（`/releases?per_page=30`，15s 超时，403/429 报限流）、`download`（`%TEMP%\GlobalTokenTracker-update`，流式写 `.part` 边写边算 SHA-256，200MB 上限，比对 `SHA256SUMS.txt` 通过才改名返回，不一致/缺条目一律删除并报错）。
+  - **版本注入**：工作区版本号 0.3.0，alpha 构建也嵌入同一个 "0.3.0"，二进制无法区分 `0.3.0-alpha.1` 与 `0.3.0`。因此两个 release 工作流里每个跑 `installer\package.ps1` 的步骤都带 `GTT_RELEASE_TAG`，core 用 `option_env!("GTT_RELEASE_TAG")` 编译期读取（空串/无法解析视为未设置，回落 `CARGO_PKG_VERSION`）；alpha 的 push 触发校验用占位 tag，故保持为空。调试钩子：运行时环境变量 `GTT_UPDATE_AS=v0.1.0` 覆盖当前版本。
+  - setup 新增 `--launch`：仅在 `--quiet` 安装/升级成功（含旧目录清理）后，以 `DETACHED_PROCESS` 拉起 `<dest>\globaltokentracker-ui.exe`；UI 在下载校验通过后以 `--quiet --launch` 分离启动安装器并 `quit_now`。
+  - UI：`UpdateState`（Idle/Checking/UpToDate/Available/Downloading/Failed）；自动检查失败只 `diag!`、不改状态（离线不打扰）；自动检查不会把状态切到 `Checking`（避免横幅每 24h 闪一下），用 `update_checking` 防并发；定时链带 `update_gen`，开关/重启链时旧定时器自然失效。横幅放在标题栏下的 chrome 行（页面滑动层之外）；`InfoBar` 无操作按钮槽，故用卡片样式 Border + 按钮；"查看更新说明"用 `HyperlinkButton.navigate_uri`。`ui.json` 新增 `update_channel`（""=正式版）与 `update_auto`（默认 true）。
+- **安全**：下载内容必须与同一发布的 `SHA256SUMS.txt` 匹配才会被执行；不提供降级（切到正式渠道而当前 alpha 更新时返回无更新）；安装器仅在校验通过后运行。
+- **已知限制**：未做 Authenticode 签名校验（签名仅在配置了 `GTT_SIGN_*` 密钥时由打包脚本可选执行；校验依赖同一 Release 的 SHA256SUMS，无法防御 Release 本身被篡改）；GitHub 未认证 API 每 IP 60 次/小时；已发布的 v0.2.0 安装器仍含 S74 之前的 PATH 缺陷。
+- **验证**：
+  - `cargo test -p globaltokentracker-core update` 9 个用例通过（版本解析/排序/`current_from`/渠道/`select_update` 六类场景/`parse_sums`）；`cargo test --workspace` 全绿（core 82、setup 6、ui 10）；`cargo clippy --workspace --all-targets -- -D warnings` 0。
+  - 实网只读验证：`GTT_UPDATE_AS=v0.1.0` → 正式/预览渠道均返回 v0.2.0（资产与 sums URL 正确）；真实当前版本 v0.3.0 → 两渠道均为 None；`download` 流式取回 10,184,192 字节且 SHA-256 与 SHA256SUMS 一致，随后删除，未执行。
+  - 开发版 UI（`GTT_DEBUG=1 GTT_UPDATE_AS=v0.1.0`）日志 `[update] available v0.2.0`；横幅与设置页"更新"卡片截图已核对（未点击"立即更新"）。
+- **顺带**：工作区中既有的 `pages.rs` 两处 `Grid::children(Vec<View>)`（DETAIL/PRICE 行）无法编译，改为 `.keyed_children(keyed(cells))`；另去掉一处多余 `.into()`（clippy `useless_conversion`）。
+- **S75 补丁（评审后）**：
+  - 渠道切换竞态：`UpdateChecked` 携带发起时的 `channel`；到达时若已不是当前渠道则丢弃（不动横幅/seen-tag），并在"手动检查待处理"或自动检查开启时立即按新渠道重发，杜绝旧渠道结果被当作新渠道答案展示。
+  - 下载反馈：`Downloading(Release)`、`UpdateDownloaded(Release, Result)`；下载/启动安装器失败时回到 `Available(rel)` 并记 `update_error`（新检查结果或再次点击时清除）。横幅在 `Available`/`Downloading` 均显示：下载中以"正在下载并校验…"替换按钮，失败显示单行截断（80 字符）的"更新失败：…"与"重试"；设置页状态行同步。
+  - 调试钩子 `GTT_UPDATE_FAIL_DOWNLOAD=1`：`update::download` 在任何网络访问前直接报错（与 `GTT_UPDATE_AS` 同处文档）。实测：开发版 UI 经 UIA 点击横幅"立即更新"→ 横幅显示失败原因 + "重试"（`target\shot-update-error.png`）；`cargo test --workspace` 全绿、`cargo clippy --workspace --all-targets -- -D warnings` 0。

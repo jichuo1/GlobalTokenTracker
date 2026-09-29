@@ -15,6 +15,7 @@ pub mod pricing;
 pub mod quota;
 pub mod store;
 pub mod sync;
+pub mod update;
 pub mod viewmodel;
 
 pub use cube::Cube;

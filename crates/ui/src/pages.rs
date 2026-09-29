@@ -6,10 +6,12 @@ use crate::config::{REFRESH_OPTIONS, UiConfig, refresh_label};
 use crate::gpu_slide::Slide;
 use crate::i18n::{self, tr};
 use crate::theme::Theme;
+use crate::updater::UpdateState;
 use crate::widgets as w;
 use crate::{DETAIL_PAGE_SIZE, MenuKind, Msg, PriceTable, Shell, Snapshot};
 use crate::{t, tf};
 use globaltokentracker_core::store::EventRow;
+use globaltokentracker_core::update::Release;
 use globaltokentracker_core::viewmodel::Range;
 use globaltokentracker_core::viewmodel::{app_display, fmt};
 use windows_reactor::*;
@@ -442,7 +444,7 @@ fn overview_widget(
                         key: i as u8,
                         handle: &args.donuts[i],
                         // Trend takes stage 1, donut `i` stage 2+i.
-                        defer: args.canvas_ready < 2 + i || std::env::var_os("GTT_EXP_ONE").is_some(), // TEMP-EXP
+                        defer: args.canvas_ready < 2 + i,
                     },
                     ctx,
                 ));
@@ -1052,24 +1054,44 @@ pub fn overview_page(
 /// Shared column shape for header + every data row — identical widths on each
 /// per-row Grid keep columns aligned without one giant 200-row measure pass.
 const DETAIL_COLS: [GridLength; 8] = [
-    GridLength::Pixel(96.0), // 时间
-    GridLength::Pixel(72.0), // 工具
+    GridLength::Pixel(90.0), // 时间
+    GridLength::Pixel(96.0), // 工具
     GridLength::STAR,        // 模型
-    GridLength::Pixel(96.0), // 输入
-    GridLength::Pixel(96.0), // 输出
-    GridLength::Pixel(96.0), // 缓存
+    GridLength::Pixel(88.0), // 输入
+    GridLength::Pixel(88.0), // 输出
+    GridLength::Pixel(88.0), // 缓存
     GridLength::Pixel(92.0), // 成本
-    GridLength::Pixel(72.0), // 时长
+    GridLength::Pixel(64.0), // 时长
 ];
+/// Narrow plan: the (subtle) cache column goes and the rest tighten up, so the
+/// model column keeps room instead of being squeezed to nothing.
+const DETAIL_COLS_COMPACT: [GridLength; 7] = [
+    GridLength::Pixel(84.0), // 时间
+    GridLength::Pixel(88.0), // 工具
+    GridLength::STAR,        // 模型
+    GridLength::Pixel(80.0), // 输入
+    GridLength::Pixel(80.0), // 输出
+    GridLength::Pixel(88.0), // 成本
+    GridLength::Pixel(60.0), // 时长
+];
+/// Measured row width from which every detail column fits with a model column
+/// of ≥ ~150 DIPs (626 fixed + padding). `0` = not measured yet → full plan.
+const DETAIL_FULL_MIN: f64 = 780.0;
+
+fn detail_compact(width: f64) -> bool {
+    width > 0.0 && width < DETAIL_FULL_MIN
+}
 
 fn dcell(col: i32, v: View) -> View {
     Border::new().grid_column(col).content(v)
 }
 
 fn dtext(theme: &Theme, text: String, right: bool) -> TextBlock {
+    // Ellipsis instead of a hard clip when a value outgrows its column.
     let t = TextBlock::new()
         .text(text)
         .font_size(theme.body_size)
+        .text_trimming(TextTrimming::CharacterEllipsis)
         .vertical_alignment(VerticalAlignment::Center);
     if right {
         t.horizontal_alignment(HorizontalAlignment::Right)
@@ -1078,34 +1100,77 @@ fn dtext(theme: &Theme, text: String, right: bool) -> TextBlock {
     }
 }
 
-fn detail_header(theme: &Theme) -> View {
-    let h = |theme: &Theme, text: &str, col: i32, right: bool| -> View {
-        dcell(
-            col,
-            dtext(theme, text.into(), right)
-                .font_size(theme.label_size)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .foreground(theme.subtle)
-                .into(),
+/// Grid columns + the physical index of each logical detail column
+/// (time, tool, model, in, out, cache, cost, duration) for a row width;
+/// `None` = hidden in this plan.
+fn detail_layout(width: f64) -> (Vec<GridLength>, [Option<i32>; 8]) {
+    if detail_compact(width) {
+        (
+            DETAIL_COLS_COMPACT.to_vec(),
+            [
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                None,
+                Some(5),
+                Some(6),
+            ],
         )
+    } else {
+        (
+            DETAIL_COLS.to_vec(),
+            [
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+                Some(6),
+                Some(7),
+            ],
+        )
+    }
+}
+
+fn detail_header(theme: &Theme, width: f64) -> View {
+    let (cols, at) = detail_layout(width);
+    let h = |text: &str, logical: usize, right: bool| -> Option<View> {
+        at[logical].map(|col| {
+            dcell(
+                col,
+                dtext(theme, text.into(), right)
+                    .font_size(theme.label_size)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .foreground(theme.subtle)
+                    .into(),
+            )
+        })
     };
+    let cells: Vec<View> = [
+        h(t!("时间"), 0, false),
+        h(t!("工具"), 1, false),
+        h(t!("模型"), 2, false),
+        h(t!("输入"), 3, true),
+        h(t!("输出"), 4, true),
+        h(t!("缓存"), 5, true),
+        h(t!("成本"), 6, true),
+        h(t!("时长"), 7, true),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Border::new()
         .padding(Thickness::xy(10.0, 6.0))
         .border_brush(theme.divider)
         .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-        .content(Grid::new().columns(DETAIL_COLS).children([
-            h(theme, t!("时间"), 0, false),
-            h(theme, t!("工具"), 1, false),
-            h(theme, t!("模型"), 2, false),
-            h(theme, t!("输入"), 3, true),
-            h(theme, t!("输出"), 4, true),
-            h(theme, t!("缓存"), 5, true),
-            h(theme, t!("成本"), 6, true),
-            h(theme, t!("时长"), 7, true),
-        ]))
+        .content(Grid::new().columns(cols).keyed_children(keyed(cells)))
 }
 
-fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
+fn event_row(theme: &Theme, r: &EventRow, zebra: bool, width: f64) -> View {
+    let (cols, at) = detail_layout(width);
     let model = r
         .model
         .clone()
@@ -1125,24 +1190,26 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
     if r.cost_source.as_deref() == Some("unpriced") {
         cost_children.push(w::badge(theme, "unpriced".into(), w::BadgeTone::Warn));
     }
-    let cells: [View; 8] = [
-        dcell(0, dtext(theme, fmt::ts_short(r.ts_start), false).into()),
-        dcell(1, dtext(theme, r.app.clone(), false).into()),
-        dcell(
-            2,
-            dtext(theme, truncate(&model, 40), false)
-                .foreground(theme.subtle)
-                .into(),
+    let put = |logical: usize, v: View| at[logical].map(|col| dcell(col, v));
+    let cells: Vec<View> = [
+        put(0, dtext(theme, fmt::ts_short(r.ts_start), false).into()),
+        put(
+            1,
+            dtext(theme, app_display(&r.app).to_string(), false).into(),
         ),
-        dcell(
+        put(
+            2,
+            dtext(theme, model, false).foreground(theme.subtle).into(),
+        ),
+        put(
             3,
             dtext(theme, fmt::tokens_exact(r.input_tokens), true).into(),
         ),
-        dcell(
+        put(
             4,
             dtext(theme, fmt::tokens_exact(r.output_tokens), true).into(),
         ),
-        dcell(
+        put(
             5,
             dtext(
                 theme,
@@ -1152,7 +1219,7 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
             .foreground(theme.subtle)
             .into(),
         ),
-        dcell(
+        put(
             6,
             StackPanel::new()
                 .orientation(Orientation::Horizontal)
@@ -1160,8 +1227,11 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .keyed_children(keyed(cost_children)),
         ),
-        dcell(7, dtext(theme, fmt::duration(r.duration_ms), true).into()),
-    ];
+        put(7, dtext(theme, fmt::duration(r.duration_ms), true).into()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let mut row = Border::new().padding(Thickness::xy(10.0, 5.0));
     if theme.line_separators {
         row = row
@@ -1172,7 +1242,7 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
         // ~4% gray reads on both light and dark Fluent surfaces.
         row = row.background(Brush::Solid(Color::argb(10, 128, 128, 128)));
     }
-    row.content(Grid::new().columns(DETAIL_COLS).children(cells))
+    row.content(Grid::new().columns(cols).keyed_children(keyed(cells)))
         .tooltip(r.raw_ref.clone().unwrap_or_default())
 }
 
@@ -1242,7 +1312,10 @@ pub fn detail_page(
                     .keyed_children(keyed(nav)),
             ],
         ),
-        w::card(theme, vstack(0.0, vec![ruler, detail_header(theme), list])),
+        w::card(
+            theme,
+            vstack(0.0, vec![ruler, detail_header(theme, table.width), list]),
+        ),
     ]
 }
 
@@ -1297,7 +1370,7 @@ fn virtual_rows<T: 'static>(
     rows: std::sync::Arc<Vec<T>>,
     shown: usize,
     width: f64,
-    row: fn(&Theme, &T, bool) -> View,
+    row: fn(&Theme, &T, bool, f64) -> View,
 ) -> View {
     let theme = theme.clone();
     ItemsRepeater::new()
@@ -1306,7 +1379,7 @@ fn virtual_rows<T: 'static>(
             shown.min(rows.len()),
             |i| i as u64,
             move |i| {
-                let body = row(&theme, &rows[i], i % 2 == 1);
+                let body = row(&theme, &rows[i], i % 2 == 1, width);
                 if width > 0.0 {
                     Border::new().width(width).content(body)
                 } else {
@@ -1608,6 +1681,25 @@ const PRICE_COLS: [GridLength; 6] = [
     GridLength::Pixel(96.0),
     GridLength::Pixel(110.0),
 ];
+/// Same six columns, tighter — for rows narrower than `PRICE_FULL_MIN`.
+const PRICE_COLS_COMPACT: [GridLength; 6] = [
+    GridLength::STAR,
+    GridLength::Pixel(76.0),
+    GridLength::Pixel(76.0),
+    GridLength::Pixel(76.0),
+    GridLength::Pixel(76.0),
+    GridLength::Pixel(96.0),
+];
+/// Row width from which the full plan leaves the model column ≥ ~150 DIPs.
+const PRICE_FULL_MIN: f64 = 680.0;
+
+fn price_cols(width: f64) -> [GridLength; 6] {
+    if width > 0.0 && width < PRICE_FULL_MIN {
+        PRICE_COLS_COMPACT
+    } else {
+        PRICE_COLS
+    }
+}
 /// $/1M values vary from 0.0001 to thousands — trim, don't pad.
 fn price_num(v: f64) -> String {
     let s = format!("{v:.4}");
@@ -1619,7 +1711,7 @@ fn price_num(v: f64) -> String {
     }
 }
 
-fn price_head(theme: &Theme) -> View {
+fn price_head(theme: &Theme, width: f64) -> View {
     let head_cell = |i: i32, h: &str| {
         dcell(
             i,
@@ -1642,10 +1734,15 @@ fn price_head(theme: &Theme) -> View {
         .padding(Thickness::xy(10.0, 6.0))
         .border_brush(theme.divider)
         .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-        .content(Grid::new().columns(PRICE_COLS).children(cells))
+        .content(Grid::new().columns(price_cols(width)).children(cells))
 }
 
-fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow, zebra: bool) -> View {
+fn price_row(
+    theme: &Theme,
+    p: &globaltokentracker_core::store::PriceRow,
+    zebra: bool,
+    width: f64,
+) -> View {
     let tone = if p.source == "seed" {
         w::BadgeTone::Muted
     } else {
@@ -1654,11 +1751,7 @@ fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow, zebra:
     let cells: [View; 6] = [
         dcell(
             0,
-            TextBlock::new()
-                .text(truncate(&p.model, 56))
-                .font_size(theme.body_size)
-                .vertical_alignment(VerticalAlignment::Center)
-                .into(),
+            dtext(theme, p.model.clone(), false).into(),
         ),
         dcell(1, dtext(theme, price_num(p.input), true).into()),
         dcell(2, dtext(theme, price_num(p.output), true).into()),
@@ -1692,7 +1785,7 @@ fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow, zebra:
     if zebra {
         row = row.background(Brush::Solid(Color::argb(10, 128, 128, 128)));
     }
-    row.content(Grid::new().columns(PRICE_COLS).children(cells))
+    row.content(Grid::new().columns(price_cols(width)).children(cells))
         .tooltip(p.model.clone())
 }
 
@@ -1731,7 +1824,10 @@ pub fn prices_page(
             .foreground(theme.subtle)
             .into(),
         // Card chrome around the table — same as the detail page.
-        w::card(theme, vstack(0.0, vec![ruler, price_head(theme), list])),
+        w::card(
+            theme,
+            vstack(0.0, vec![ruler, price_head(theme, args.width), list]),
+        ),
     ]
 }
 
@@ -1873,11 +1969,219 @@ fn size_control(theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
         .children([slider, readout])
 }
 
+const UPDATE_CHANNEL_OPTIONS: &[(&str, &str)] = &[("stable", "正式版"), ("alpha", "预览版")];
+
+fn release_notes_link(rel: &Release) -> Option<View> {
+    HyperlinkButton::new()
+        .navigate_uri(rel.html_url.clone())
+        .ok()
+        .map(|b| b.content(t!("查看更新说明")))
+}
+
+fn update_status_text(state: &UpdateState) -> String {
+    match state {
+        UpdateState::Idle => String::new(),
+        UpdateState::Checking => t!("检查中…").to_string(),
+        UpdateState::UpToDate => t!("已是最新版本").to_string(),
+        UpdateState::Available(rel) => tf!("发现新版本 {}", rel.tag),
+        UpdateState::Downloading(_) => t!("正在下载并校验…").to_string(),
+        UpdateState::Failed(msg) => tf!("检查失败：{}", msg),
+    }
+}
+
+/// Single-line, length-capped failure text for the banner.
+fn short_error(msg: &str) -> String {
+    let one_line = msg.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut it = one_line.chars();
+    let head: String = it.by_ref().take(80).collect();
+    if it.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn update_action_label(error: Option<&str>) -> &'static str {
+    if error.is_some() { t!("重试") } else { t!("立即更新") }
+}
+
+fn update_status_row(
+    theme: &Theme,
+    state: &UpdateState,
+    error: Option<&str>,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let busy = matches!(state, UpdateState::Checking | UpdateState::Downloading(_));
+    let mut controls: Vec<View> = vec![
+        TextBlock::new()
+            .text(update_status_text(state))
+            .font_size(theme.body_size)
+            .max_width(360.0)
+            .text_wrapping(windows_reactor::TextWrapping::Wrap)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+        Button::new()
+            .is_enabled(!busy)
+            .on_click(ctx.callback(|_| Msg::CheckUpdate { manual: true }))
+            .content(t!("立即检查")),
+    ];
+    if let UpdateState::Available(rel) = state {
+        if let Some(e) = error {
+            controls.insert(
+                1,
+                TextBlock::new()
+                    .text(tf!("更新失败：{}", short_error(e)))
+                    .font_size(theme.label_size)
+                    .foreground(theme.danger)
+                    .max_width(360.0)
+                    .text_wrapping(windows_reactor::TextWrapping::Wrap)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .into(),
+            );
+        }
+        controls.push(
+            Button::new()
+                .on_click(ctx.callback(|_| Msg::StartUpdate))
+                .content(update_action_label(error)),
+        );
+        controls.extend(release_notes_link(rel));
+    }
+    setting_row(
+        theme,
+        "更新状态",
+        None,
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(12.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .keyed_children(keyed(controls)),
+    )
+}
+
+/// Slim strip above the page: new version + one-click update. Lives in the
+/// chrome row, outside the animated page layers.
+pub fn update_banner(
+    theme: &Theme,
+    state: &UpdateState,
+    rel: &Release,
+    error: Option<&str>,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let mut actions: Vec<View> = Vec::new();
+    if matches!(state, UpdateState::Downloading(_)) {
+        actions.push(
+            TextBlock::new()
+                .text(t!("正在下载并校验…"))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        );
+    } else {
+        actions.push(
+            Button::new()
+                .on_click(ctx.callback(|_| Msg::StartUpdate))
+                .content(update_action_label(error)),
+        );
+        actions.extend(release_notes_link(rel));
+    }
+    actions.push(
+        Button::new()
+            .on_click(ctx.callback(|_| Msg::DismissUpdateBanner))
+            .content(SymbolIcon::new().symbol(Symbol::Cancel)),
+    );
+    let mut left: Vec<View> = vec![
+        SymbolIcon::new().symbol(Symbol::Download).into(),
+        TextBlock::new()
+            .text(tf!("发现新版本 {}", rel.tag))
+            .font_size(theme.body_size)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+    ];
+    if let Some(e) = error.filter(|_| matches!(state, UpdateState::Available(_))) {
+        left.push(
+            TextBlock::new()
+                .text(tf!("更新失败：{}", short_error(e)))
+                .font_size(theme.label_size)
+                .foreground(theme.danger)
+                .text_trimming(TextTrimming::CharacterEllipsis)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        );
+    }
+    Border::new()
+        .margin(Thickness::new(24.0, 8.0, 24.0, 0.0))
+        .padding(Thickness::xy(theme.pad, 6.0))
+        .background(theme.card_bg)
+        .border_brush(theme.card_border)
+        .border_thickness(theme.card_border_thickness())
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .content(
+            Grid::new()
+                .columns([GridLength::STAR, GridLength::Auto])
+                .children([
+                    cell(
+                        0,
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(8.0)
+                            .vertical_alignment(VerticalAlignment::Center)
+                            .keyed_children(keyed(left)),
+                    ),
+                    cell(
+                        1,
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(8.0)
+                            .keyed_children(keyed(actions)),
+                    ),
+                ]),
+        )
+}
+
 pub fn settings_page(
     config: &UiConfig,
+    update: &UpdateState,
+    update_error: Option<&str>,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
 ) -> Vec<View> {
+    let version_row = setting_row(
+        theme,
+        "当前版本",
+        None,
+        TextBlock::new()
+            .text(globaltokentracker_core::update::current_version().to_string())
+            .font_size(theme.body_size)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+    );
+    let channel_row = setting_row(
+        theme,
+        "更新渠道",
+        Some("预览版包含尚未正式发布的新功能，可能不稳定"),
+        setting_dropdown(
+            UPDATE_CHANNEL_OPTIONS,
+            match config.update_channel.as_str() {
+                "" => "stable",
+                v => v,
+            },
+            ctx,
+            Msg::SetUpdateChannel,
+        ),
+    );
+    let auto_row = setting_row(
+        theme,
+        "自动检查更新",
+        Some("启动时及每 24 小时检查一次"),
+        ToggleSwitch::new()
+            .is_on(config.update_auto)
+            .on_toggled(ctx.callback(Msg::SetUpdateAuto))
+            .into(),
+    );
+    let status_row = update_status_row(theme, update, update_error, ctx);
+
     let theme_row = setting_row(
         theme,
         "主题模式",
@@ -1956,6 +2260,14 @@ pub fn settings_page(
         w::card(
             theme,
             vstack(theme.gap, vec![lang_row, autostart_row, close_row]),
+        ),
+        w::section_header(theme, Symbol::Sync, tr("更新")),
+        w::card(
+            theme,
+            vstack(
+                theme.gap,
+                vec![version_row, channel_row, auto_row, status_row],
+            ),
         ),
     ]
 }

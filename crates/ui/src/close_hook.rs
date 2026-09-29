@@ -7,15 +7,27 @@
 //! subclass proc always runs on the window's own (UI) thread. `allow_close`
 //! is a consume-once flag set right before `request_close()` — without it our
 //! own proc would swallow the programmatic close and the app could never exit.
+//!
+//! The same subclass answers `WM_GETMINMAXINFO`: below `MIN_OUTER_W` the tables
+//! and the title bar (brand + centered nav + caption buttons) no longer fit, so
+//! the window simply can't be dragged narrower than that.
 
 use crate::Msg;
 use std::cell::{Cell, RefCell};
 use windows_reactor::LocalSender;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_NCDESTROY};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    MINMAXINFO, WM_CLOSE, WM_GETMINMAXINFO, WM_NCDESTROY,
+};
 
 const SUBCLASS_ID: usize = 0x4754_5431; // "GTT1"
+
+/// Smallest outer window size (DIPs, frame included) — a 720-wide client is
+/// the narrowest the detail table and the centered nav are laid out for.
+pub const MIN_OUTER_W: i32 = 736;
+pub const MIN_OUTER_H: i32 = 560;
 
 thread_local! {
     static SENDER: RefCell<Option<LocalSender<Msg>>> = const { RefCell::new(None) };
@@ -71,6 +83,17 @@ unsafe extern "system" fn close_proc(
                     }
                 });
                 0 // swallow — the window stays
+            }
+            WM_GETMINMAXINFO => {
+                let r = DefSubclassProc(hwnd, msg, wparam, lparam);
+                let mmi = lparam as *mut MINMAXINFO;
+                if !mmi.is_null() {
+                    let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+                    let m = &mut *mmi;
+                    m.ptMinTrackSize.x = m.ptMinTrackSize.x.max(MIN_OUTER_W * dpi / 96);
+                    m.ptMinTrackSize.y = m.ptMinTrackSize.y.max(MIN_OUTER_H * dpi / 96);
+                }
+                r
             }
             WM_NCDESTROY => {
                 // The HWND is going away — drop the subclass and the stale

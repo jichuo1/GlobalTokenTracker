@@ -245,6 +245,28 @@ pub fn tr(zh: &str) -> &str {
         }
         "主题模式、配色与字号" => "Theme mode, colors and font size",
         "界面语言与启动行为" => "Interface language and startup behavior",
+        // ---- updates
+        "更新" => "Updates",
+        "当前版本" => "Current version",
+        "更新渠道" => "Update channel",
+        "正式版" => "Stable",
+        "预览版" => "Preview",
+        "预览版包含尚未正式发布的新功能，可能不稳定" => {
+            "Preview builds include unreleased features and may be unstable"
+        }
+        "自动检查更新" => "Check for updates automatically",
+        "启动时及每 24 小时检查一次" => "At startup and every 24 hours",
+        "更新状态" => "Update status",
+        "检查中…" => "Checking…",
+        "已是最新版本" => "You are up to date",
+        "发现新版本 {}" => "New version {} available",
+        "正在下载并校验…" => "Downloading and verifying…",
+        "检查失败：{}" => "Update check failed: {}",
+        "立即检查" => "Check now",
+        "立即更新" => "Update now",
+        "查看更新说明" => "Release notes",
+        "更新失败：{}" => "Update failed: {}",
+        "重试" => "Retry",
         "默认" => "Default",
         "默认（Segoe UI）" => "Default (Segoe UI)",
         "蓝色" => "Blue",

@@ -173,6 +173,8 @@ jobs:
         id: package
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         shell: pwsh
+        env:
+          GTT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
         run: |
           installer\package.ps1
           $exe = Get-Item "dist\GlobalTokenTracker-Setup-${{ steps.identity.outputs.version_name }}-win-x64.exe"
@@ -231,6 +233,7 @@ jobs:
       - name: Build installer package
         shell: pwsh
         env:
+          GTT_RELEASE_TAG: ${{ inputs.release_tag }}
           # 可选签名：仓库 Secret 配了哪个走哪个；都没配则产出未签名包。
           GTT_SIGN_SHA1: ${{ secrets.GTT_SIGN_SHA1 }}
           GTT_SIGN_PFX: ${{ secrets.GTT_SIGN_PFX }}
