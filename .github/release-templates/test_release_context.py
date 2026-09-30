@@ -17,7 +17,7 @@ from release_context import (
     build_context,
     find_orphaned_tag,
     find_previous_tag,
-    tag_commit_date,
+    tag_commit_timestamp,
 )
 
 
@@ -110,9 +110,12 @@ class OrphanBaselineTests(unittest.TestCase):
             self.assertEqual(context.previous_tag, "v1.0.0")
             self.assertEqual([c.subject for c in context.commits], ["delta"])
 
-    def test_tag_commit_date_format(self) -> None:
-        date = tag_commit_date(self.repo, "v1.0.0")
-        self.assertRegex(date, r"^\d{4}-\d{2}-\d{2}$")
+    def test_tag_commit_timestamp_format(self) -> None:
+        # ISO 8601 带时分秒：裸日期喂给 --since 会被 approxidate 补成
+        # 「今天此刻」，把当天早些时候造的提交全部过滤掉（CI 上曾因此
+        # 拿到空提交列表）。
+        ts = tag_commit_timestamp(self.repo, "v1.0.0")
+        self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 
 if __name__ == "__main__":

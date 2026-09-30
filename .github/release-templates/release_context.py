@@ -130,9 +130,15 @@ def find_orphaned_tag(repo_root: Path, commit: str, release_tag: str, channel: s
     return max(candidates)[1] if candidates else None
 
 
-def tag_commit_date(repo_root: Path, tag: str) -> str:
-    """Committer date (YYYY-MM-DD) of the commit the tag points at."""
-    return run_git(repo_root, "log", "-1", "--format=%cd", "--date=short", tag).strip()
+def tag_commit_timestamp(repo_root: Path, tag: str) -> str:
+    """Committer timestamp (strict ISO 8601) of the commit the tag points at.
+
+    Must be a full timestamp, not a bare date: `--since=YYYY-MM-DD` goes
+    through approxidate, which fills the missing time-of-day with *now* —
+    filtering out commits made earlier today (observed as an empty commit
+    list on CI). A precise timestamp keeps `--since` semantics exact.
+    """
+    return run_git(repo_root, "log", "-1", "--format=%cI", tag).strip()
 
 
 def list_commits(repo_root: Path, revision_range: str, since: str | None = None) -> list[CommitInfo]:
@@ -341,7 +347,7 @@ def build_context(
         if orphan is not None:
             previous_tag = orphan
             baseline_orphaned = True
-            commit_since = tag_commit_date(repo_root, orphan)
+            commit_since = tag_commit_timestamp(repo_root, orphan)
     revision_range = f"{previous_tag}..{commit}" if previous_tag else commit
     commits = list_commits(repo_root, revision_range, since=commit_since)
     context = ReleaseContext(channel, release_tag, previous_tag, commit, commits)
