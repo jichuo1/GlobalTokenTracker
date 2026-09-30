@@ -400,7 +400,6 @@ fn trend_head(
     theme: &Theme,
     title: &str,
     on: bool,
-    hourly: bool,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let switch = StackPanel::new()
@@ -409,11 +408,7 @@ fn trend_head(
         .vertical_alignment(VerticalAlignment::Center)
         .children((
             TextBlock::new()
-                .text(if hourly {
-                    t!("7 小时均线")
-                } else {
-                    t!("7 日均线")
-                })
+                .text(t!("折线趋势"))
                 .font_size(theme.label_size)
                 .foreground(theme.subtle)
                 .vertical_alignment(VerticalAlignment::Center),
@@ -577,13 +572,7 @@ fn overview_widget(
                     .orientation(Orientation::Vertical)
                     .spacing(10.0)
                     .children((
-                        trend_head(
-                            theme,
-                            &trend_title,
-                            args.config.trend_line,
-                            vm.range == Range::Today,
-                            ctx,
-                        ),
+                        trend_head(theme, &trend_title, args.config.trend_line, ctx),
                         w::trend_strip(
                             theme,
                             &vm.daily,

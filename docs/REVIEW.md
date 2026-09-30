@@ -1150,3 +1150,12 @@
 - **测试**（6 例）：v4 zstd 事件字段/时长/dedup；增量重扫只发新 seq 且 consumed=段长；无压缩 `.jsonl` + request/header 回落 + 无 seq 走 msgid；同目录三代文件只选 v4；双帧+末帧截断→前缀解码+note；零 usage 记 skipped。
 - **本机实测**（scratch db `target\e2e\dsh-test.db`，不动真实账本）：`scan` 发现 2 个会话文件，产出 1 条事件——input 1834 / output 49 与原始日志逐字段一致，`duration_ms=1929`（message−step/start），价目表自动计价 $0.0003045（computed）；3 次 404 失败 attempt 正确无事件；二次 `scan dsh` → `2 seen / 0 scanned / +0`（游标 EOF 跳过、幂等）。
 - **验证命令**：`cargo test -p globaltokentracker-core`（159 过）、`cargo clippy --workspace --all-targets -- -D warnings`（0）、`rustfmt --check`（dsh.rs 干净）。`docs/spec-v2.0.md` 增 §6.8c。
+
+## S85 趋势图例与开关文案修正（含 vendor TextFormat 深拷贝修复）✅
+
+- **问题**：① 均线图例与左上 max 值重叠（原按 `字符数×0.62×pt` 估算宽度，低估）；② 开关文案"7 日均线"为股市术语且含糊。
+- **根因深挖**：重叠并非估算不准——`tf.clone().with_alignment(Trailing)` 中 vendor `TextFormat` 的 derive Clone 仅对 COM 对象 AddRef，`with_alignment` 把原 `tf` 也污染成右对齐，导致 max 文本在 160px 布局框内右缘对齐渲染（右缘≈x160），任何按宽度定位的图例都会压上去。widgets.rs 两处同款（trend L314、heat L662 附近），该潜伏 bug 影响所有 `tf.clone().with_*` 调用方。
+- **修复**：`vendor/windows-canvas/src/text.rs`——`TextFormat` 去掉 derive Clone，改存创建参数（family/size/weight/alignment/paragraph_alignment/wrapping）并手写 `Clone` 重建全新 `IDWriteTextFormat`，builder 方法同步记录参数。clone 语义从共享变深拷贝。调用点 `tf.clone().with_alignment(Trailing)` 无需改动即恢复正确语义。
+- **图例定位**：改用 `TextLayout::metrics()` 实测 `left+width` 得到 max 文本真实右缘 `max_end`，图例线起点 = `max_end+16`，右界钳制在悬停文本区（`w-220-legend_w`）之外；图例文本同样实测宽度。
+- **文案**：开关定名「折线趋势」（不随日/时桶切换，英文 "Line trend"），`trend_head` 的 `hourly` 参数随之移除；图例 → "移动平均"；提示卡行 → "7 日/小时移动平均 {} tok"；i18n 英文同步。
+- **验证**：`cargo test --workspace`（core 159 / setup 13 / ui 25 全过）、`cargo clippy --workspace --all-targets -- -D warnings`（0）、截图 `target\ma-fix7.png`（zoom `ma-fix7-zoom.png`）确认 `902,556,800  —  移动平均` 无重叠且 max 值恢复左对齐。
