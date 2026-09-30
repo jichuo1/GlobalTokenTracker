@@ -12,11 +12,12 @@ mod close_hook;
 mod config;
 mod fonts;
 mod gpu_slide;
+mod heat;
 mod i18n;
 mod pages;
 mod theme;
-mod updater;
 mod tray;
+mod updater;
 mod watch;
 mod widgets;
 
@@ -149,6 +150,8 @@ pub struct Shell {
     tray: Option<tray_icon::TrayIcon>,
     /// Trend-chart hover state + repaint handle (shared with the D2D closure).
     trend: widgets::TrendHandle,
+    /// Activity-heatmap hover state + repaint handle.
+    heat: widgets::HeatHandle,
     /// Share-donut hover states — one per share-grid column (4 max).
     donuts: [widgets::DonutHandle; 4],
     /// Vendor quota channels poll at this cadence (network calls stay rare).
@@ -246,6 +249,13 @@ pub enum Msg {
     /// Dwell timer fired for bar `usize` — arms the tooltip if still hovering.
     TrendTip(usize),
     TrendLeave,
+    /// Pointer (canvas-local DIPs) over the activity heatmap.
+    HeatHover(f64, f64),
+    /// Dwell timer fired for heatmap day `usize`.
+    HeatTip(usize),
+    HeatLeave,
+    /// Heatmap metric picked — tokens|cost|calls|duration.
+    SetHeatMetric(&'static str),
     /// Share-donut pointer hover: (column index, hovered slice or None).
     DonutHover(u8, Option<usize>),
     /// Statistics range changed — resolved to `Range` at the selector so
@@ -716,6 +726,7 @@ impl Component for Shell {
             editing: std::env::var("GTT_EDIT").is_ok(),
             tray,
             trend: widgets::TrendHandle::default(),
+            heat: widgets::HeatHandle::default(),
             donuts: std::array::from_fn(|_| widgets::DonutHandle::default()),
             quota_at: None,
             open_menu: None,
@@ -1411,6 +1422,42 @@ impl Component for Shell {
                     self.trend.inv.invalidate();
                 }
             }
+            Msg::HeatHover(x, y) => {
+                let sh = &self.heat.shared;
+                let idx = sh.cell_at(x as f32, y as f32);
+                if idx != sh.hover.get() {
+                    sh.hover.set(idx);
+                    sh.tip.set(None);
+                    sh.pending.set(idx);
+                    if let Some(i) = idx {
+                        context.spawn_background(move |_| {
+                            std::thread::sleep(std::time::Duration::from_millis(450));
+                            Msg::HeatTip(i)
+                        });
+                    }
+                    self.heat.inv.invalidate();
+                }
+            }
+            Msg::HeatTip(i) => {
+                let sh = &self.heat.shared;
+                if sh.pending.get() == Some(i) && sh.hover.get() == Some(i) {
+                    sh.tip.set(Some(i));
+                    self.heat.inv.invalidate();
+                }
+            }
+            Msg::HeatLeave => {
+                let sh = &self.heat.shared;
+                sh.pending.set(None);
+                sh.tip.set(None);
+                if sh.hover.take().is_some() {
+                    self.heat.inv.invalidate();
+                }
+            }
+            Msg::SetHeatMetric(key) => {
+                self.config.heat_metric = key.to_string();
+                self.config.save();
+                self.heat.inv.invalidate();
+            }
             Msg::DonutHover(k, idx) => {
                 if let Some(h) = self.donuts.get_mut(k as usize) {
                     // Unchanged → no repaint churn during pointer jitter.
@@ -1745,6 +1792,7 @@ impl Shell {
                     config: &self.config,
                     editing: self.editing,
                     trend: &self.trend,
+                    heat: &self.heat,
                     cols: self.overview_cols,
                     ruler: &self.ruler,
                     donuts: &self.donuts,
@@ -2141,8 +2189,8 @@ impl Shell {
     /// stagger (all charts allowed, and always so off the Overview page —
     /// nothing to mount).
     fn arm_canvas_stage(&mut self, context: &ComponentContext<Self>, delay_ms: u64) {
-        // trend + 4 donuts
-        const CHARTS: usize = 5;
+        // trend + 4 donuts + heatmap
+        const CHARTS: usize = 6;
         if self.page != Page::Overview || self.canvas_ready >= CHARTS {
             self.canvas_ready = usize::MAX;
             return;

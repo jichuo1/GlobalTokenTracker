@@ -67,6 +67,8 @@ pub struct UiConfig {
     /// Check for updates at startup and every 24h.
     #[serde(default = "default_true")]
     pub update_auto: bool,
+    /// Overview activity heatmap metric: tokens|cost|calls|duration.
+    pub heat_metric: String,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
 }
@@ -95,6 +97,7 @@ impl Default for UiConfig {
             close_action: String::new(),
             update_channel: String::new(),
             update_auto: true,
+            heat_metric: "tokens".into(),
             pages: BTreeMap::new(),
         }
     }
@@ -186,5 +189,24 @@ impl UiConfig {
         }
         self.pages.insert(page.to_string(), l);
         self.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heat_metric_defaults_to_tokens_and_round_trips() {
+        assert_eq!(UiConfig::default().heat_metric, "tokens");
+        // A ui.json from before the heatmap has no key at all.
+        let old: UiConfig = serde_json::from_str("{\"range\":\"week\"}").unwrap();
+        assert_eq!(old.heat_metric, "tokens");
+        let c = UiConfig {
+            heat_metric: "duration".into(),
+            ..Default::default()
+        };
+        let back: UiConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.heat_metric, "duration");
     }
 }

@@ -16,6 +16,7 @@ use windows_reactor::*;
 pub const OVERVIEW_WIDGETS: &[(&str, &str, Symbol)] = &[
     ("stats", "统计卡", Symbol::Calculator),
     ("trend", "近 30 天趋势", Symbol::FourBars),
+    ("heat", "活跃热力图", Symbol::Calendar),
     ("share", "占比分布", Symbol::AllApps),
     ("apps", "本周 · 按工具", Symbol::List),
     ("quotas", "订阅配额", Symbol::Clock),
@@ -447,6 +448,292 @@ pub fn trend_strip(
                     &Rect::new(w - 80.0, bottom + 2.0, w, h),
                     &ink,
                 );
+                Ok(())
+            }),
+        ))
+}
+
+/// Where the heatmap grid sits inside its canvas — written by the draw pass,
+/// read by pointer handlers so hit-testing uses the real (measured) layout.
+#[derive(Clone, Copy, Default)]
+pub struct HeatGeom {
+    pub x0: f32,
+    pub y0: f32,
+    pub pitch: f32,
+    pub cols: usize,
+    pub count: usize,
+}
+
+/// Heatmap hover state — same round trip as `TrendShared`: `hover` is the day
+/// index under the pointer, `tip` the dwell-armed tooltip index.
+#[derive(Default)]
+pub struct HeatShared {
+    pub hover: Cell<Option<usize>>,
+    pub tip: Cell<Option<usize>>,
+    pub pending: Cell<Option<usize>>,
+    pub geom: Cell<HeatGeom>,
+}
+
+impl HeatShared {
+    /// Day index (`col * 7 + row`, Monday-first) under canvas point `(x, y)`.
+    pub fn cell_at(&self, x: f32, y: f32) -> Option<usize> {
+        let g = self.geom.get();
+        if g.pitch <= 0.0 || x < g.x0 || y < g.y0 {
+            return None;
+        }
+        let (col, row) = (
+            ((x - g.x0) / g.pitch) as usize,
+            ((y - g.y0) / g.pitch) as usize,
+        );
+        let idx = col * 7 + row;
+        (col < g.cols && row < 7 && idx < g.count).then_some(idx)
+    }
+}
+
+#[derive(Clone)]
+pub struct HeatHandle {
+    pub shared: Rc<HeatShared>,
+    pub inv: Invalidator,
+}
+
+impl Default for HeatHandle {
+    fn default() -> Self {
+        Self {
+            shared: Rc::new(HeatShared::default()),
+            inv: Invalidator::new(),
+        }
+    }
+}
+
+const HEAT_CELL_MAX: f32 = 14.0;
+const HEAT_CELL_MIN: f32 = 6.0;
+const HEAT_GAP: f32 = 3.0;
+/// Quartile-level alpha of the accent colour (level 0 is the divider colour).
+const HEAT_ALPHA: [f32; 4] = [0.30, 0.52, 0.76, 1.0];
+
+/// Strips above/below the grid, scaled with the label font like the trend's.
+fn heat_strips(label_pt: f32) -> (f32, f32) {
+    let top = (label_pt * 1.65).max(18.0).ceil();
+    let bottom = (label_pt * 1.6).max(18.0).ceil() + 6.0;
+    (top, bottom)
+}
+
+/// Canvas height for the nominal cell size; narrower windows shrink the cells
+/// and the grid is centred vertically in this box.
+pub fn heat_height(label_pt: f64) -> f64 {
+    let (top, bottom) = heat_strips(label_pt as f32);
+    f64::from(top + bottom + 7.0 * (HEAT_CELL_MAX + HEAT_GAP)) + 4.0
+}
+
+/// GitHub-style activity heatmap: 7 rows (Mon–Sun) × one column per week, one
+/// Direct2D canvas. Cell colour = accent alpha by quartile level of `metric`
+/// over the window's non-zero days; hover outlines a cell and dwelling opens a
+/// tooltip with all four metrics. `defer`: see `defer_slot`.
+pub fn heatmap(
+    theme: &Theme,
+    days: &[globaltokentracker_core::viewmodel::HeatDay],
+    metric: crate::heat::HeatMetric,
+    handle: &HeatHandle,
+    defer: bool,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let days: Vec<globaltokentracker_core::viewmodel::HeatDay> = days.to_vec();
+    let accent = theme.accent_cf;
+    let subtle = theme.subtle_cf;
+    let divider = theme.divider_cf;
+    let card_bg = theme.card_cf;
+    let family = theme.font_family.clone();
+    let label_pt = theme.label_size as f32;
+    let shared = handle.shared.clone();
+    Border::new()
+        .height(heat_height(theme.label_size))
+        .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
+        .on_pointer_moved(ctx.callback(|e: PointerEventInfo| Msg::HeatHover(e.x, e.y)))
+        .on_pointer_exited(ctx.callback(|_| Msg::HeatLeave))
+        .content(defer_slot(
+            defer,
+            windows_canvas::canvas_invalidated(&handle.inv, move |ctx| {
+                use crate::heat;
+                use windows_canvas::{ColorF, Rect, RoundedRect, TextAlignment, TextFormat};
+                ctx.clear(card_bg);
+                let (w, h) = (ctx.width, ctx.height);
+                if w < 80.0 || h < 40.0 || days.is_empty() {
+                    return Ok(());
+                }
+                let tf = TextFormat::new(&family, label_pt)?;
+                let tf_r = tf.clone().with_alignment(TextAlignment::Trailing);
+                let ink = ctx.create_solid_brush(subtle)?;
+                let level_brush = |lv: u8| {
+                    if lv == 0 {
+                        ctx.create_solid_brush(divider)
+                    } else {
+                        ctx.create_solid_brush(ColorF::new(
+                            accent.r,
+                            accent.g,
+                            accent.b,
+                            accent.a * HEAT_ALPHA[usize::from(lv) - 1],
+                        ))
+                    }
+                };
+
+                let cols = days.len().div_ceil(7);
+                let (top, bottom) = heat_strips(label_pt);
+                let label_w = (label_pt * 2.8).ceil();
+                let cell =
+                    ((w - label_w) / cols as f32 - HEAT_GAP).clamp(HEAT_CELL_MIN, HEAT_CELL_MAX);
+                let pitch = cell + HEAT_GAP;
+                let grid_h = 7.0 * pitch - HEAT_GAP;
+                let y_off = ((h - (top + grid_h + bottom)) * 0.5).max(0.0);
+                let (x0, y0) = (label_w, y_off + top);
+                shared.geom.set(HeatGeom {
+                    x0,
+                    y0,
+                    pitch,
+                    cols,
+                    count: days.len(),
+                });
+
+                let t = heat::thresholds(days.iter().map(|d| metric.value(d)));
+                let hover = shared.hover.get().filter(|&i| i < days.len());
+                // GTT_HEATTEST=<idx> forces the tooltip (see GTT_TIPTEST).
+                let tip = shared
+                    .tip
+                    .get()
+                    .or_else(|| {
+                        std::env::var("GTT_HEATTEST")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok())
+                    })
+                    .filter(|&i| i < days.len());
+
+                // Month labels over the first column of each month.
+                for (c, m) in heat::month_marks(&days) {
+                    let x = x0 + c as f32 * pitch;
+                    ctx.draw_text(
+                        &heat::month_label(m),
+                        &tf,
+                        &Rect::new(x, y_off, x + 48.0, y_off + top),
+                        &ink,
+                    );
+                }
+                // Mon / Wed / Fri.
+                for (row, name) in [(0usize, tr("一")), (2, tr("三")), (4, tr("五"))] {
+                    let y = y0 + row as f32 * pitch;
+                    ctx.draw_text(
+                        name,
+                        &tf,
+                        &Rect::new(0.0, y - 2.0, label_w - 4.0, y + pitch),
+                        &ink,
+                    );
+                }
+
+                for (i, d) in days.iter().enumerate() {
+                    let (c, r) = (i / 7, i % 7);
+                    let x = x0 + c as f32 * pitch;
+                    let y = y0 + r as f32 * pitch;
+                    let lv = heat::level(metric.value(d), &t);
+                    let brush = level_brush(lv)?;
+                    let rr = RoundedRect::new(Rect::new(x, y, x + cell, y + cell), 2.5, 2.5);
+                    ctx.fill_rounded_rect(&rr, &brush);
+                    if hover == Some(i) {
+                        ctx.draw_rounded_rect(&rr, &ink, 1.5);
+                    }
+                }
+
+                // Bottom row: summary (left), legend (right).
+                let by = y0 + grid_h + 8.0;
+                let s = heat::summarize(&days, metric);
+                let legend_cell = cell.min(12.0);
+                let word_w = |s: &str| {
+                    s.chars()
+                        .map(|c| {
+                            if c.is_ascii() {
+                                label_pt * 0.6
+                            } else {
+                                label_pt
+                            }
+                        })
+                        .sum::<f32>()
+                };
+                let (less, more) = (tr("少"), tr("多"));
+                let swatches = 5.0 * (legend_cell + 2.0);
+                let legend_w = word_w(less) + swatches + word_w(more) + 12.0;
+                ctx.draw_text(
+                    &tf!(
+                        "近一年 {} 天活跃 · 最长连续 {} 天 · 合计 {}",
+                        s.active_days,
+                        s.longest_streak,
+                        heat::fmt_total(metric, s.total)
+                    ),
+                    &tf,
+                    &Rect::new(x0, by, (w - legend_w - 8.0).max(x0 + 40.0), by + bottom),
+                    &ink,
+                );
+                let mut lx = w - legend_w;
+                ctx.draw_text(
+                    less,
+                    &tf,
+                    &Rect::new(lx, by, lx + word_w(less) + 4.0, by + bottom),
+                    &ink,
+                );
+                lx += word_w(less) + 6.0;
+                for lv in 0..5u8 {
+                    let brush = level_brush(lv)?;
+                    let rr = RoundedRect::new(
+                        Rect::new(lx, by + 1.0, lx + legend_cell, by + 1.0 + legend_cell),
+                        2.0,
+                        2.0,
+                    );
+                    ctx.fill_rounded_rect(&rr, &brush);
+                    lx += legend_cell + 2.0;
+                }
+                ctx.draw_text(more, &tf, &Rect::new(lx + 4.0, by, w, by + bottom), &ink);
+
+                // Delayed tooltip card, drawn last.
+                if let Some(i) = tip {
+                    let d = &days[i];
+                    let lines = [
+                        tf!("{} tok", fmt::tokens_exact(d.tokens)),
+                        fmt::usd(d.cost_usd),
+                        tf!("{} 次调用", fmt::tokens_exact(d.events)),
+                        tf!("时长 {}", heat::fmt_span(d.duration_ms)),
+                    ];
+                    let line_h = label_pt + 4.0;
+                    let (pw, ph) = (176.0f32, 26.0 + lines.len() as f32 * line_h + 10.0);
+                    let (cx, cy) = (
+                        x0 + (i / 7) as f32 * pitch + cell * 0.5,
+                        y0 + (i % 7) as f32 * pitch,
+                    );
+                    let px = (cx - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
+                    let below = cy + pitch + 4.0;
+                    let py = if below + ph <= h {
+                        below
+                    } else {
+                        (cy - ph - 4.0).max(2.0)
+                    };
+                    let panel = RoundedRect::new(Rect::new(px, py, px + pw, py + ph), 7.0, 7.0);
+                    let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
+                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
+                    let head = ctx.create_solid_brush(accent)?;
+                    let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
+                    ctx.fill_rounded_rect(&panel, &bg);
+                    ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                    ctx.draw_text(
+                        &d.date,
+                        &tf,
+                        &Rect::new(px + 10.0, py + 7.0, px + pw - 10.0, py + 7.0 + line_h),
+                        &head,
+                    );
+                    for (li, l) in lines.iter().enumerate() {
+                        let y = py + 7.0 + (li + 1) as f32 * line_h;
+                        ctx.draw_text(
+                            l,
+                            &tf_r,
+                            &Rect::new(px + 10.0, y, px + pw - 10.0, y + line_h),
+                            &body,
+                        );
+                    }
+                }
                 Ok(())
             }),
         ))

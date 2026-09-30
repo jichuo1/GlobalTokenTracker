@@ -4,6 +4,7 @@
 
 use crate::config::{REFRESH_OPTIONS, UiConfig, refresh_label};
 use crate::gpu_slide::Slide;
+use crate::heat::{HeatMetric, METRICS as HEAT_METRICS};
 use crate::i18n::{self, tr};
 use crate::theme::Theme;
 use crate::updater::UpdateState;
@@ -394,6 +395,78 @@ fn hidden_chip(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContex
     )
 }
 
+/// Activity heatmap card: fixed ~1-year window (follows the tool/model
+/// filters, not the range selector) with a 4-way metric switch.
+fn heat_card(
+    theme: &Theme,
+    vm: &globaltokentracker_core::OverviewVm,
+    args: &OverviewArgs,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let metric = HeatMetric::from_key(&args.config.heat_metric);
+    let items: Vec<KeyedView> = HEAT_METRICS
+        .iter()
+        .map(|m| {
+            KeyedView::new(
+                m.key(),
+                SelectorBarItem::new()
+                    .text(tr(m.label()))
+                    .is_selected(*m == metric),
+            )
+        })
+        .collect();
+    let selector: View = SelectorBar::new()
+        .on_selected_text_changed(ctx.callback(|t: Option<String>| {
+            // Items carry only text — map the localized label back.
+            let want = t.unwrap_or_default();
+            let m = HEAT_METRICS
+                .iter()
+                .find(|m| tr(m.label()) == want)
+                .copied()
+                .unwrap_or_default();
+            Msg::SetHeatMetric(m.key())
+        }))
+        .collection_slot(SelectorBarSlot::Items, items);
+    let head: View = Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .children([
+            cell(
+                0,
+                w::section_header(theme, Symbol::Calendar, tr("活跃热力图")),
+            ),
+            cell(1, selector),
+        ]);
+    let mut col: Vec<View> = vec![
+        head,
+        w::heatmap(
+            theme,
+            &vm.heat,
+            metric,
+            args.heat,
+            args.canvas_ready < 6,
+            ctx,
+        ),
+    ];
+    if metric == HeatMetric::Duration {
+        col.push(
+            TextBlock::new()
+                .text(t!(
+                    "时长为调用耗时之和；Claude Code / Codex 为按日志时间戳推算"
+                ))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .into(),
+        );
+    }
+    w::card(
+        theme,
+        StackPanel::new()
+            .orientation(Orientation::Vertical)
+            .spacing(10.0)
+            .keyed_children(keyed(col)),
+    )
+}
+
 /// Render one overview widget (without edit chrome).
 fn overview_widget(
     id: &str,
@@ -475,6 +548,7 @@ fn overview_widget(
                     )),
             ))
         }
+        "heat" => Some(heat_card(theme, vm, args, ctx)),
         "share" => {
             /// Top-`keep` slices by value + 其他 fold; zero-value rows can't
             /// draw a wedge so they're dropped honestly before folding.
@@ -1041,6 +1115,7 @@ pub struct OverviewArgs<'a> {
     pub config: &'a UiConfig,
     pub editing: bool,
     pub trend: &'a w::TrendHandle,
+    pub heat: &'a w::HeatHandle,
     /// Reflow column count from the width ruler (stats + share grids).
     pub cols: usize,
     /// Bound to the 1-DIP ruler panel mounted on this page.

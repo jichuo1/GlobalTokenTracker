@@ -262,6 +262,28 @@ pub fn tr(zh: &str) -> &str {
         }
         "主题模式、配色与字号" => "Theme mode, colors and font size",
         "界面语言与启动行为" => "Interface language and startup behavior",
+        // ---- activity heatmap
+        "活跃热力图" => "Activity heatmap",
+        // ---- trend moving average
+
+        "计费" => "Cost",
+        "调用" => "Calls",
+        "少" => "Less",
+        "多" => "More",
+        "一" => "Mon",
+        "三" => "Wed",
+        "五" => "Fri",
+        "近一年 {} 天活跃 · 最长连续 {} 天 · 合计 {}" => {
+            "{} active days in the past year · longest streak {} days · total {}"
+        }
+        "{} 次调用" => "{} calls",
+        "时长 {}" => "Duration {}",
+        "{} 小时 {} 分" => "{} h {} min",
+        "{} 分" => "{} min",
+        "{} 秒" => "{} s",
+        "时长为调用耗时之和；Claude Code / Codex 为按日志时间戳推算" => {
+            "Duration is the sum of call times; Claude Code / Codex are estimated from log timestamps"
+        }
         // ---- updates
         "更新" => "Updates",
         "当前版本" => "Current version",
@@ -338,6 +360,12 @@ mod tests {
     fn locales() {
         set_lang(Lang::Zh);
         assert_eq!(tr("总览"), "总览");
+        assert_eq!(crate::heat::fmt_span(30_000), "30 秒");
+        assert_eq!(
+            crate::heat::fmt_span((3 * 3600 + 12 * 60) * 1000),
+            "3 小时 12 分"
+        );
+        assert_eq!(crate::heat::month_label(3), "3月");
         assert_eq!(tf!("第 {} / {} 页", 1, 3), "第 1 / 3 页");
 
         set_lang(Lang::En);
@@ -349,6 +377,12 @@ mod tests {
         assert_eq!(tf!("{rl} · 按工具", "近 7 天"), "近 7 天 · by tool");
         assert_eq!(compact(64_425), "64.4K");
         assert_eq!(compact(1_730_848_235), "1.7B");
+        assert_eq!(crate::heat::fmt_span(45 * 60_000), "45 min");
+        assert_eq!(
+            crate::heat::fmt_span((3 * 3600 + 12 * 60) * 1000),
+            "3 h 12 min"
+        );
+        assert_eq!(crate::heat::month_label(3), "Mar");
         set_lang(Lang::Zh);
     }
 }
