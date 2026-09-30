@@ -254,9 +254,19 @@ pub fn trend_strip(
     theme: &Theme,
     daily: &[globaltokentracker_core::viewmodel::TrendBucket],
     trend: &TrendHandle,
+    avg: bool,
     defer: bool,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
+    // The average is taken over everything received, before the last-60
+    // truncation, so the first drawn points carry their true history.
+    let avg_all = if avg {
+        crate::trend::moving_average(daily)
+    } else {
+        Vec::new()
+    };
+    let hourly = crate::trend::is_hourly(daily);
+    let avg_line: Vec<f64> = avg_all.iter().rev().take(60).rev().copied().collect();
     let days: Vec<globaltokentracker_core::viewmodel::TrendBucket> =
         daily.iter().rev().take(60).rev().cloned().collect();
     let accent = theme.accent_cf;
@@ -265,6 +275,19 @@ pub fn trend_strip(
     let card_bg = theme.card_cf;
     let family = theme.font_family.clone();
     let label_pt = theme.label_size as f32;
+    // Orange (palette slot 1) contrasts with the accent bars on both themes;
+    // if the user picked an orange-ish accent, fall back to the green slot.
+    let avg_color = {
+        let (r, g, b) = SLICE_PALETTE[1];
+        let c = windows_canvas::ColorF::from_rgb8(r, g, b);
+        let d = (c.r - accent.r).abs() + (c.g - accent.g).abs() + (c.b - accent.b).abs();
+        if d < 0.45 {
+            let (r, g, b) = SLICE_PALETTE[0];
+            windows_canvas::ColorF::from_rgb8(r, g, b)
+        } else {
+            c
+        }
+    };
     let shared = trend.shared.clone();
     Border::new()
         .height(160.0)
@@ -299,7 +322,9 @@ pub fn trend_strip(
                 let strip = (label_pt * 1.5).max(16.0).ceil();
                 let bottom = h - strip;
                 let plot_h = (bottom - top).max(1.0);
-                let max = days.iter().map(|d| d.tokens).max().unwrap_or(1).max(1) as f32;
+                let bar_max = days.iter().map(|d| d.tokens).max().unwrap_or(1).max(1) as f32;
+                // The average cannot exceed the bars' max, but keep scaling robust.
+                let max = avg_line.iter().fold(bar_max, |m, v| m.max(*v as f32));
 
                 // Max label (top-left) + faint mid gridline.
                 ctx.draw_text(
@@ -372,6 +397,60 @@ pub fn trend_strip(
                     }
                 }
 
+                // Moving-average overlay: same scale as the bars, through bar centres.
+                if avg_line.len() == days.len() {
+                    let pt = |i: usize| {
+                        Vector2::new(
+                            slot * i as f32 + slot * 0.5,
+                            bottom - (avg_line[i] as f32 / max * plot_h),
+                        )
+                    };
+                    let brush = ctx.create_solid_brush(avg_color)?;
+                    if days.len() > 1 {
+                        let mut path =
+                            windows_canvas::PathBuilder::new(ctx.device())?.begin_hollow(pt(0));
+                        for i in 1..days.len() {
+                            path = path.line_to(pt(i));
+                        }
+                        let path = path.end_open().build()?;
+                        let style = ctx.device().create_stroke_style(
+                            &windows_canvas::StrokeStyleBuilder::new()
+                                .start_cap(windows_canvas::CapStyle::Round)
+                                .end_cap(windows_canvas::CapStyle::Round)
+                                .line_join(windows_canvas::LineJoin::Round),
+                        )?;
+                        ctx.draw_path_styled(&path, &brush, 2.0, &style);
+                    }
+                    if days.len() <= 31 {
+                        for i in 0..days.len() {
+                            ctx.fill_ellipse(
+                                &windows_canvas::Ellipse::new(pt(i), 3.0, 3.0),
+                                &brush,
+                            );
+                        }
+                    }
+                    // Legend next to the max label, clear of the right-aligned hover text.
+                    let lx = (fmt::tokens_exact(max as u64).len() as f32 * label_pt * 0.62 + 16.0)
+                        .min((w - 230.0).max(0.0));
+                    let ly = top * 0.5;
+                    ctx.draw_line(
+                        Vector2::new(lx, ly),
+                        Vector2::new(lx + 14.0, ly),
+                        &brush,
+                        2.0,
+                    );
+                    ctx.draw_text(
+                        if hourly {
+                            t!("7 小时均")
+                        } else {
+                            t!("7 日均")
+                        },
+                        &tf,
+                        &Rect::new(lx + 20.0, 0.0, lx + 120.0, top),
+                        &ink,
+                    );
+                }
+
                 // Delayed tooltip card — drawn last so it floats above the plot.
                 if let Some(i) = tip {
                     let d = &days[i];
@@ -388,6 +467,13 @@ pub fn trend_strip(
                         ),
                         tf!("{} 事件", fmt::tokens_exact(d.events)),
                     ];
+                    if let Some(a) = avg_line.get(i) {
+                        lines.push(if hourly {
+                            tf!("7 小时均 {} tok", fmt::tokens_exact(*a as u64))
+                        } else {
+                            tf!("7 日均 {} tok", fmt::tokens_exact(*a as u64))
+                        });
+                    }
                     for (m, t) in &d.top {
                         lines.push(format!(
                             "{}  {}",

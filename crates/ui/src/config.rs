@@ -69,6 +69,8 @@ pub struct UiConfig {
     pub update_auto: bool,
     /// Overview activity heatmap metric: tokens|cost|calls|duration.
     pub heat_metric: String,
+    /// Trend card: overlay the trailing 7-bucket moving average line.
+    pub trend_line: bool,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
 }
@@ -98,6 +100,7 @@ impl Default for UiConfig {
             update_channel: String::new(),
             update_auto: true,
             heat_metric: "tokens".into(),
+            trend_line: false,
             pages: BTreeMap::new(),
         }
     }
@@ -208,5 +211,15 @@ mod tests {
         };
         let back: UiConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back.heat_metric, "duration");
+        assert!(!UiConfig::default().trend_line);
+        assert!(!old.trend_line);
+        let on: UiConfig = serde_json::from_str("{\"trend_line\":true}").unwrap();
+        assert!(on.trend_line);
+        let c = UiConfig {
+            trend_line: true,
+            ..Default::default()
+        };
+        let back: UiConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(back.trend_line);
     }
 }

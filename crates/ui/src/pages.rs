@@ -395,6 +395,40 @@ fn hidden_chip(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContex
     )
 }
 
+/// Trend card header: title on the left, moving-average switch on the right.
+fn trend_head(
+    theme: &Theme,
+    title: &str,
+    on: bool,
+    hourly: bool,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let switch = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(8.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .children((
+            TextBlock::new()
+                .text(if hourly {
+                    t!("7 小时均线")
+                } else {
+                    t!("7 日均线")
+                })
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .vertical_alignment(VerticalAlignment::Center),
+            ToggleSwitch::new()
+                .is_on(on)
+                .on_toggled(ctx.callback(Msg::SetTrendLine)),
+        ));
+    Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .children([
+            cell(0, w::section_header(theme, Symbol::FourBars, title)),
+            cell(1, switch),
+        ])
+}
+
 /// Activity heatmap card: fixed ~1-year window (follows the tool/model
 /// filters, not the range selector) with a 4-way metric switch.
 fn heat_card(
@@ -543,8 +577,21 @@ fn overview_widget(
                     .orientation(Orientation::Vertical)
                     .spacing(10.0)
                     .children((
-                        w::section_header(theme, Symbol::FourBars, &trend_title),
-                        w::trend_strip(theme, &vm.daily, trend, args.canvas_ready < 1, ctx),
+                        trend_head(
+                            theme,
+                            &trend_title,
+                            args.config.trend_line,
+                            vm.range == Range::Today,
+                            ctx,
+                        ),
+                        w::trend_strip(
+                            theme,
+                            &vm.daily,
+                            trend,
+                            args.config.trend_line,
+                            args.canvas_ready < 1,
+                            ctx,
+                        ),
                     )),
             ))
         }

@@ -1129,3 +1129,14 @@
 - **实测回填（真实账本的一致性副本，release CLI `--db <副本> scan`，前后 `target\e2e\duration-before.txt` / `duration-after.txt`，扫描墙钟 `duration-scan.txt`）**：扫描 19.5s（759 文件 / 609 重读）；claude 13,817 行 → 13,817 行有时长（100%，合计 76.9 h，p50 13.9s / p90 42.2s / max 688s）；codex 31,926 行 → 31,656 行有时长（99.2%，合计 157.9 h，p50 8.4s / p90 39.2s / max 784s）；其余适配器不变。
 - **UI 截图**（`GTT_DATA_DIR=target\e2e\ui-data` 指向副本，`GTT_NO_OTEL=1`，不碰真实账本）：`target\heat-tokens-dark.png`、`heat-cost-dark.png`、`heat-calls-dark.png`、`heat-duration-dark.png`、`heat-tooltip-light.png`（浅色 + `GTT_HEATTEST`）。
 - **验证命令**：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --check`（本次触及的文件均干净；cli/ui 的 `main.rs`、setup `main.rs`、`update.rs` 为既有差异，未处理）。
+
+## S83 趋势图 7 日/7 小时均线叠加开关 ✅
+
+- **目标**：总览"趋势"卡片（柱状图）头部新增开关，控制是否在柱上叠加折线；用户选择持久化。折线语义经确认 = 与柱同指标（Token）的移动平均，同轴不加副轴。
+- **A. 纯逻辑 `crates/ui/src/trend.rs`**：`moving_average(&[TrendBucket]) -> Vec<f64>`，窗口 7（日桶=天、时桶=小时，由 `is_hourly` 按标签 `HH:00`/`YYYY-MM-DD` 判定）。**日历口径**：`Cube::daily_trend` 只发有数据的桶（无数据天不出柱），故均值按日期差取窗口、缺日按 0 计入；除数 = 首桶到本桶的日历长度封顶 7（序列开头不被稀释）。`days_from_civil` 自实现（不引 chrono），跨年/月正确。
+- **B. UI**：`pages.rs` 新增 `trend_head`——沿用热力卡片头部布局（Grid `STAR|Auto`，左 `section_header` 右控件组），控件 = 标签"7 日均线"（Today 范围显"7 小时均线"）+ `ToggleSwitch`。开关存 `ui.json` `trend_line`（默认 false，缺键回落），`Msg::SetTrendLine` 保存并 `trend.inv.invalidate()`。
+- **C. 绘制（`widgets::trend_strip`，仅开关开时）**：均值先对**完整** `daily` 计算再截末 60 桶（与 `days` 同窗口），保证首批绘点带真实历史；折线过柱中心、`PathBuilder` 空心路径 + 圆角连接/端帽 2px；≤31 桶加 3px 圆点；颜色取 `SLICE_PALETTE[1]` 橙，与强调色距离 <0.45 时回落槽 0 绿（主题自适应）。`max` 对均值取 fold 兜底。图例：左上 max 值右侧短线样+"7 日均"，`lx` 按 max 文本宽度定位并 `clamp` 到 `w−230`。延迟提示卡追加"7 日均 {n} tok"一行。开关关时 `avg_line` 为空、长度守卫直接跳过全部叠加代码，零成本。
+- **取舍**：① 均值语义取"尾随 7 桶、缺日记 0、开头不稀释"，比窗口内实际桶数除法更能反映趋势且不会因跳空放大；② 线色固定橙/绿而非主题强调色，保证与柱区分；③ 点位圆点只在 ≤31 桶绘制避免 60 桶时噪点；④ 副轴方案被否（用户确认用同指标均线，无需第二轴）。
+- **测试**：`trend.rs` 6 例——空序列、序列开头除数=min(已过天数,7)、连续 9 天定值与尖峰出窗、缺日计 0、跨月/跨年（含闰年 `days_from_civil` 自检）、时桶 7 小时窗；`config.rs` 补 `trend_line` 默认 false/缺键/往返。
+- **UI 截图**（`GTT_DATA_DIR=target\e2e\ui-data`，`GTT_NO_OTEL=1`）：`target\ma-on-dark.png`（近 30 天，折线+图例+开关开）、`target\ma-off-dark.png`（开关关，外观与改动前一致）、`target\ma-on-light-tip.png`（浅色 + `GTT_TIPTEST`，提示卡含"7 日均"行）。
+- **验证命令**：`cargo test --workspace`（ui 25 例全过，其余不动）、`cargo clippy --workspace --all-targets -- -D warnings`（0 警告）、`rustfmt --check`（pages/widgets/trend/config/i18n/main 触及行均干净；main.rs 残余差异为既有、未处理）。

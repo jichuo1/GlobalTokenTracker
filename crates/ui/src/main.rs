@@ -17,6 +17,7 @@ mod i18n;
 mod pages;
 mod theme;
 mod tray;
+mod trend;
 mod updater;
 mod watch;
 mod widgets;
@@ -256,6 +257,8 @@ pub enum Msg {
     HeatLeave,
     /// Heatmap metric picked — tokens|cost|calls|duration.
     SetHeatMetric(&'static str),
+    /// Trend card: moving-average overlay toggle.
+    SetTrendLine(bool),
     /// Share-donut pointer hover: (column index, hovered slice or None).
     DonutHover(u8, Option<usize>),
     /// Statistics range changed — resolved to `Range` at the selector so
@@ -1452,6 +1455,11 @@ impl Component for Shell {
                 if sh.hover.take().is_some() {
                     self.heat.inv.invalidate();
                 }
+            }
+            Msg::SetTrendLine(on) => {
+                self.config.trend_line = on;
+                self.config.save();
+                self.trend.inv.invalidate();
             }
             Msg::SetHeatMetric(key) => {
                 self.config.heat_metric = key.to_string();

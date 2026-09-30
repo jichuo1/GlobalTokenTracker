@@ -265,7 +265,12 @@ pub fn tr(zh: &str) -> &str {
         // ---- activity heatmap
         "活跃热力图" => "Activity heatmap",
         // ---- trend moving average
-
+        "7 日均线" => "7-day avg",
+        "7 小时均线" => "7-hour avg",
+        "7 日均" => "7-day avg",
+        "7 小时均" => "7-hour avg",
+        "7 日均 {} tok" => "7-day avg {} tok",
+        "7 小时均 {} tok" => "7-hour avg {} tok",
         "计费" => "Cost",
         "调用" => "Calls",
         "少" => "Less",
