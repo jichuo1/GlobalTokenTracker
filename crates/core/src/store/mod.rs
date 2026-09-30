@@ -189,6 +189,37 @@ impl Store {
             self.conn
                 .execute_batch("ALTER TABLE sync_cursors ADD COLUMN adapter_state TEXT")?;
         }
+        // Long-context output / cache-read tiers on `prices` — idempotent.
+        for col in ["tier_above_200k_output", "tier_above_200k_cache_read"] {
+            let has: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('prices') WHERE name=?1",
+                [col],
+                |r| r.get(0),
+            )?;
+            if has == 0 {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE prices ADD COLUMN {col} REAL"))?;
+            }
+        }
+        // OpenCode used to book output WITHOUT reasoning (its `tokens.reasoning`
+        // is separate); the project convention is reasoning ⊂ output. One-time
+        // fix for rows ingested before the adapter changed. Runs at open —
+        // before any scan — so freshly ingested rows are never added twice.
+        const OPENCODE_MIG: &str = "mig_opencode_output_includes_reasoning";
+        if self.get_state(OPENCODE_MIG)?.is_none() {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE usage_events SET output_tokens = output_tokens + reasoning_tokens
+                 WHERE app=?1 AND reasoning_tokens > 0",
+                [crate::model::apps::OPENCODE],
+            )?;
+            tx.execute(
+                "INSERT INTO app_state(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [OPENCODE_MIG],
+            )?;
+            tx.commit()?;
+        }
         let version: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],
@@ -403,6 +434,45 @@ mod tests {
             provenance: Provenance::LocalJsonl,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn opencode_output_gains_reasoning_exactly_once() {
+        let dir = std::env::temp_dir().join(format!("gtt_mig_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ledger.db");
+        let out = |s: &Store, key: &str| -> i64 {
+            s.conn()
+                .query_row(
+                    "SELECT output_tokens FROM usage_events WHERE dedup_key=?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let s = Store::open(&path).unwrap();
+            let mut oc = ev("oc", 5, Some(0.0));
+            oc.app = apps::OPENCODE.into();
+            oc.reasoning_tokens = 30;
+            let mut other = ev("cl", 5, Some(0.0));
+            other.reasoning_tokens = 30;
+            s.upsert_event(&oc).unwrap();
+            s.upsert_event(&other).unwrap();
+            // Simulate a ledger written before the migration existed.
+            s.conn()
+                .execute("DELETE FROM app_state WHERE key LIKE 'mig_opencode%'", [])
+                .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(out(&s, "oc"), 35);
+        assert_eq!(out(&s, "cl"), 5); // other tools already count it in output
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(out(&s, "oc"), 35); // no double add
+        drop(s);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

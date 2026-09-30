@@ -1435,7 +1435,12 @@ impl Component for Shell {
                 self.prices_refreshing = false;
                 match res {
                     Ok(r) => {
-                        diag!("[prices] synced: {} repriced={}", r.summary(), r.repriced);
+                        diag!(
+                            "[prices] synced: {} repriced={} rules_repass={}",
+                            r.summary(),
+                            r.repriced,
+                            r.rules_repass
+                        );
                         for f in &r.failed {
                             diag!("[prices] feed failed: {f}");
                         }
@@ -1444,7 +1449,7 @@ impl Component for Shell {
                         // visible USD.
                         self.views_stale = true;
                         self.load_page_data(Page::Prices, context);
-                        if r.repriced > 0 {
+                        if r.repriced > 0 || r.rules_repass {
                             // Costs of events on arbitrary days changed.
                             self.cube_rebuild = true;
                             self.start_scan(context);
