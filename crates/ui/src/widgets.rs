@@ -327,12 +327,8 @@ pub fn trend_strip(
                 let max = avg_line.iter().fold(bar_max, |m, v| m.max(*v as f32));
 
                 // Max label (top-left) + faint mid gridline.
-                ctx.draw_text(
-                    &fmt::tokens_exact(max as u64),
-                    &tf,
-                    &Rect::new(0.0, 0.0, 160.0, top),
-                    &ink,
-                );
+                let max_text = fmt::tokens_exact(max as u64);
+                ctx.draw_text(&max_text, &tf, &Rect::new(0.0, 0.0, 160.0, top), &ink);
                 let mid_y = top + plot_h * 0.5;
                 ctx.draw_line(Vector2::new(0.0, mid_y), Vector2::new(w, mid_y), &line, 1.0);
                 ctx.draw_line(
@@ -429,9 +425,19 @@ pub fn trend_strip(
                             );
                         }
                     }
-                    // Legend next to the max label, clear of the right-aligned hover text.
-                    let lx = (fmt::tokens_exact(max as u64).len() as f32 * label_pt * 0.62 + 16.0)
-                        .min((w - 230.0).max(0.0));
+                    // Legend after the max label — measure the real inked
+                    // bounds (left + width) instead of estimating per-glyph.
+                    let max_end = windows_canvas::TextLayout::new(&max_text, &tf, 160.0, top)
+                        .map(|l| {
+                            let m = l.metrics();
+                            m.left + m.width
+                        })
+                        .unwrap_or(80.0);
+                    let legend_label = t!("移动平均");
+                    let legend_w = windows_canvas::TextLayout::new(legend_label, &tf, 200.0, top)
+                        .map(|l| l.metrics().width + 20.0)
+                        .unwrap_or(100.0);
+                    let lx = (max_end + 16.0).min((w - 220.0 - legend_w).max(max_end + 4.0));
                     let ly = top * 0.5;
                     ctx.draw_line(
                         Vector2::new(lx, ly),
@@ -440,13 +446,9 @@ pub fn trend_strip(
                         2.0,
                     );
                     ctx.draw_text(
-                        if hourly {
-                            t!("7 小时均")
-                        } else {
-                            t!("7 日均")
-                        },
+                        legend_label,
                         &tf,
-                        &Rect::new(lx + 20.0, 0.0, lx + 120.0, top),
+                        &Rect::new(lx + 20.0, 0.0, lx + 20.0 + legend_w, top),
                         &ink,
                     );
                 }
@@ -469,9 +471,9 @@ pub fn trend_strip(
                     ];
                     if let Some(a) = avg_line.get(i) {
                         lines.push(if hourly {
-                            tf!("7 小时均 {} tok", fmt::tokens_exact(*a as u64))
+                            tf!("7 小时移动平均 {} tok", fmt::tokens_exact(*a as u64))
                         } else {
-                            tf!("7 日均 {} tok", fmt::tokens_exact(*a as u64))
+                            tf!("7 日移动平均 {} tok", fmt::tokens_exact(*a as u64))
                         });
                     }
                     for (m, t) in &d.top {

@@ -61,9 +61,28 @@ impl Default for FontWeight {
 }
 
 /// A text format describing font family, size, weight, and alignment.
-#[derive(Clone)]
 pub struct TextFormat {
     raw: IDWriteTextFormat,
+    // Creation parameters are kept so `Clone` can build a *new*
+    // `IDWriteTextFormat`. A derived COM clone would only AddRef the same
+    // object: mutating the copy (e.g. `with_alignment`) would then silently
+    // change the original format too.
+    family: String,
+    size: f32,
+    weight: FontWeight,
+    alignment: TextAlignment,
+    paragraph_alignment: ParagraphAlignment,
+    wrapping: WordWrapping,
+}
+
+impl Clone for TextFormat {
+    fn clone(&self) -> Self {
+        Self::with_weight(&self.family, self.size, self.weight)
+            .expect("IDWriteTextFormat creation failed while cloning")
+            .with_alignment(self.alignment)
+            .with_paragraph_alignment(self.paragraph_alignment)
+            .with_word_wrapping(self.wrapping)
+    }
 }
 
 impl TextFormat {
@@ -96,34 +115,45 @@ impl TextFormat {
             )?
         };
 
-        Ok(Self { raw })
+        Ok(Self {
+            raw,
+            family: family.to_string(),
+            size,
+            weight,
+            alignment: TextAlignment::default(),
+            paragraph_alignment: ParagraphAlignment::default(),
+            wrapping: WordWrapping::default(),
+        })
     }
 
     /// Sets the horizontal text alignment.
-    pub fn with_alignment(self, alignment: TextAlignment) -> Self {
+    pub fn with_alignment(mut self, alignment: TextAlignment) -> Self {
         let value = match alignment {
             TextAlignment::Leading => DWRITE_TEXT_ALIGNMENT_LEADING,
             TextAlignment::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
             TextAlignment::Trailing => DWRITE_TEXT_ALIGNMENT_TRAILING,
         };
         unsafe { _ = self.raw.SetTextAlignment(value) };
+        self.alignment = alignment;
         self
     }
 
     /// Sets the vertical paragraph alignment.
-    pub fn with_paragraph_alignment(self, alignment: ParagraphAlignment) -> Self {
+    pub fn with_paragraph_alignment(mut self, alignment: ParagraphAlignment) -> Self {
         let value = match alignment {
             ParagraphAlignment::Top => DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
             ParagraphAlignment::Center => DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
             ParagraphAlignment::Bottom => DWRITE_PARAGRAPH_ALIGNMENT_FAR,
         };
         unsafe { _ = self.raw.SetParagraphAlignment(value) };
+        self.paragraph_alignment = alignment;
         self
     }
 
     /// Sets the word wrapping mode.
-    pub fn with_word_wrapping(self, wrapping: WordWrapping) -> Self {
+    pub fn with_word_wrapping(mut self, wrapping: WordWrapping) -> Self {
         unsafe { _ = self.raw.SetWordWrapping(wrapping.to_abi()) };
+        self.wrapping = wrapping;
         self
     }
 
