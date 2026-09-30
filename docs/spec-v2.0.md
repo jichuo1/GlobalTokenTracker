@@ -252,6 +252,13 @@ CREATE TABLE daily_rollups (
 - 去重：按 responseId 全局去重（`/fork`、IDE→CLI 导入会把早先的生成复制进新库）；先上报的会话保有该行，副本跳过，归属不随重扫翻转。
 - 本机现状：`~/.gemini/antigravity` 已安装但 `conversations/` 为空，尚无真实会话可对照；格式依据均为第三方逆向，遇 agy 升级改字段时应先看 `gen_metadata` 解码为空的迹象。
 
+### 6.8c DeepSeek Harness（已实现：`adapters/dsh.rs`）
+- 来源（上游 `packages/util/home-paths` + `session-persistence-jsonl` 源码实证）：harness home = `$DSH_HOME` > `~/.dsh`；DSH Desktop 把 home 指到 `<userData>/dsh-desktop/harness`（Windows `%APPDATA%`、macOS `Application Support`、Linux `~/.config`）；`~/.dsh_desktop/<name>/` 为额外部署 home。
+- 布局：`<home>/sessions/--<normalized-cwd>--/<encoded-session-id>/session.v<N>.jsonl.zstd`（`compression:none` 时为 `.jsonl`）。**v0…v4 各代并存**，同一会话目录只读最高代，否则一次会话的用量被重复计数。
+- 事件：`assistant/message` 带 `data.usage{inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,reasoningTokens?}` + `data.message.source{provider,model}`（缺省回落最近一次 `request/header` 的 `config`）；`step/start` 提供调用起点 → `duration_ms`（30 分钟守卫）。失败的 `assistant/attempt` 无 usage，自然不产生事件。
+- zstd 不能尾段解码：忽略引擎给的增量段、每次整文件重读重解码，`adapter_state.last_seq` 只发射新增行（dedup_key `dsh:{sid}:{seq}` 兜底幂等）；末帧截断时取已解码前缀，下次增长自然补全。
+- 计价：harness 只记 token 不记金额 → 走价目表；`deepseek-official` 的 `deepseek-flash` 等已在 feeds 内（本机实测 0.0003045 USD/次正确计价）。
+
 ### 6.9 官方配额/订阅通道（P2，凭据文件可用性已验证）
 
 | 工具 | 端点 | 凭据 | 实测状态 |

@@ -1140,3 +1140,13 @@
 - **测试**：`trend.rs` 6 例——空序列、序列开头除数=min(已过天数,7)、连续 9 天定值与尖峰出窗、缺日计 0、跨月/跨年（含闰年 `days_from_civil` 自检）、时桶 7 小时窗；`config.rs` 补 `trend_line` 默认 false/缺键/往返。
 - **UI 截图**（`GTT_DATA_DIR=target\e2e\ui-data`，`GTT_NO_OTEL=1`）：`target\ma-on-dark.png`（近 30 天，折线+图例+开关开）、`target\ma-off-dark.png`（开关关，外观与改动前一致）、`target\ma-on-light-tip.png`（浅色 + `GTT_TIPTEST`，提示卡含"7 日均"行）。
 - **验证命令**：`cargo test --workspace`（ui 25 例全过，其余不动）、`cargo clippy --workspace --all-targets -- -D warnings`（0 警告）、`rustfmt --check`（pages/widgets/trend/config/i18n/main 触及行均干净；main.rs 残余差异为既有、未处理）。
+
+## S84 DeepSeek Harness 适配器（CLI + DSH Desktop）✅
+
+- **来源调研**（上游仓库源码 + 本机真实安装）：`deepseek-ai/deepseek-harness` 的 `packages/util/home-paths` 证实 home 解析链 `$DSH_HOME` > `~/.dsh`；DSH Desktop 将 home 指到 `<userData>/dsh-desktop/harness`（本机 `%APPDATA%\dsh-desktop\harness` 实测存在）。`session-persistence-jsonl` 证实布局 `sessions/--<cwd>--/<sid>/session.v<N>.jsonl.zstd`，且 v0…v4 各代**并存保留**——同目录只取最高代，否则同一会话跨代文件重复计数。
+- **实现**：`adapters/dsh.rs`，capability=Precise（`assistant/message` 携带厂商上报的 per-call usage）。发现 = `$DSH_HOME`、`~/.dsh`、`dirs::data_dir()/dsh-desktop/harness`、`dirs::config_dir()/dsh-desktop/harness`（Linux）、`~/.dsh_desktop/*/` 各 home 的 `sessions/`；`generation()` 解析规范文件名，`discover_in` 按会话目录选最高代（同代 .zstd 优先）。解析：整文件自读 + zstd 流式解码（torn 尾帧保留已解码前缀、记 note 不报错），`step/start` 记 (turn,step)→起点映射给 `duration_ms`（30min 守卫），`request/header` 的 config 作 provider/model 回落，`session` 头行取 id/cwd。`adapter_state.last_seq` 限发新行；`consumed=data.len()` 让游标到 EOF——增量段本身不解码（zstd 不可尾段解码），靠"文件一变就整体重读 + seq 水位 + dedup_key"三重保证不错不漏。
+- **取舍**：① 每次 append 整文件重解码（会话文件小，实测 17KB/608B；比跨段维护解码器状态简单可靠）；② reasoning 字段双名兼容（`reasoningTokens`/`reasoningOutputTokens`），子集口径；③ 无 seq 的事件用 message.id/行号入 dedup_key、始终发射；④ 不产 quota（dsh 用自有 provider key，无订阅额度概念）。
+- **新增依赖**：`zstd 0.14.0`（zstd-sys 2.1.0+zstd.1.5.7，vendored C，无外部工具链要求）。
+- **测试**（6 例）：v4 zstd 事件字段/时长/dedup；增量重扫只发新 seq 且 consumed=段长；无压缩 `.jsonl` + request/header 回落 + 无 seq 走 msgid；同目录三代文件只选 v4；双帧+末帧截断→前缀解码+note；零 usage 记 skipped。
+- **本机实测**（scratch db `target\e2e\dsh-test.db`，不动真实账本）：`scan` 发现 2 个会话文件，产出 1 条事件——input 1834 / output 49 与原始日志逐字段一致，`duration_ms=1929`（message−step/start），价目表自动计价 $0.0003045（computed）；3 次 404 失败 attempt 正确无事件；二次 `scan dsh` → `2 seen / 0 scanned / +0`（游标 EOF 跳过、幂等）。
+- **验证命令**：`cargo test -p globaltokentracker-core`（159 过）、`cargo clippy --workspace --all-targets -- -D warnings`（0）、`rustfmt --check`（dsh.rs 干净）。`docs/spec-v2.0.md` 增 §6.8c。
