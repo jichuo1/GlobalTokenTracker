@@ -1197,3 +1197,10 @@
 - **问题**：月历卡片右侧大半空白，信息列挤在月历旁未利用宽度。
 - **改动**：布局改 `[Auto][STAR]` 网格——月历钉左，信息列在剩余宽度内水平居中且垂直居中；信息列下增「快捷选择」按钮排（昨天 / 本周（周一起）/ 本月 / 上月 / 近 90 天，均为顶部预设没有的区间），`Msg::CalQuick` 走 `Range::custom_days` + `cal_month` 跟随。
 - **验证**：UIA InvokePattern 点「上月」→ `ui.json` 持久化 `2026-09-01..2026-10-01`（整月、exclusive end 正确）；截图 `target\cal-layout2.png`；clippy 0、fmt 干净、ui 25 测试过。
+
+## S90 安装器写载荷改为临时文件+重命名交换（0 字节 ui.exe 根治）✅
+
+- **问题**：静默安装/升级间歇性把 `globaltokentracker-ui.exe` 截成 0 字节（本次复现率 3/3），程序损坏且 `--quiet` 下无可见错误。
+- **根因**：`extract_payload` 直接 `fs::write` 目标路径 = `CREATE_ALWAYS` 截断 + `write_all`。截断立即生效，而覆盖被杀进程刚释放的 exe 时写/替换会瞬时失败（镜像节回收是异步的，实测 `MoveFileEx REPLACE` 在 taskkill 后 ~3s 内返回 ACCESS_DENIED，90s 后手动同调用立成）；360 安全卫士全程监控该路径（`safemon` PopWndTrackerLog 有该 exe 条目）进一步放大失败面。失败沿 `?` 中断但 GUI 子系统无控制台，用户完全无感。
+- **改动**：载荷与 setup 副本均写 `.<name>.gtt-new` 临时文件 → 校验落盘长度 → `rename_retry`（40×250ms 重试跨镜像回收窗口）原子换入。失败时旧版本完好、仅留临时文件，不再出现 0 字节。
+- **验证**：复现路径实测——旧版进程运行中跑新安装器，`ui/cli/setup.exe` 全部完整替换（10,985,472 / 7,943,168 / 10,937,856B）、无 `.gtt-new` 残留、exit 0、`--launch` 起新进程；sha256 与 release 构建一致。clippy `-D warnings` 0、setup 13 测试过；fmt diff 均为该文件存量风格（95/220/645/685/779/797/813），未连带重排。
