@@ -1182,3 +1182,12 @@
 
 - **范围**：抽出 `Shell::spawn_price_refresh`（刷新进行中直接返回；开始时清 `price_refresh_error`），自动路径（`price_due`）与新消息 `Msg::RefreshPrices` 共用。`pricing::refresh` 本身不看 TTL（TTL 只在 `load_all` 决定 `price_due`），手动路径天然强制。`PricesDone`：`Err` 或"`Ok` 但 `sources` 为空且 `failed` 非空"时记 `price_refresh_error`（取首行、截断 120 字符）。`prices_page` 新增独立参数 `PriceRefresh { active, error }`（不改 `PriceSearch` 语义），用 `header` 的 actions 槽放"刷新价目"按钮；刷新中禁用按钮并显示小号 `ProgressRing` + "同步中…"；有错误时在摘要行追加"上次刷新失败：…"。英文条目已补（Refresh prices / Syncing… / Last refresh failed: {}）。
 - **验证**：`cargo test -p globaltokentracker-ui`（25 通过）、`cargo clippy --workspace --all-targets -- -D warnings` 0；本次触及的代码 rustfmt 干净（`ui/src/main.rs` 余下 4 处为既有差异）。release UI 截图（`GTT_DATA_DIR` 指向账本副本）：`target\prices-refresh-idle.png`（空闲）、`target\prices-refresh-syncing.png`（点击后：旋转圈 + "同步中…" + 按钮置灰）。
+
+## S88 自定义日期区间改为内联单月历勾选 ✅
+
+- **原状与缺陷**：总览「自定义」放两个 `CalendarDatePicker`（起始/截止）。其一，reactor 0.100 的 `CalendarDatePicker` 无 `date` setter——重开应用或代码侧自动调端点（`start>end` 时把另一端推回）后，选择器显示值与实际统计窗**不再一致**；其二，`picked_day_ms` 假定选择器回传 UTC 零点，而 WinUI 的 `Date` 是本地 `DateTimeOffset` 且可带时刻，UTC+8 下取 UTC 日期会错前/错后一天（用户感知为"选了之后统计时期错位"，间歇出现）；其三，端点用 `+DAY_MS` 推算，DST 日不安全。
+- **方案**：原生 `CalendarView` 在 reactor 0.100 无可用 API（回调不携带日期、无 setter），改为自绘单月历——`Border` 单元格 + `on_pointer_pressed`（无 WinRT 日期转换，全程本地 civil 日期），`jiff` 计算星期/月内天数。点选语义：首击锚点并即时显示单日区间、再击完成 `[min,max]`（反向自动交换），三次点击重起新选；`‹/›` 翻月且不可越过当月；今天细线描边、未来日淡化且不可点；选中区间淡 accent、端点实心 accent。
+- **核心改动**：`viewmodel` 新增 `local_day_start` / `local_date` / `Range::custom_days`（DST 安全，`end = start of day after last`），删除 `utc_day_to_local_start`；`Shell` 新增 `cal_month`/`cal_anchor` 与 `Msg::CalPick`/`CalMonth`（替代 `SetCustomStart/End`）；`pages.rs::custom_range_row` 重写为「月历 + 已选区间回显 + 引导文案」卡片；ui 依赖 `windows-time` → `jiff`。
+- **踩坑两则**：① 真 `Button` 单元格内边距把 36px 格中两位数日期裁掉一半（"10"→"1"），`ButtonPadding` 资源键无效，弃用 Button 改 `Border`；② `Border` **无背景不参与命中测试**——必须显式 `Brush::Solid(argb(0,0,0,0))` 才能收 pointer 事件。
+- **测试**：`custom_days` 含闭区间语义、反序交换、单日、NY 夏令时（23h/71h 窗）正确；`local_date∘local_day_start` 三时区往返。
+- **验证**：core 164 / ui 25 测试过，`clippy -D warnings` 0，触及代码 fmt 干净。release 截图：`target\cal-fix2.png`（全月渲染、8 号今日描边、无裁切）、`target\cal-now.png`；用户实测点击 1 号 → `ui.json` 持久化 `10-01..10-02`（锚点→单日区间行为符合设计）；区间统计与 SQL 直查核对一致（10-01：`463` 事件 / `225,923,494` tok）。

@@ -252,67 +252,181 @@ fn header(theme: &Theme, title: &str, actions: Vec<View>) -> View {
         ])
 }
 
-/// WinUI `CalendarDatePicker` reports the picked day as UTC-midnight
-/// `DateTime` (100ns ticks since 1601); translate to the local day's
-/// start-of-day epoch ms so the window follows local calendar dates.
-fn picked_day_ms(d: Option<windows_time::DateTime>) -> Option<i64> {
-    let ms = (d?.universal_time - 116_444_736_000_000_000) / 10_000;
-    Some(globaltokentracker_core::viewmodel::utc_day_to_local_start(
-        ms,
-    ))
+/// Custom-range calendar state owned by `Shell`: the month on show and the
+/// first click still waiting for its partner.
+#[derive(Clone, Copy)]
+pub struct CalView {
+    pub month: (i16, i8),
+    pub anchor: Option<jiff::civil::Date>,
 }
 
-/// `自定义` range chrome: two calendar pickers (start day / last day) plus a
-/// text echo of the resolved window — CalendarDatePicker has no `date`
-/// setter in reactor 0.100, so the picked value is shown alongside.
+const CAL_CELL_W: f64 = 36.0;
+const CAL_CELL_H: f64 = 30.0;
+
+fn rgba(c: windows_canvas::ColorF, alpha: f32) -> Color {
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Color::argb(b(c.a * alpha), b(c.r), b(c.g), b(c.b))
+}
+
+/// One day cell — a plain `Border` (a real `Button`'s padding clips two-digit
+/// days in a 36 px cell). Range days get a soft accent wash, the endpoints
+/// (or a pending first click) the solid accent, today a hairline outline;
+/// days after today are dimmed and inert.
+fn cal_day(
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+    day: jiff::civil::Date,
+    sel: (jiff::civil::Date, jiff::civil::Date),
+    today: jiff::civil::Date,
+) -> View {
+    let (y, m, d) = (day.year(), day.month(), day.day());
+    let accent = theme.accent_cf;
+    let live = day <= today;
+    let endpoint = day == sel.0 || day == sel.1;
+    let inside = day > sel.0 && day < sel.1;
+    let mut cell = Border::new()
+        .width(CAL_CELL_W)
+        .height(CAL_CELL_H)
+        .corner_radius(CornerRadius::uniform(4.0))
+        // A null background never hit-tests — set an explicit transparent
+        // brush so the whole cell still receives pointer input.
+        .background(Brush::Solid(Color::argb(0, 0, 0, 0)));
+    if endpoint {
+        cell = cell.background(Brush::Solid(rgba(accent, 1.0)));
+    } else if inside {
+        cell = cell.background(Brush::Solid(rgba(accent, 0.30)));
+    } else if day == today {
+        cell = cell
+            .border_brush(Brush::Solid(rgba(theme.subtle_cf, 1.0)))
+            .border_thickness(Thickness::uniform(1.0));
+    }
+    if live {
+        cell = cell.on_pointer_pressed(ctx.callback(move |_| Msg::CalPick(y, m, d)));
+    }
+    cell.content(
+        TextBlock::new()
+            .text(d.to_string())
+            .font_size(theme.body_size)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .foreground(if !live {
+                theme.subtle
+            } else if endpoint {
+                Brush::Solid(Color::rgb(255, 255, 255))
+            } else {
+                theme.text
+            }),
+    )
+}
+
+/// `自定义` range chrome: an inline month calendar (click a start day, then an
+/// end day) beside a text echo of the resolved window. Everything is local
+/// civil dates — no WinRT date values, no time-of-day, no UTC conversion.
 fn custom_range_row(
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
     start_ms: i64,
     end_ms: i64,
+    cal: CalView,
 ) -> View {
-    let day_label = |v: &str| {
-        TextBlock::new()
-            .text(v)
-            .font_size(theme.body_size)
-            .foreground(theme.subtle)
-            .vertical_alignment(VerticalAlignment::Center)
-            .into()
-    };
-    // end_ms is exclusive — echo the last INCLUDED day.
-    let echo = format!(
-        "{} → {}",
-        fmt::day(Some(start_ms)),
-        fmt::day(Some(end_ms - 1))
-    );
-    let from: View = CalendarDatePicker::new()
-        .placeholder_text(tr("起始日期"))
-        .on_date_changed(
-            ctx.callback(|d: Option<windows_time::DateTime>| match picked_day_ms(d) {
-                Some(ms) => Msg::SetCustomStart(ms),
-                None => Msg::Noop,
-            }),
-        )
-        .into();
-    let to: View = CalendarDatePicker::new()
-        .placeholder_text(tr("截止日期"))
-        .on_date_changed(
-            ctx.callback(|d: Option<windows_time::DateTime>| match picked_day_ms(d) {
-                Some(ms) => Msg::SetCustomEnd(ms),
-                None => Msg::Noop,
-            }),
-        )
-        .into();
-    StackPanel::new()
+    use globaltokentracker_core::viewmodel::local_date;
+    let today = jiff::Zoned::now().date();
+    // end_ms is exclusive — the last INCLUDED day is the one before it.
+    let (first, last) = (local_date(start_ms), local_date(end_ms - 1));
+    let days = first.until(last).map_or(1, |s| s.get_days() + 1);
+    let (y, m) = cal.month;
+    let month_first = jiff::civil::Date::new(y, m, 1).unwrap_or(today);
+    let at_current = (y, m) >= (today.year(), today.month());
+
+    let nav =
+        |label: &'static str, delta: i8, enabled: bool, ctx: &mut ViewContext<Shell>| -> View {
+            Button::new()
+                .width(CAL_CELL_W)
+                .height(CAL_CELL_H)
+                .is_enabled(enabled)
+                .on_click(ctx.callback(move |_| Msg::CalMonth(delta)))
+                .content(label)
+        };
+    let head: View = StackPanel::new()
         .orientation(Orientation::Horizontal)
-        .spacing(10.0)
         .children([
-            day_label(tr("从")),
-            from,
-            day_label(tr("至")),
-            to,
-            day_label(&echo),
-        ])
+            nav("‹", -1, true, ctx),
+            Border::new().width(CAL_CELL_W * 5.0).content(
+                TextBlock::new()
+                    .text(tf!("{} 年 {} 月", y, m))
+                    .font_size(theme.body_size)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .vertical_alignment(VerticalAlignment::Center),
+            ),
+            nav("›", 1, !at_current, ctx),
+        ]);
+    let weekdays: View = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .keyed_children(keyed(
+            ["一", "二", "三", "四", "五", "六", "日"]
+                .iter()
+                .map(|w| -> View {
+                    Border::new().width(CAL_CELL_W).content(
+                        TextBlock::new()
+                            .text(tr(w))
+                            .font_size(theme.label_size)
+                            .foreground(theme.subtle)
+                            .horizontal_alignment(HorizontalAlignment::Center),
+                    )
+                })
+                .collect(),
+        ));
+
+    let lead = i64::from(month_first.weekday().to_monday_zero_offset());
+    let mut rows: Vec<View> = vec![head, weekdays];
+    for week in 0..6i64 {
+        let cells: Vec<View> = (0..7i64)
+            .map(|wd| {
+                let n = week * 7 + wd - lead + 1;
+                match month_first.checked_add(jiff::Span::new().days(n - 1)) {
+                    Ok(day) if n >= 1 && day.month() == m => {
+                        cal_day(theme, ctx, day, (first, last), today)
+                    }
+                    _ => Border::new().width(CAL_CELL_W).height(CAL_CELL_H).into(),
+                }
+            })
+            .collect();
+        rows.push(
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .keyed_children(keyed(cells)),
+        );
+    }
+    let calendar = vstack(2.0, rows);
+
+    let hint = if cal.anchor.is_some() {
+        t!("再点一个日期作为另一端")
+    } else {
+        t!("点击起始日，再点击结束日")
+    };
+    let info = vstack(
+        6.0,
+        vec![
+            TextBlock::new()
+                .text(tf!("{} → {} · 共 {} 天", first, last, days))
+                .font_size(theme.body_size)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .into(),
+            TextBlock::new()
+                .text(hint)
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .into(),
+        ],
+    );
+    w::card(
+        theme,
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(32.0)
+            .children([calendar, info]),
+    )
 }
 
 fn page_frame(theme: &Theme, body: View) -> View {
@@ -1160,6 +1274,8 @@ pub struct OverviewArgs<'a> {
     /// Anything not yet allowed renders as a same-size placeholder
     /// (`widgets::defer_slot`).
     pub canvas_ready: usize,
+    /// Custom-range calendar state (month on show, pending first click).
+    pub cal: CalView,
 }
 
 /// Returns the page's raw top-level blocks — `frame_page` assembles them
@@ -1272,7 +1388,7 @@ pub fn overview_page(
     );
 
     if let Range::Custom { start_ms, end_ms } = s.vm.range {
-        col.push(custom_range_row(theme, ctx, start_ms, end_ms));
+        col.push(custom_range_row(theme, ctx, start_ms, end_ms, args.cal));
     }
 
     for id in order.iter() {

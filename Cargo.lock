@@ -822,6 +822,7 @@ version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "globaltokentracker-core",
+ "jiff",
  "notify",
  "serde",
  "serde_json",
@@ -831,7 +832,6 @@ dependencies = [
  "windows-composition",
  "windows-reactor",
  "windows-sys 0.60.2",
- "windows-time",
  "winresource",
 ]
 

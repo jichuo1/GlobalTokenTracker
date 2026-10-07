@@ -153,6 +153,10 @@ pub struct Shell {
     trend: widgets::TrendHandle,
     /// Activity-heatmap hover state + repaint handle.
     heat: widgets::HeatHandle,
+    /// Custom-range calendar: month on show and the first click awaiting its
+    /// partner (`None` = next click starts a new range).
+    cal_month: (i16, i8),
+    cal_anchor: Option<jiff::civil::Date>,
     /// Share-donut hover states — one per share-grid column (4 max).
     donuts: [widgets::DonutHandle; 4],
     /// Vendor quota channels poll at this cadence (network calls stay rare).
@@ -270,10 +274,10 @@ pub enum Msg {
     SetRange(Range),
     /// "自定义" selector item picked — adopt stored bounds (else last 7 days).
     PickCustomRange,
-    /// Calendar picker: custom start day (local start-of-day, epoch ms).
-    SetCustomStart(i64),
-    /// Calendar picker: custom end day (local start-of-day, INCLUSIVE day).
-    SetCustomEnd(i64),
+    /// Inline calendar: a day was clicked (civil year, month, day).
+    CalPick(i16, i8, i8),
+    /// Inline calendar: show the previous (-1) or next (+1) month.
+    CalMonth(i8),
     /// Tool checkbox toggled (app name, new checked state).
     ToggleApp(String, bool),
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
@@ -369,8 +373,16 @@ const BLOCK_HOST_KEYS: [[&str; MAX_SLIDE]; 2] = [
         "host-1b7", "host-1b8", "host-1b9",
     ],
 ];
-/// Local-day range math is 24h-aligned (same convention as `day_start_ms`).
-const DAY_MS: i64 = 86_400_000;
+/// Month the custom-range calendar opens on: the one holding the range's last
+/// day (today's for anything else).
+fn cal_month_of(r: Range) -> (i16, i8) {
+    let d = match r {
+        Range::Custom { end_ms, .. } => globaltokentracker_core::viewmodel::local_date(end_ms - 1),
+        _ => jiff::Zoned::now().date(),
+    };
+    (d.year(), d.month())
+}
+
 /// Spec §6.9: quota polling is low-frequency by design.
 const QUOTA_POLL_SECS: u64 = 30 * 60;
 
@@ -744,6 +756,8 @@ impl Component for Shell {
             tray,
             trend: widgets::TrendHandle::default(),
             heat: widgets::HeatHandle::default(),
+            cal_month: cal_month_of(range),
+            cal_anchor: None,
             donuts: std::array::from_fn(|_| widgets::DonutHandle::default()),
             quota_at: None,
             open_menu: None,
@@ -920,6 +934,7 @@ impl Component for Shell {
             }
             Msg::SetRange(r) => {
                 self.open_menu = None;
+                self.cal_anchor = None;
                 self.set_range(r, context);
             }
             Msg::PickCustomRange => {
@@ -932,23 +947,36 @@ impl Component for Shell {
                         .zip(self.config.range_end_ms)
                         .unwrap_or_else(|| (day_start_ms(6), day_start_ms(-1))),
                 };
-                self.set_range(Range::custom(s, e), context);
+                let r = Range::custom(s, e);
+                self.cal_month = cal_month_of(r);
+                self.cal_anchor = None;
+                self.set_range(r, context);
             }
-            Msg::SetCustomStart(day_ms) => {
-                let e = match self.range {
-                    Range::Custom { end_ms, .. } => end_ms,
-                    _ => self.config.range_end_ms.unwrap_or(day_ms + DAY_MS),
+            Msg::CalPick(y, m, d) => {
+                let Ok(day) = jiff::civil::Date::new(y, m, d) else {
+                    return;
                 };
-                self.set_range(Range::custom(day_ms, e.max(day_ms + DAY_MS)), context);
+                if day > jiff::Zoned::now().date() {
+                    return;
+                }
+                let r = match self.cal_anchor.take() {
+                    None => {
+                        self.cal_anchor = Some(day);
+                        Range::custom_days(day, day)
+                    }
+                    Some(first) => Range::custom_days(first, day),
+                };
+                self.set_range(r, context);
             }
-            Msg::SetCustomEnd(day_ms) => {
-                // The picked day is inclusive → store start-of-next-day.
-                let e = day_ms + DAY_MS;
-                let s = match self.range {
-                    Range::Custom { start_ms, .. } => start_ms,
-                    _ => self.config.range_start_ms.unwrap_or(day_ms),
-                };
-                self.set_range(Range::custom(s.min(day_ms), e), context);
+            Msg::CalMonth(delta) => {
+                let (y, m) = self.cal_month;
+                let now = jiff::Zoned::now().date();
+                if let Ok(first) = jiff::civil::Date::new(y, m, 1)
+                    && let Ok(next) = first.checked_add(jiff::Span::new().months(i32::from(delta)))
+                    && (next.year(), next.month()) <= (now.year(), now.month())
+                {
+                    self.cal_month = (next.year(), next.month());
+                }
             }
             Msg::ToggleApp(app, on) => {
                 let all: Vec<String> = self
@@ -1835,6 +1863,10 @@ impl Shell {
                     cols: self.overview_cols,
                     ruler: &self.ruler,
                     donuts: &self.donuts,
+                    cal: pages::CalView {
+                        month: self.cal_month,
+                        anchor: self.cal_anchor,
+                    },
                     canvas_ready,
                 },
             ),

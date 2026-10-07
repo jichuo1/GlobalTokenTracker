@@ -38,6 +38,27 @@ impl Range {
         }
     }
 
+    /// Inclusive civil-day window `[min(first,last), max(first,last)]` in the
+    /// system zone — stored as `[start of first day, start of the day after the
+    /// last)`, so DST-short or -long days need no 24h arithmetic.
+    pub fn custom_days(first: jiff::civil::Date, last: jiff::civil::Date) -> Self {
+        Self::custom_days_in(&jiff::tz::TimeZone::system(), first, last)
+    }
+
+    fn custom_days_in(
+        tz: &jiff::tz::TimeZone,
+        first: jiff::civil::Date,
+        last: jiff::civil::Date,
+    ) -> Self {
+        let (a, b) = if first <= last {
+            (first, last)
+        } else {
+            (last, first)
+        };
+        let end = b.tomorrow().unwrap_or(b);
+        Self::custom(local_day_start_in(tz, a), local_day_start_in(tz, end))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Today => "今日",
@@ -114,16 +135,26 @@ pub fn day_start_ms(days_ago: i64) -> i64 {
         .unwrap_or_default()
 }
 
-/// A calendar picker's day (encoded as UTC-midnight epoch ms) → that civil
-/// date's LOCAL start-of-day epoch ms — the range unit is "local days".
-pub fn utc_day_to_local_start(ms: i64) -> i64 {
-    let Ok(t) = jiff::Timestamp::from_millisecond(ms) else {
-        return ms;
-    };
-    let date = t.to_zoned(jiff::tz::TimeZone::UTC).date();
-    date.to_zoned(jiff::tz::TimeZone::system())
+/// Local start-of-day (epoch ms) of a civil date in the system time zone.
+pub fn local_day_start(d: jiff::civil::Date) -> i64 {
+    local_day_start_in(&jiff::tz::TimeZone::system(), d)
+}
+
+/// The civil date (system time zone) an epoch-ms instant falls on.
+pub fn local_date(ms: i64) -> jiff::civil::Date {
+    local_date_in(&jiff::tz::TimeZone::system(), ms)
+}
+
+fn local_day_start_in(tz: &jiff::tz::TimeZone, d: jiff::civil::Date) -> i64 {
+    d.to_zoned(tz.clone())
         .map(|z| z.timestamp().as_millisecond())
-        .unwrap_or(ms)
+        .unwrap_or_default()
+}
+
+fn local_date_in(tz: &jiff::tz::TimeZone, ms: i64) -> jiff::civil::Date {
+    jiff::Timestamp::from_millisecond(ms)
+        .map(|t| t.to_zoned(tz.clone()).date())
+        .unwrap_or(jiff::civil::Date::constant(1970, 1, 1))
 }
 
 /// Local start-of-day of the epoch-ms instant (day-align a picker value).
@@ -553,6 +584,53 @@ pub mod fmt {
 #[cfg(test)]
 mod tests {
     use super::fmt;
+    use super::*;
+    use jiff::civil::date;
+    use jiff::tz::TimeZone;
+
+    #[test]
+    fn custom_days_are_inclusive_ordered_and_dst_safe() {
+        let utc = TimeZone::UTC;
+        let Range::Custom { start_ms, end_ms } =
+            Range::custom_days_in(&utc, date(2026, 10, 1), date(2026, 10, 5))
+        else {
+            panic!("custom")
+        };
+        assert_eq!(end_ms - start_ms, 5 * 86_400_000);
+        assert_eq!(local_date_in(&utc, start_ms), date(2026, 10, 1));
+        assert_eq!(local_date_in(&utc, end_ms - 1), date(2026, 10, 5));
+        assert_eq!(
+            Range::custom_days_in(&utc, date(2026, 10, 5), date(2026, 10, 1)),
+            Range::custom_days_in(&utc, date(2026, 10, 1), date(2026, 10, 5)),
+        );
+        let one = Range::custom_days_in(&utc, date(2026, 10, 3), date(2026, 10, 3));
+        assert_eq!(one.end_ms().unwrap() - one.start_ms().unwrap(), 86_400_000);
+        // US spring-forward: 2026-03-08 has 23 hours.
+        let ny = TimeZone::get("America/New_York").unwrap();
+        let r = Range::custom_days_in(&ny, date(2026, 3, 8), date(2026, 3, 8));
+        assert_eq!(r.end_ms().unwrap() - r.start_ms().unwrap(), 23 * 3_600_000);
+        let r = Range::custom_days_in(&ny, date(2026, 3, 7), date(2026, 3, 9));
+        assert_eq!(
+            r.end_ms().unwrap() - r.start_ms().unwrap(),
+            (24 + 23 + 24) * 3_600_000
+        );
+        assert_eq!(local_date_in(&ny, r.end_ms().unwrap()), date(2026, 3, 10));
+    }
+
+    #[test]
+    fn local_date_round_trips_through_day_start() {
+        for name in ["UTC", "America/New_York", "Asia/Shanghai"] {
+            let tz = TimeZone::get(name).unwrap();
+            for d in [
+                date(2026, 1, 1),
+                date(2026, 3, 8),
+                date(2026, 11, 1),
+                date(2026, 12, 31),
+            ] {
+                assert_eq!(local_date_in(&tz, local_day_start_in(&tz, d)), d);
+            }
+        }
+    }
 
     #[test]
     fn tokens_exact_groups() {
