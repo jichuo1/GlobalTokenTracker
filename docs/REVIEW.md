@@ -1159,3 +1159,21 @@
 - **图例定位**：改用 `TextLayout::metrics()` 实测 `left+width` 得到 max 文本真实右缘 `max_end`，图例线起点 = `max_end+16`，右界钳制在悬停文本区（`w-220-legend_w`）之外；图例文本同样实测宽度。
 - **文案**：开关定名「折线趋势」（不随日/时桶切换，英文 "Line trend"），`trend_head` 的 `hourly` 参数随之移除；图例 → "移动平均"；提示卡行 → "7 日/小时移动平均 {} tok"；i18n 英文同步。
 - **验证**：`cargo test --workspace`（core 159 / setup 13 / ui 25 全过）、`cargo clippy --workspace --all-targets -- -D warnings`（0）、截图 `target\ma-fix7.png`（zoom `ma-fix7-zoom.png`）确认 `902,556,800  —  移动平均` 无重叠且 max 值恢复左对齐。
+
+## S86 Codex 增量扫描丢失模型 ✅
+
+- **现象**：账本里 1715 行 Codex 记录（2026-10-05/06，约 4.9 亿 token）`model` 为空，统计里显示"?"、也未计价。
+- **根因**（`adapters/codex.rs::parse_jsonl`）：`cur_model` / `cur_cwd` 每次调用都初始化为 `None`，只在**当前分段**读到 `turn_context` 行时才赋值；追加扫描（`from > 0`）的分段通常不含 `turn_context`，于是事件的 `model` / `request_model` / `project` 全为 `None`（例：`rollout-2026-10-05T22-06-38-…` 偏移 36187246 的行，其前最近一条 `turn_context` 在偏移 32155017，模型 `gpt-6.1-sol`）。
+- **修复**：`PrevLine`（持久化的 `adapter_state`）新增 `model` / `cwd`（`#[serde(default)]`，旧状态照常反序列化；因此 `PrevLine` 不再 `Copy`，仅 `Clone`）；扫描开始时由 `prev` 恢复 `cur_model` / `cur_cwd`，结束时写回，后续 `turn_context` 仍可中途切换模型。
+- **一次性修复迁移**：`Store::migrate` 新增 `mig_rescan_codex_model_v1`（与 `RESCAN_DURATIONS` 同构）——删除 `source='codex'` 的 `sync_cursors`，下次扫描从偏移 0 重读；重发行 dedup_key 不变且带模型（→ 可计价，completeness 不降），UPSERT 覆盖旧行。
+- **测试**：codex——追加扫描沿用上一段的模型/cwd（含 request_model、project，且后续 `turn_context` 仍能切换）、缺少 `model`/`cwd` 字段的旧状态可解析；迁移——只删 codex 游标、其余适配器不动、第二次为 no-op。
+- **在真实账本副本上的验证**（`sqlite3` backup 复制到 `target\e2e\codexmodel\`，CLI `--db` 指向副本；未触碰 `~/.globaltokentracker/ledger.db`）：
+
+  | 日期 | 修复前 空模型行 / 总行 | 修复后 空模型行 / 总行 |
+  |---|---|---|
+  | 2026-10-05 | 814 / 980 | 0 / 980 |
+  | 2026-10-06 | 901 / 924 | 0 / 924 |
+  | 2026-10-07 | 5 / 900 | 0 / 902 |
+
+  Codex 全部 34,730 行中空模型 1720 → 0。首次扫描 9.9s（588 个文件重读，`+1725`/`merged 33011`）；第二次扫描 0.13s、`events +0`、前后查询输出完全一致（幂等）。证据文件：`target\e2e\codexmodel\{before,after,after2,scan1,scan2}.txt`。
+- **验证**：`cargo test -p globaltokentracker-core`（162 通过）、`cargo clippy --workspace --all-targets -- -D warnings` 0；本次触及的代码 rustfmt 干净。
