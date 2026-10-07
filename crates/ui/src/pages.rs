@@ -405,27 +405,53 @@ fn custom_range_row(
     } else {
         t!("点击起始日，再点击结束日")
     };
-    let info = vstack(
-        6.0,
-        vec![
+    // One-tap ranges the top preset bar doesn't offer.
+    let quick: Vec<View> = ["昨天", "本周", "本月", "上月", "近 90 天"]
+        .iter()
+        .map(|k| {
+            Button::new()
+                .on_click(ctx.callback(move |_| Msg::CalQuick(k)))
+                .content(TextBlock::new().text(tr(k)).font_size(theme.label_size))
+        })
+        .collect();
+    let info = StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(8.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .children((
             TextBlock::new()
                 .text(tf!("{} → {} · 共 {} 天", first, last, days))
                 .font_size(theme.body_size)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .into(),
+                .font_weight(FontWeight::SEMI_BOLD),
             TextBlock::new()
                 .text(hint)
                 .font_size(theme.label_size)
+                .foreground(theme.subtle),
+            TextBlock::new()
+                .text(t!("快捷选择"))
+                .font_size(theme.label_size)
                 .foreground(theme.subtle)
-                .into(),
-        ],
-    );
+                .margin(Thickness::new(0.0, 8.0, 0.0, 0.0)),
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .keyed_children(keyed(quick)),
+        ));
+    // Calendar pinned left, info column vertically centred in the remaining
+    // width — the card reads balanced instead of half empty.
     w::card(
         theme,
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(32.0)
-            .children([calendar, info]),
+        Grid::new()
+            .columns([GridLength::Auto, GridLength::STAR])
+            .children([
+                cell(0, calendar),
+                cell(
+                    1,
+                    StackPanel::new()
+                        .horizontal_alignment(HorizontalAlignment::Center)
+                        .children([info]),
+                ),
+            ]),
     )
 }
 

@@ -278,6 +278,8 @@ pub enum Msg {
     CalPick(i16, i8, i8),
     /// Inline calendar: show the previous (-1) or next (+1) month.
     CalMonth(i8),
+    /// Inline calendar quick chip ("昨天"|"本周"|"本月"|"上月"|"近 90 天").
+    CalQuick(&'static str),
     /// Tool checkbox toggled (app name, new checked state).
     ToggleApp(String, bool),
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
@@ -977,6 +979,30 @@ impl Component for Shell {
                 {
                     self.cal_month = (next.year(), next.month());
                 }
+            }
+            Msg::CalQuick(key) => {
+                let today = jiff::Zoned::now().date();
+                let days = |n: i64| today.saturating_sub(jiff::Span::new().days(n));
+                let (first, last) = match key {
+                    "昨天" => (days(1), days(1)),
+                    // Monday-first, matching the calendar grid.
+                    "本周" => (
+                        days(i64::from(today.weekday().to_monday_zero_offset())),
+                        today,
+                    ),
+                    "本月" => (today.first_of_month(), today),
+                    "上月" => {
+                        let f = today
+                            .first_of_month()
+                            .saturating_sub(jiff::Span::new().days(1));
+                        (f.first_of_month(), f)
+                    }
+                    _ => (days(89), today),
+                };
+                let r = Range::custom_days(first, last);
+                self.cal_month = cal_month_of(r);
+                self.cal_anchor = None;
+                self.set_range(r, context);
             }
             Msg::ToggleApp(app, on) => {
                 let all: Vec<String> = self

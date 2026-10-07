@@ -1191,3 +1191,9 @@
 - **踩坑两则**：① 真 `Button` 单元格内边距把 36px 格中两位数日期裁掉一半（"10"→"1"），`ButtonPadding` 资源键无效，弃用 Button 改 `Border`；② `Border` **无背景不参与命中测试**——必须显式 `Brush::Solid(argb(0,0,0,0))` 才能收 pointer 事件。
 - **测试**：`custom_days` 含闭区间语义、反序交换、单日、NY 夏令时（23h/71h 窗）正确；`local_date∘local_day_start` 三时区往返。
 - **验证**：core 164 / ui 25 测试过，`clippy -D warnings` 0，触及代码 fmt 干净。release 截图：`target\cal-fix2.png`（全月渲染、8 号今日描边、无裁切）、`target\cal-now.png`；用户实测点击 1 号 → `ui.json` 持久化 `10-01..10-02`（锚点→单日区间行为符合设计）；区间统计与 SQL 直查核对一致（10-01：`463` 事件 / `225,923,494` tok）。
+
+## S89 自定义日历卡片空间排布 + 快捷区间 ✅
+
+- **问题**：月历卡片右侧大半空白，信息列挤在月历旁未利用宽度。
+- **改动**：布局改 `[Auto][STAR]` 网格——月历钉左，信息列在剩余宽度内水平居中且垂直居中；信息列下增「快捷选择」按钮排（昨天 / 本周（周一起）/ 本月 / 上月 / 近 90 天，均为顶部预设没有的区间），`Msg::CalQuick` 走 `Range::custom_days` + `cal_month` 跟随。
+- **验证**：UIA InvokePattern 点「上月」→ `ui.json` 持久化 `2026-09-01..2026-10-01`（整月、exclusive end 正确）；截图 `target\cal-layout2.png`；clippy 0、fmt 干净、ui 25 测试过。
