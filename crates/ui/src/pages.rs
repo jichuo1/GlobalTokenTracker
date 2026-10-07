@@ -396,12 +396,7 @@ fn hidden_chip(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContex
 }
 
 /// Trend card header: title on the left, moving-average switch on the right.
-fn trend_head(
-    theme: &Theme,
-    title: &str,
-    on: bool,
-    ctx: &mut ViewContext<Shell>,
-) -> View {
+fn trend_head(theme: &Theme, title: &str, on: bool, ctx: &mut ViewContext<Shell>) -> View {
     let switch = StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(8.0)
@@ -2159,12 +2154,20 @@ pub struct PriceSearch<'a> {
     pub shown: &'a std::sync::Arc<Vec<PriceRow>>,
 }
 
+/// State of the manual "刷新价目" action: a refresh in flight, and why the last
+/// one produced nothing.
+pub struct PriceRefresh<'a> {
+    pub active: bool,
+    pub error: Option<&'a str>,
+}
+
 pub fn prices_page(
     table: Option<&PriceTable>,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
     args: &TableArgs,
     search: &PriceSearch,
+    refresh: &PriceRefresh,
 ) -> Vec<View> {
     let Some(table) = table else {
         return vec![loading(theme, true)];
@@ -2200,11 +2203,40 @@ pub fn prices_page(
         ),
         None => t!("仅本地种子，尚未联网同步").to_string(),
     };
-    let summary = if filtering {
+    let mut summary = if filtering {
         tf!("匹配 {} / {} 个模型 · {}", shown, total, sync)
     } else {
         tf!("{} 个模型 · {}", total, sync)
     };
+    if let Some(e) = refresh.error {
+        summary = format!("{summary} · {}", tf!("上次刷新失败：{}", e));
+    }
+    let mut actions: Vec<View> = Vec::new();
+    if refresh.active {
+        actions.push(
+            ProgressRing::new()
+                .is_indeterminate(true)
+                .is_active(true)
+                .width(18.0)
+                .height(18.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        );
+        actions.push(
+            TextBlock::new()
+                .text(t!("同步中…"))
+                .font_size(theme.body_size)
+                .foreground(theme.subtle)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        );
+    }
+    actions.push(
+        Button::new()
+            .is_enabled(!refresh.active)
+            .on_click(ctx.callback(|_| Msg::RefreshPrices))
+            .content(t!("刷新价目")),
+    );
     let controls: View = vstack(
         8.0,
         vec![
@@ -2235,7 +2267,7 @@ pub fn prices_page(
         vec![ruler, price_head(theme, args.width), list]
     };
     vec![
-        header(theme, t!("价目表（$/1M tokens）"), vec![]),
+        header(theme, t!("价目表（$/1M tokens）"), actions),
         controls,
         // Card chrome around the table — same as the detail page.
         w::card(theme, vstack(0.0, body)),

@@ -171,6 +171,8 @@ pub struct Shell {
     /// A background price fetch is in flight — prevents overlapping pulls
     /// when consecutive scans all report `price_due`.
     prices_refreshing: bool,
+    /// Why the last price refresh produced nothing (shown on the Prices page).
+    price_refresh_error: Option<String>,
     /// Visible aggregates must rebuild even if the next scan lands nothing —
     /// set by filter/range/page changes, quota polls and repricing.
     views_stale: bool,
@@ -257,6 +259,8 @@ pub enum Msg {
     HeatLeave,
     /// Heatmap metric picked — tokens|cost|calls|duration.
     SetHeatMetric(&'static str),
+    /// Prices page "刷新价目" — pull every price feed now.
+    RefreshPrices,
     /// Trend card: moving-average overlay toggle.
     SetTrendLine(bool),
     /// Share-donut pointer hover: (column index, hovered slice or None).
@@ -566,6 +570,16 @@ fn load_page(page: Page) -> Result<PageData, String> {
     }
 }
 
+/// First line of an error, capped — fits the Prices page summary row.
+fn short_error(e: &str) -> String {
+    let line = e.lines().next().unwrap_or(e);
+    let mut out: String = line.chars().take(120).collect();
+    if line.chars().count() > 120 {
+        out.push('…');
+    }
+    out
+}
+
 /// Arms one periodic-refresh timer. `secs == 0` (仅文件变更) skips arming —
 /// the file watcher still live-refreshes on source changes.
 fn arm_refresh(context: &ComponentContext<Shell>, secs: u64) {
@@ -735,6 +749,7 @@ impl Component for Shell {
             open_menu: None,
             quota_collapsed: std::collections::BTreeSet::new(),
             prices_refreshing: false,
+            price_refresh_error: None,
             views_stale: true,
             cube_rebuild: false,
             filter_gen: 0,
@@ -864,16 +879,8 @@ impl Component for Shell {
                 self.poll_quota_if_stale(context);
                 // Detached price-source fetch: triggered here (post-load) so
                 // network latency never delays the snapshot we just painted.
-                if price_due && !self.prices_refreshing {
-                    self.prices_refreshing = true;
-                    context.spawn_background(|_| {
-                        power::worker("gtt-prices");
-                        Msg::PricesDone(
-                            Store::open(&db_path())
-                                .and_then(|s| globaltokentracker_core::pricing::refresh(&s))
-                                .map_err(|e| e.to_string()),
-                        )
-                    });
+                if price_due {
+                    self.spawn_price_refresh(context);
                 }
                 if startup_snapshot {
                     // The first frame is out; now catch up with whatever the
@@ -1461,6 +1468,7 @@ impl Component for Shell {
                 self.config.save();
                 self.trend.inv.invalidate();
             }
+            Msg::RefreshPrices => self.spawn_price_refresh(context),
             Msg::SetHeatMetric(key) => {
                 self.config.heat_metric = key.to_string();
                 self.config.save();
@@ -1490,6 +1498,9 @@ impl Component for Shell {
                 self.prices_refreshing = false;
                 match res {
                     Ok(r) => {
+                        if r.sources.is_empty() && !r.failed.is_empty() {
+                            self.price_refresh_error = Some(short_error(&r.failed[0]));
+                        }
                         diag!(
                             "[prices] synced: {} repriced={} rules_repass={}",
                             r.summary(),
@@ -1510,7 +1521,10 @@ impl Component for Shell {
                             self.start_scan(context);
                         }
                     }
-                    Err(e) => diag!("[prices] refresh failed: {e}"),
+                    Err(e) => {
+                        diag!("[prices] refresh failed: {e}");
+                        self.price_refresh_error = Some(short_error(&e));
+                    }
                 }
             }
         }
@@ -1764,6 +1778,23 @@ impl Component for Shell {
 }
 
 impl Shell {
+    /// Run a full price refresh off the UI thread; no-op while one is in flight.
+    fn spawn_price_refresh(&mut self, context: &ComponentContext<Self>) {
+        if self.prices_refreshing {
+            return;
+        }
+        self.prices_refreshing = true;
+        self.price_refresh_error = None;
+        context.spawn_background(|_| {
+            power::worker("gtt-prices");
+            Msg::PricesDone(
+                Store::open(&db_path())
+                    .and_then(|s| globaltokentracker_core::pricing::refresh(&s))
+                    .map_err(|e| e.to_string()),
+            )
+        });
+    }
+
     /// Theme tokens for the current config and window theme.
     fn resolve_theme(&self) -> Theme {
         Theme::resolve(
@@ -1830,6 +1861,10 @@ impl Shell {
                     query: &self.price_query,
                     disputed: self.price_disputed,
                     shown: &self.price_shown,
+                },
+                &PriceRefresh {
+                    active: self.prices_refreshing,
+                    error: self.price_refresh_error.as_deref(),
                 },
             ),
             Page::Settings => settings_page(&self.config, &self.update, self.update_error.as_deref(), theme, context),

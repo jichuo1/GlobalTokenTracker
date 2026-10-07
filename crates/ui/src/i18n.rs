@@ -264,6 +264,10 @@ pub fn tr(zh: &str) -> &str {
         "界面语言与启动行为" => "Interface language and startup behavior",
         // ---- activity heatmap
         "活跃热力图" => "Activity heatmap",
+        // ---- prices refresh
+        "刷新价目" => "Refresh prices",
+        "同步中…" => "Syncing…",
+        "上次刷新失败：{}" => "Last refresh failed: {}",
         // ---- trend moving average
         "折线趋势" => "Line trend",
         "移动平均" => "moving avg",

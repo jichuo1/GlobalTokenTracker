@@ -1177,3 +1177,8 @@
 
   Codex 全部 34,730 行中空模型 1720 → 0。首次扫描 9.9s（588 个文件重读，`+1725`/`merged 33011`）；第二次扫描 0.13s、`events +0`、前后查询输出完全一致（幂等）。证据文件：`target\e2e\codexmodel\{before,after,after2,scan1,scan2}.txt`。
 - **验证**：`cargo test -p globaltokentracker-core`（162 通过）、`cargo clippy --workspace --all-targets -- -D warnings` 0；本次触及的代码 rustfmt 干净。
+
+## S87 价格页手动刷新 ✅
+
+- **范围**：抽出 `Shell::spawn_price_refresh`（刷新进行中直接返回；开始时清 `price_refresh_error`），自动路径（`price_due`）与新消息 `Msg::RefreshPrices` 共用。`pricing::refresh` 本身不看 TTL（TTL 只在 `load_all` 决定 `price_due`），手动路径天然强制。`PricesDone`：`Err` 或"`Ok` 但 `sources` 为空且 `failed` 非空"时记 `price_refresh_error`（取首行、截断 120 字符）。`prices_page` 新增独立参数 `PriceRefresh { active, error }`（不改 `PriceSearch` 语义），用 `header` 的 actions 槽放"刷新价目"按钮；刷新中禁用按钮并显示小号 `ProgressRing` + "同步中…"；有错误时在摘要行追加"上次刷新失败：…"。英文条目已补（Refresh prices / Syncing… / Last refresh failed: {}）。
+- **验证**：`cargo test -p globaltokentracker-ui`（25 通过）、`cargo clippy --workspace --all-targets -- -D warnings` 0；本次触及的代码 rustfmt 干净（`ui/src/main.rs` 余下 4 处为既有差异）。release UI 截图（`GTT_DATA_DIR` 指向账本副本）：`target\prices-refresh-idle.png`（空闲）、`target\prices-refresh-syncing.png`（点击后：旋转圈 + "同步中…" + 按钮置灰）。
