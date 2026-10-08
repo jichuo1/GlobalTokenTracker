@@ -95,7 +95,10 @@ fn ensure_runtime(log: &dyn Fn(String)) -> Result<()> {
     let mut f = fs::File::create(&tmp)?;
     std::io::copy(&mut resp.body_mut().as_reader(), &mut f)?;
     log("安装运行时（可能触发 UAC）…".into());
-    Command::new(&tmp).arg("--quiet").status().context("run runtime installer")?;
+    Command::new(&tmp)
+        .arg("--quiet")
+        .status()
+        .context("run runtime installer")?;
     if !winapp_runtime_present() {
         bail!("Windows App Runtime 安装未完成 —— GUI 将无法启动");
     }
@@ -220,8 +223,14 @@ fn register_uninstall(dest: &Path, size: u64) -> Result<()> {
     key.set_value("DisplayVersion", &VER)?;
     key.set_value("Publisher", &APP)?;
     key.set_value("InstallLocation", &dest.display().to_string())?;
-    key.set_value("DisplayIcon", &dest.join("globaltokentracker-ui.exe").display().to_string())?;
-    key.set_value("EstimatedSize", &u32::try_from(size / 1024).unwrap_or(u32::MAX))?;
+    key.set_value(
+        "DisplayIcon",
+        &dest.join("globaltokentracker-ui.exe").display().to_string(),
+    )?;
+    key.set_value(
+        "EstimatedSize",
+        &u32::try_from(size / 1024).unwrap_or(u32::MAX),
+    )?;
     key.set_value("NoModify", &1u32)?;
     key.set_value("NoRepair", &1u32)?;
     // Always pin the resolved dir — a custom --dir install must not
@@ -645,9 +654,11 @@ pub fn cleanup_prior_install(old: &Path, new: &Path, log: &dyn Fn(String)) {
         .ok()
         .zip(new.canonicalize().ok())
         .is_some_and(|(a, b)| a == b)
-        || old.display().to_string().trim_end_matches('\\').eq_ignore_ascii_case(
-            new.display().to_string().trim_end_matches('\\'),
-        );
+        || old
+            .display()
+            .to_string()
+            .trim_end_matches('\\')
+            .eq_ignore_ascii_case(new.display().to_string().trim_end_matches('\\'));
     if same || new.starts_with(old) || !old.join("globaltokentracker-ui.exe").exists() {
         return;
     }
@@ -685,8 +696,8 @@ pub fn schedule_dir_delete(dest: &Path) -> Result<()> {
 fn attach_console() {
     use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
     use windows::Win32::System::Console::{
         ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
@@ -737,6 +748,7 @@ fn usage() {
     println!("  globaltokentracker-setup --quiet --launch    静默安装后启动程序");
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let mut uninstall_flag = false;
     let mut quiet = false;
@@ -779,7 +791,11 @@ fn main() -> Result<()> {
         usage();
         std::process::exit(2);
     }
-    let prior = if uninstall_flag { None } else { installed_info() };
+    let prior = if uninstall_flag {
+        None
+    } else {
+        installed_info()
+    };
     let dest = match dir.as_deref() {
         Some(d) => PathBuf::from(d),
         // The uninstaller copy lives at <dest>\globaltokentracker-setup.exe —
@@ -797,7 +813,11 @@ fn main() -> Result<()> {
 
     if gui_mode {
         return gui::run(
-            if uninstall_flag { gui::Mode::Uninstall } else { gui::Mode::Install },
+            if uninstall_flag {
+                gui::Mode::Uninstall
+            } else {
+                gui::Mode::Install
+            },
             &dest,
             prior.as_ref().map(|(v, _)| v.as_str()),
             prior.as_ref().map(|(_, d)| d.clone()),
@@ -813,7 +833,9 @@ fn main() -> Result<()> {
         println!("已移除程序、快捷方式与卸载项；用户数据保留在 %USERPROFILE%\\.globaltokentracker");
     } else {
         match &prior {
-            Some((v, _)) if v == VER => println!("{APP} {VER} 已安装 —— 重装修复 {}", dest.display()),
+            Some((v, _)) if v == VER => {
+                println!("{APP} {VER} 已安装 —— 重装修复 {}", dest.display());
+            }
             Some((v, _)) => println!("{APP} v{v} → v{VER} —— 更新 {}", dest.display()),
             None => println!("{APP} {VER} 安装程序 —— 安装到 {}", dest.display()),
         }

@@ -1348,4 +1348,41 @@
   - `target/e2e/cal3/clock_dial_animated.png`：1500 DIP 真实渲染完整视图，自选单日（10-08）并点选 09:00～19:00（10 小时），时钟拨选器与趋势图、日历完美呼应；
   - `target/e2e/cal3/clock_dial_detail.png`：表盘特写截屏，起点 9 点同心锚点清晰可辨，终点 18 点（19:00 对应槽位）定向三角形箭头与靶环极具辨识度，中间 10～17 点弧形连接轨道顺畅平滑，中心 Hub 明确回显 10 小时与具体时间段。
 
+## S97 反重力 Gemini 3.8 Flash 计价与 Qoder 点数消费适配器重构 ✅
+
+- **背景与痛点**：
+  1. **反重力（Gemini Antigravity）全为未计价（$0.00 / unpriced）**：
+     - Antigravity 2.0 / Gemini CLI 在会话元数据（`gen_metadata`）中记录的模型标识为 `gemini-3.8-flash-n`（带有 `-n` 变体后缀，内部代号 `MODEL_PLACEHOLDER_M318`）；
+     - 价格源（Models.dev、OpenRouter、Vercel、Portkey、Seed 等）均收录标准模型 `gemini-3.8-flash`（输入 $0.75 / 输出 $3.75 / 缓存读 $0.075 每百万 tokens）；
+     - 原先 `canonical_model` 与 `candidates_with` 未能剥离单字母变体后缀 `-n`，导致 Antigravity 的所有 1200+ 条会话事件无法匹配价格，全部落入 `CostSource::Unpriced`，总费用估算显示为 $0.00；
+  2. **Qoder 统计不准确且记录虚假 0 token / 0 credit 数据**：
+     - 原先 Qoder 适配器误以为 Qoder CLI 会话不落盘，仅扫描了 `.qoder/logs/sessions/`，将内部进程启动的 `session.config.loaded` 生命周期日志作为事件，产生了 130 余条 token 和 credit 均为 0 的空事件，完全未能统计实际消费；
+     - 实际上 Qoder 会话完整保存在 `~/.qoder/projects/<project>/<session>.jsonl` 及子代理 `.../subagents/*.jsonl` 中，每次 assistant 生成均携带完整的 `message.usage.credits`（点数制计费），包含真实模型、工作区 `cwd`、`sessionId` 及 `request_id`。
+- **改动范围**：
+  1. **反重力适配器与多源价格规范化扩展**（`crates/core/src/adapters/antigravity.rs`）：
+     - `canonical_model` 补充 `gemini-3.8-flash` 族（含 `-n`, `-high`, `-medium`, `-low`, `MODEL_PLACEHOLDER_M318`）、`gemini-3.7-flash` 族、`gemini-3.6-flash` 族、`gemini-3.1-flash-lite` 及 `gemini-2.5` 族映射；
+     - `label_model` 补充 `Gemini 3.8 Flash (Low/Medium/High)` 等本地化标签反查；
+     - 单元测试 `every_alias_target_is_priced_by_the_seed_book` 覆盖新增模型。
+  2. **通用定价引擎剥离单字母变体规则**（`crates/core/src/pricing/mod.rs`）：
+     - `candidates_with` 增加 `-<letter>` 候选剥离规则（当后缀为 1 位小写字母如 `-n`, `-a` 时自动 peel 基础模型）；
+     - `crates/core/assets/pricing_rules.json` 在 `aliases` 显式追加 `"gemini-3.8-flash-n": "gemini-3.8-flash"`。
+  3. **Qoder 适配器全面重构**（`crates/core/src/adapters/qoder.rs`）：
+     - 适配器能力升级为 `Capability::Precise`；
+     - `watch_roots` 和 `discover` 扫描 `~/.qoder/projects`（深度 5，覆盖主会话与 subagents 目录）；
+     - `parse_jsonl` 解析真实交互：提取 `message.usage.credits`（或 `original_credits`）、`request_id`、`model`、`cwd`、`sessionId`，并由 user 消息时间戳推导 `duration_ms`；
+     - 严格过滤非计费（`billable: false`）与零点数记录；
+     - 单元测试覆盖 project 会话、subagents 会话继承父 session、非计费行跳过与截断行容错。
+  4. **版本迁移与历史数据净化**（`crates/core/src/store/mod.rs`）：
+     - 新增 `mig_rescan_antigravity_qoder_v1` 迁移：清除 `gemini_antigravity` 与 `qoder` 的同步游标，并清除旧版遗留的未计价与零值伪数据，触发全量增量重扫与价格重新核算；
+     - 单元测试 `antigravity_qoder_rescan_drops_cursors_and_purges_old_qoder_events` 验证游标与数据重置行为。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 209 个测试 100% 通过（Core 168 + Setup 13 + UI 28）；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `cargo fmt --check`：全工作区格式完全合规。
+- **实测证据（本机真实数据）**：
+  - `globaltokentracker-cli scan` & `report all` 真实输出：
+    - `gemini_antigravity`：1244 条事件，输入 8.80M tokens，输出 566K tokens，缓存读 158.74M tokens，精准估算计费 **$20.63**（原先为 $0.00 unpriced）；
+    - `qoder`：112 条计费交互，精准统计 **875.7 credits** 点数（涵盖 `smodel` 与 `ultimate` 模型），彻底清除旧版 130 余条 0 值死数据。
+
+
 

@@ -24,7 +24,11 @@ pub enum Channel {
 impl Channel {
     #[must_use]
     pub fn from_key(key: &str) -> Self {
-        if key == "alpha" { Self::Alpha } else { Self::Stable }
+        if key == "alpha" {
+            Self::Alpha
+        } else {
+            Self::Stable
+        }
     }
 
     #[must_use]
@@ -63,7 +67,12 @@ impl Version {
             None => None,
             Some(p) => Some(parse_num(p.strip_prefix("alpha.")?)?),
         };
-        Some(Self { major, minor, patch, alpha })
+        Some(Self {
+            major,
+            minor,
+            patch,
+            alpha,
+        })
     }
 }
 
@@ -108,14 +117,22 @@ pub fn current_from(tag: Option<&str>, pkg: &str) -> Version {
     tag.filter(|t| !t.is_empty())
         .and_then(Version::parse)
         .or_else(|| Version::parse(pkg))
-        .unwrap_or(Version { major: 0, minor: 0, patch: 0, alpha: None })
+        .unwrap_or(Version {
+            major: 0,
+            minor: 0,
+            patch: 0,
+            alpha: None,
+        })
 }
 
 #[must_use]
 /// Debug hooks: `GTT_UPDATE_AS=<tag>` overrides the running version;
 /// `GTT_UPDATE_FAIL_DOWNLOAD=1` makes `download` fail before any network access.
 pub fn current_version() -> Version {
-    if let Some(v) = std::env::var("GTT_UPDATE_AS").ok().and_then(|s| Version::parse(&s)) {
+    if let Some(v) = std::env::var("GTT_UPDATE_AS")
+        .ok()
+        .and_then(|s| Version::parse(&s))
+    {
         return v;
     }
     current_from(option_env!("GTT_RELEASE_TAG"), env!("CARGO_PKG_VERSION"))
@@ -223,10 +240,12 @@ fn parse_sums(text: &str, name: &str) -> Option<String> {
 
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Download the installer into `%TEMP%\GlobalTokenTracker-update`, verified
@@ -302,18 +321,40 @@ mod tests {
 
     #[test]
     fn parse_accepts_and_rejects() {
-        assert_eq!(v("v0.3.0"), Version { major: 0, minor: 3, patch: 0, alpha: None });
+        assert_eq!(
+            v("v0.3.0"),
+            Version {
+                major: 0,
+                minor: 3,
+                patch: 0,
+                alpha: None
+            }
+        );
         assert_eq!(v("0.3.0"), v("v0.3.0"));
         assert_eq!(v("v0.3.0-alpha.2").alpha, Some(2));
-        for bad in ["v0.3", "v0.3.0-beta.1", "v0.3.0-alpha", "", "v", "v0.3.0.1", "v0.3.x", "vv0.3.0"]
-        {
+        for bad in [
+            "v0.3",
+            "v0.3.0-beta.1",
+            "v0.3.0-alpha",
+            "",
+            "v",
+            "v0.3.0.1",
+            "v0.3.x",
+            "vv0.3.0",
+        ] {
             assert!(Version::parse(bad).is_none(), "{bad}");
         }
     }
 
     #[test]
     fn ordering_and_display() {
-        let order = ["0.3.0-alpha.1", "0.3.0-alpha.2", "0.3.0", "0.3.1-alpha.1", "0.3.1"];
+        let order = [
+            "0.3.0-alpha.1",
+            "0.3.0-alpha.2",
+            "0.3.0",
+            "0.3.1-alpha.1",
+            "0.3.1",
+        ];
         for w in order.windows(2) {
             assert!(v(w[0]) < v(w[1]), "{} < {}", w[0], w[1]);
         }
@@ -366,7 +407,9 @@ mod tests {
             rel_json("v0.3.5", false, true, true, true),
             rel_json("v0.3.1", false, false, true, true),
         ]);
-        let r = select_update(&j, Channel::Stable, v("0.3.0")).unwrap().unwrap();
+        let r = select_update(&j, Channel::Stable, v("0.3.0"))
+            .unwrap()
+            .unwrap();
         assert_eq!(r.tag, "v0.3.1");
         assert_eq!(r.asset_url, "https://x/v0.3.1/exe");
         assert_eq!(r.sums_url, "https://x/v0.3.1/sums");
@@ -381,13 +424,22 @@ mod tests {
             rel_json("v0.3.1", false, false, true, true),
             rel_json("v0.3.1-alpha.1", false, true, true, true),
         ]);
-        assert_eq!(select_update(&j, Channel::Alpha, v("0.3.0")).unwrap().unwrap().tag, "v0.3.1");
+        assert_eq!(
+            select_update(&j, Channel::Alpha, v("0.3.0"))
+                .unwrap()
+                .unwrap()
+                .tag,
+            "v0.3.1"
+        );
         let j = fixture(&[
             rel_json("v0.3.1-alpha.2", false, true, true, true),
             rel_json("v0.3.0", false, false, true, true),
         ]);
         assert_eq!(
-            select_update(&j, Channel::Alpha, v("0.3.0")).unwrap().unwrap().tag,
+            select_update(&j, Channel::Alpha, v("0.3.0"))
+                .unwrap()
+                .unwrap()
+                .tag,
             "v0.3.1-alpha.2"
         );
     }
@@ -401,17 +453,39 @@ mod tests {
             rel_json("nightly", false, false, true, true),
             rel_json("v0.3.1", false, false, true, true),
         ]);
-        assert_eq!(select_update(&j, Channel::Stable, v("0.3.0")).unwrap().unwrap().tag, "v0.3.1");
+        assert_eq!(
+            select_update(&j, Channel::Stable, v("0.3.0"))
+                .unwrap()
+                .unwrap()
+                .tag,
+            "v0.3.1"
+        );
     }
 
     #[test]
     fn select_never_downgrades() {
         let j = fixture(&[rel_json("v0.3.0", false, false, true, true)]);
-        assert!(select_update(&j, Channel::Stable, v("0.3.0")).unwrap().is_none());
-        assert!(select_update(&j, Channel::Stable, v("0.3.0-alpha.5")).unwrap().is_some());
+        assert!(
+            select_update(&j, Channel::Stable, v("0.3.0"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            select_update(&j, Channel::Stable, v("0.3.0-alpha.5"))
+                .unwrap()
+                .is_some()
+        );
         let j = fixture(&[rel_json("v0.2.0", false, false, true, true)]);
-        assert!(select_update(&j, Channel::Stable, v("0.3.1-alpha.1")).unwrap().is_none());
-        assert!(select_update("[]", Channel::Alpha, v("0.3.0")).unwrap().is_none());
+        assert!(
+            select_update(&j, Channel::Stable, v("0.3.1-alpha.1"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            select_update("[]", Channel::Alpha, v("0.3.0"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

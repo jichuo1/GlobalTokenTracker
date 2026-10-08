@@ -7,7 +7,11 @@ use globaltokentracker_core::{Engine, Store, store::default_db_path};
 use tabled::{Table, Tabled};
 
 #[derive(Parser)]
-#[command(name = "globaltokentracker", version, about = "Unified AI-coding usage ledger")]
+#[command(
+    name = "globaltokentracker",
+    version,
+    about = "Unified AI-coding usage ledger"
+)]
 struct Cli {
     /// Ledger DB path (default ~/.globaltokentracker/ledger.db).
     #[arg(long, global = true)]
@@ -128,7 +132,10 @@ fn main() -> Result<()> {
             match last {
                 Some(t) => {
                     let age_h = (globaltokentracker_core::store::now_ms() - t) / 3_600_000;
-                    println!("live price book: synced {age_h}h ago (stale>{})", pricing::PRICE_TTL_SECS / 3600);
+                    println!(
+                        "live price book: synced {age_h}h ago (stale>{})",
+                        pricing::PRICE_TTL_SECS / 3600
+                    );
                 }
                 None => println!("live price book: never synced (seed fallback active)"),
             }
@@ -158,7 +165,12 @@ fn main() -> Result<()> {
                             engine.store.insert_quota(q)?;
                             println!(
                                 "{} {:<16} used={:?} limit={:?} pct={:?} reset={:?}",
-                                o.app, q.window_kind, q.used, q.limit_value, q.used_percent, q.resets_at
+                                o.app,
+                                q.window_kind,
+                                q.used,
+                                q.limit_value,
+                                q.used_percent,
+                                q.resets_at
                             );
                         }
                     }
@@ -334,7 +346,8 @@ fn report(engine: &Engine, span: &str) -> Result<()> {
 }
 
 fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
-    let path = ccs.unwrap_or_else(|| globaltokentracker_core::sync::home(".cc-switch/cc-switch.db"));
+    let path =
+        ccs.unwrap_or_else(|| globaltokentracker_core::sync::home(".cc-switch/cc-switch.db"));
     let conn = rusqlite::Connection::open_with_flags(
         format!("file:{}?mode=ro", path.to_string_lossy().replace('\\', "/")),
         rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -391,13 +404,10 @@ fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
             }
         }
         // state_5 threads keyed by rollout_path — join to compare like-for-like.
-        let mut st = conn2.prepare(
-            "SELECT rollout_path, tokens_used FROM threads WHERE tokens_used > 0",
-        )?;
+        let mut st =
+            conn2.prepare("SELECT rollout_path, tokens_used FROM threads WHERE tokens_used > 0")?;
         let theirs: Vec<(String, i64)> = st
-            .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
             .collect::<std::result::Result<_, _>>()?;
         let mut j_ours = 0i64;
         let mut j_theirs = 0i64;
@@ -413,7 +423,10 @@ fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
             "\ncodex watermark: joined {} threads — ours={} state_5={}",
             joined, j_ours, j_theirs
         );
-        println!("Δ = {:.2}%  (gate <0.5%)", pct(j_ours as f64, j_theirs as f64));
+        println!(
+            "Δ = {:.2}%  (gate <0.5%)",
+            pct(j_ours as f64, j_theirs as f64)
+        );
         println!(
             "coverage: {} files with state vs {} threads>0 (stale files outside join: {})",
             ours.len(),
