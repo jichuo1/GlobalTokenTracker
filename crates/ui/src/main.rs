@@ -350,7 +350,9 @@ pub enum Msg {
     /// follow-up scan so newly-priced events show their USD.
     PricesDone(Result<globaltokentracker_core::pricing::RefreshReport, String>),
     /// Settings "立即检查" (manual) or the scheduled check (auto).
-    CheckUpdate { manual: bool },
+    CheckUpdate {
+        manual: bool,
+    },
     /// Auto-check timer of chain `gen` fired.
     UpdateTimer(u64),
     UpdateChecked {
@@ -360,7 +362,10 @@ pub enum Msg {
     },
     /// "立即更新": download + verify the installer, then run it.
     StartUpdate,
-    UpdateDownloaded(globaltokentracker_core::update::Release, Result<PathBuf, String>),
+    UpdateDownloaded(
+        globaltokentracker_core::update::Release,
+        Result<PathBuf, String>,
+    ),
     /// Settings: update channel — "stable" | "alpha".
     SetUpdateChannel(&'static str),
     SetUpdateAuto(bool),
@@ -1757,7 +1762,13 @@ impl Component for Shell {
         {
             chrome_rows.push(KeyedView::new(
                 "update",
-                update_banner(theme, &self.update, rel, self.update_error.as_deref(), context),
+                update_banner(
+                    theme,
+                    &self.update,
+                    rel,
+                    self.update_error.as_deref(),
+                    context,
+                ),
             ));
         }
         chrome_rows.push(KeyedView::new("filters", chrome));
@@ -1837,6 +1848,11 @@ impl Component for Shell {
                 "pagehost",
                 Border::new()
                     .grid_row(2)
+                    .background(
+                        theme
+                            .page_bg
+                            .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground)),
+                    )
                     .border_brush(theme.divider)
                     .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
                     .content(content),
@@ -1956,7 +1972,13 @@ impl Shell {
                     error: self.price_refresh_error.as_deref(),
                 },
             ),
-            Page::Settings => settings_page(&self.config, &self.update, self.update_error.as_deref(), theme, context),
+            Page::Settings => settings_page(
+                &self.config,
+                &self.update,
+                self.update_error.as_deref(),
+                theme,
+                context,
+            ),
         }
     }
 

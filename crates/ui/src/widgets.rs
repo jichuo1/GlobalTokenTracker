@@ -69,41 +69,58 @@ pub fn slide_children(children: Vec<View>, slide: &Slide) -> Vec<View> {
 /// Card chrome: border + background + optional accent edge. All skin values
 /// come from `theme` — a skin swap restyles every card at once.
 pub fn card(theme: &Theme, content: View) -> View {
+    let base = theme
+        .page_bg
+        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
+    let bg_base: View = Border::new()
+        .background(base)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
+    let bg_layer: View = Border::new()
+        .background(theme.card_bg)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
     if theme.accent_edge {
-        Border::new()
-            .background(theme.card_bg)
-            .border_brush(theme.card_border)
-            .border_thickness(Thickness::uniform(1.0))
-            .corner_radius(CornerRadius::uniform(theme.radius))
-            .content(
-                Grid::new()
-                    .columns([GridLength::Auto, GridLength::STAR])
-                    .children([
-                        Border::new()
-                            .grid_column(0)
-                            .width(3.0)
-                            .background(theme.accent)
-                            .corner_radius(CornerRadius::new(
-                                (theme.radius - 1.0).max(0.0),
-                                0.0,
-                                (theme.radius - 1.0).max(0.0),
-                                0.0,
-                            ))
-                            .into(),
-                        Border::new()
-                            .grid_column(1)
-                            .padding(Thickness::uniform(theme.pad))
-                            .content(content),
-                    ]),
-            )
+        Grid::new().children([
+            bg_base,
+            bg_layer,
+            Border::new()
+                .border_brush(theme.card_border)
+                .border_thickness(Thickness::uniform(1.0))
+                .corner_radius(CornerRadius::uniform(theme.radius))
+                .content(
+                    Grid::new()
+                        .columns([GridLength::Auto, GridLength::STAR])
+                        .children([
+                            Border::new()
+                                .grid_column(0)
+                                .width(3.0)
+                                .background(theme.accent)
+                                .corner_radius(CornerRadius::new(
+                                    (theme.radius - 1.0).max(0.0),
+                                    0.0,
+                                    (theme.radius - 1.0).max(0.0),
+                                    0.0,
+                                ))
+                                .into(),
+                            Border::new()
+                                .grid_column(1)
+                                .padding(Thickness::uniform(theme.pad))
+                                .content(content),
+                        ]),
+                ),
+        ])
     } else {
-        Border::new()
-            .background(theme.card_bg)
-            .border_brush(theme.card_border)
-            .border_thickness(theme.card_border_thickness())
-            .corner_radius(CornerRadius::uniform(theme.radius))
-            .padding(Thickness::uniform(theme.pad))
-            .content(content)
+        Grid::new().children([
+            bg_base,
+            bg_layer,
+            Border::new()
+                .border_brush(theme.card_border)
+                .border_thickness(theme.card_border_thickness())
+                .corner_radius(CornerRadius::uniform(theme.radius))
+                .padding(Thickness::uniform(theme.pad))
+                .content(content),
+        ])
     }
 }
 
@@ -570,7 +587,7 @@ pub fn trend_strip(
                     );
                     // Near-opaque dark card (Fluent tooltip idiom; reads on both themes).
                     let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
-                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
+                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(128, 128, 128, 48))?;
                     let head = ctx.create_solid_brush(accent)?;
                     let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
                     ctx.fill_rounded_rect(&panel, &bg);
@@ -915,7 +932,7 @@ pub fn heatmap(
                         6.5,
                     );
                     let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
-                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
+                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(128, 128, 128, 48))?;
                     let head = ctx.create_solid_brush(accent)?;
                     let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
                     ctx.fill_rounded_rect(&panel, &bg);
@@ -1141,7 +1158,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                         6.5,
                     );
                     let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
-                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
+                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(128, 128, 128, 48))?;
                     ctx.fill_rounded_rect(&panel, &bg);
                     ctx.draw_rounded_rect(&frame_panel, &frame, 1.0);
                     let short: String = if name.chars().count() > 18 {

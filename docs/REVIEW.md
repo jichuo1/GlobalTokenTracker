@@ -1285,3 +1285,36 @@
   - `target/e2e/cal3/edge-custom-w1500.png`：自定义视图，卡片左侧 Accent 条圆角紧密贴合外框，日历选中端点与 24 小时表盘端点槽带精致微光轮廓，中心 Hub 具清晰 1px 分隔线边界；
   - `target/e2e/cal3/edge-tip-w1500.png`：小时趋势柱悬停 Tooltip 框体像素对齐与 0.5px 内缩描边，文字与深色卡片边界对比清晰无杂色。
 
+## S95 高分辨率下控件圆角细小白色色块与接缝根治 ✅
+
+- **背景与痛点**：在高分辨率（高 DPI 缩放如 125%、150%、175%、200%）下，用户反馈 UI 控件边缘尤其是圆角区域依然会出现细小白色色块/噪点。经排查定位根因如下：
+  1. **WinUI 3 Border 官方已知缺陷（#9454 / #6207）**：单 `Border` 控件同时设置 `Background`、`BorderBrush`（如 `CardStrokeColorDefaultBrush`）和 `CornerRadius` 时，内部填充几何裁切与外框描边在浮点亚像素坐标计算中存在取整缝隙；若父级容器未铺设不透明深色底板，该缝隙会透出底层白色/高光视口表面，肉眼看即为「圆角处细小白色色块」；
+  2. **高分屏端点半透明纯白描边抗锯齿噪点**：S94 引入的 `Color::argb(72, 255, 255, 255)`（28% 白）在日历端点单元格（4px 圆角）与表盘整点槽（12px 圆弧）周围进行高分屏亚像素抗锯齿时，与深色底混合后在圆角处形成泛白像素伪影；
+  3. **页面容器底板缺失与 Mica 透光**：`page_frame` 与 `pagehost` 的 Background 默认为 `None`，未显式填充深色 `ThemeBrush::SolidBackground`（Win11 深色底 `#202020`），导致透明混合穿透；
+  4. **浮层与弹窗卡片嵌套圆角阶梯差**：`dropdown_overlay` 与 `update_banner` 采用单 `Border` 或外框 `theme.radius` 与内框 `theme.radius - 1.0` 嵌套，产生圆角几何间隙。
+- **改动范围**：
+  1. **卡片 Chrome 分层双底板与防漏光重构**（`crates/ui/src/widgets.rs::card`）：
+     - 将卡片拆分为三层同尺寸同圆角结构：底层 `bg_base` 显式填充不透明 `base`（`ThemeBrush::SolidBackground`）；中间层 `bg_layer` 填充 `theme.card_bg`；表层 `Border` 承载 `border_brush`、`border_thickness` 与内边距/内容；
+     - 底层完全衬在描边正下方，彻底抹平 WinUI 3 单 Border 填充与描边的圆角亚像素漏光；
+  2. **端点控件纯色 Accent 恢复**（`crates/ui/src/pages.rs::cal_day`, `hour_dial`）：
+     - 移除日历端点单元格和时钟整点端点槽上的 `Color::argb(72, 255, 255, 255)` 白色描边；恢复为纯色 solid accent，消除高 DPI 抗锯齿泛白噪点；
+  3. **表盘中心 Hub 圆盘三层结构重构**（`crates/ui/src/pages.rs::hour_dial`）：
+     - 中心 Hub 圆盘拆为三层：底层 `base` 圆盘、中间 `card_bg` 圆盘、顶层带 1px `divider` 边框与文字内容的圆盘，彻底消除圆盘边缘与内衬接缝；
+  4. **全页面容器深色底板兜底**（`crates/ui/src/pages.rs::page_frame`, `crates/ui/src/main.rs::pagehost`）：
+     - `page_frame` 显式填充 `theme.page_bg.unwrap_or(Brush::Theme(ThemeBrush::SolidBackground))`；
+     - `pagehost` 显式填充 `SolidBackground`，阻断任何可能穿透至白色窗口 SwapChain 的亚像素间隙；
+  5. **浮层弹窗与更新横幅多层无缝对齐**（`crates/ui/src/pages.rs::dropdown_overlay`, `update_banner`）：
+     - `dropdown_overlay` 与 `update_banner` 统一采用 `base` + `card_bg` + `card_border` 相同 `theme.radius` 三层 Grid 结构，消除 `radius - 1.0` 阶梯缝隙；
+  6. **图表 Tooltip 描边统一中性深灰**（`crates/ui/src/widgets.rs::heatmap`, `donut`）：
+     - 热力图与环形图悬停 Tooltip 框描边从 `ColorF::from_rgba8(255, 255, 255, 36)` 统一改为 `ColorF::from_rgba8(128, 128, 128, 48)`，杜绝白色微光边缘。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 206 个测试全部通过（Core 166 + Setup 13 + UI 27）；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `rustfmt --edition 2024 --check crates/ui/src/widgets.rs crates/ui/src/pages.rs crates/ui/src/main.rs`：无格式差异。
+- **实测证据（Release GUI 真实渲染截屏与 8x 像素级放大核验）**：
+  - `target/e2e/cal3/real_card_tl_zoom.png` / `real_card_tr_zoom.png` / `real_card_bl_zoom.png` / `real_card_br_zoom.png`：普通卡片 4 个圆角 8x 像素放大，外框到底板平滑过渡为自然深灰抗锯齿梯度，无任何白色像素/色块；
+  - `target/e2e/cal3/zoom_card_accent_corner.png`：带强调色侧边卡片左上圆角 8x 像素放大，Accent 填充弧度与卡片外框 0.5px 精确贴合，无溢出或露底；
+  - `target/e2e/cal3/zoom_cal_grid.png`：日历第 7 日选中态 8x 像素放大，去除了白色描边后，圆角边缘与卡片底板浑然一体，边缘无噪点；
+  - `target/e2e/cal3/zoom_hub_actual.png` / `zoom_hub_center.png`：表盘快速区间按键与中心 Hub 圆盘 8x 像素放大，1px 分隔描边与内衬圆盘紧密重叠，无亚像素缝隙。
+
+

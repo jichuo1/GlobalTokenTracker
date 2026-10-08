@@ -299,10 +299,7 @@ fn cal_day(
         // brush so the whole cell still receives pointer input.
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)));
     if endpoint {
-        cell = cell
-            .background(Brush::Solid(rgba(accent, 1.0)))
-            .border_brush(Brush::Solid(Color::argb(72, 255, 255, 255)))
-            .border_thickness(Thickness::uniform(1.0));
+        cell = cell.background(Brush::Solid(rgba(accent, 1.0)));
     } else if inside {
         cell = cell.background(Brush::Solid(rgba(accent, 0.30)));
     } else if day == today {
@@ -505,10 +502,7 @@ fn hour_dial(
             // Same hit-test rule as the calendar cells: never a null brush.
             .background(Brush::Solid(Color::argb(0, 0, 0, 0)));
         if endpoint {
-            slot = slot
-                .background(Brush::Solid(rgba(accent, 1.0)))
-                .border_brush(Brush::Solid(Color::argb(72, 255, 255, 255)))
-                .border_thickness(Thickness::uniform(1.0));
+            slot = slot.background(Brush::Solid(rgba(accent, 1.0)));
         } else if inside {
             slot = slot.background(Brush::Solid(rgba(accent, 0.30)));
         }
@@ -538,29 +532,41 @@ fn hour_dial(
         None => "—".into(),
     };
     let hub = DIAL_HUB;
+    let base = theme
+        .page_bg
+        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
+    let hub_base: View = Border::new()
+        .background(base)
+        .corner_radius(CornerRadius::uniform(hub / 2.0))
+        .into();
+    let hub_bg: View = Border::new()
+        .background(theme.card_bg)
+        .corner_radius(CornerRadius::uniform(hub / 2.0))
+        .into();
+    let hub_frame: View = Border::new()
+        .border_brush(theme.divider)
+        .border_thickness(Thickness::uniform(1.0))
+        .corner_radius(CornerRadius::uniform(hub / 2.0))
+        .content(
+            TextBlock::new()
+                .text(readout)
+                .font_size(theme.body_size)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .vertical_alignment(VerticalAlignment::Center)
+                .foreground(if span.is_some() {
+                    theme.text
+                } else {
+                    theme.subtle
+                }),
+        );
     parts.push(
-        Border::new()
+        Grid::new()
             .width(hub)
             .height(hub)
-            .corner_radius(CornerRadius::uniform(hub / 2.0))
-            .background(theme.card_bg)
-            .border_brush(theme.divider)
-            .border_thickness(Thickness::uniform(1.0))
             .canvas_left(c - hub / 2.0)
             .canvas_top(c - hub / 2.0)
-            .content(
-                TextBlock::new()
-                    .text(readout)
-                    .font_size(theme.body_size)
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .horizontal_alignment(HorizontalAlignment::Center)
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .foreground(if span.is_some() {
-                        theme.text
-                    } else {
-                        theme.subtle
-                    }),
-            ),
+            .children([hub_base, hub_bg, hub_frame]),
     );
     Canvas::new()
         .width(DIAL)
@@ -822,10 +828,12 @@ fn custom_range_row(
 }
 
 fn page_frame(theme: &Theme, body: View) -> View {
-    let mut frame = Border::new().padding(Thickness::xy(24.0, 16.0));
-    if let Some(bg) = &theme.page_bg {
-        frame = frame.background(*bg);
-    }
+    let bg = theme
+        .page_bg
+        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
+    let frame = Border::new()
+        .padding(Thickness::xy(24.0, 16.0))
+        .background(bg);
     ScrollViewer::new()
         .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
         .content(frame.content(body))
@@ -1626,27 +1634,31 @@ pub fn dropdown_overlay(
         .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
     // Margin positions the card inside the content cell — plain Grid, no
     // Canvas (its empty-area hits can swallow presses meant for siblings).
-    Border::new()
+    let drop_base: View = Border::new()
+        .background(base)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
+    let drop_bg: View = Border::new()
+        .background(theme.card_bg)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
+    let drop_frame: View = Border::new()
+        .border_brush(theme.card_border)
+        .border_thickness(theme.card_border_thickness())
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .padding(Thickness::xy(12.0, 8.0))
+        .content(
+            StackPanel::new()
+                .orientation(Orientation::Vertical)
+                .spacing(10.0)
+                .keyed_children(keyed(items)),
+        );
+    Grid::new()
         .grid_row(2)
         .horizontal_alignment(HorizontalAlignment::Left)
         .vertical_alignment(VerticalAlignment::Top)
         .margin(Thickness::new(x, 4.0, 0.0, 0.0))
-        .background(base)
-        .border_brush(theme.card_border)
-        .border_thickness(theme.card_border_thickness())
-        .corner_radius(CornerRadius::uniform(theme.radius))
-        .content(
-            Border::new()
-                .background(theme.card_bg)
-                .corner_radius(CornerRadius::uniform(theme.radius - 1.0))
-                .padding(Thickness::xy(12.0, 8.0))
-                .content(
-                    StackPanel::new()
-                        .orientation(Orientation::Vertical)
-                        .spacing(10.0)
-                        .keyed_children(keyed(items)),
-                ),
-        )
+        .children([drop_base, drop_bg, drop_frame])
 }
 
 /// Bundle for the overview page — keeps the signature under the arg limit
@@ -3136,13 +3148,22 @@ pub fn update_banner(
                 .into(),
         );
     }
-    Border::new()
-        .margin(Thickness::new(24.0, 8.0, 24.0, 0.0))
-        .padding(Thickness::xy(theme.pad, 6.0))
+    let base = theme
+        .page_bg
+        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
+    let banner_base: View = Border::new()
+        .background(base)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
+    let banner_bg: View = Border::new()
         .background(theme.card_bg)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
+    let banner_frame: View = Border::new()
         .border_brush(theme.card_border)
         .border_thickness(theme.card_border_thickness())
         .corner_radius(CornerRadius::uniform(theme.radius))
+        .padding(Thickness::xy(theme.pad, 6.0))
         .content(
             Grid::new()
                 .columns([GridLength::STAR, GridLength::Auto])
@@ -3163,7 +3184,10 @@ pub fn update_banner(
                             .keyed_children(keyed(actions)),
                     ),
                 ]),
-        )
+        );
+    Grid::new()
+        .margin(Thickness::new(24.0, 8.0, 24.0, 0.0))
+        .children([banner_base, banner_bg, banner_frame])
 }
 
 pub fn settings_page(
