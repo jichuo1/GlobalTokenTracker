@@ -159,6 +159,8 @@ pub struct Shell {
     cal_anchor: Option<jiff::civil::Date>,
     /// Hour dial: first clicked hour awaiting its partner.
     clock_anchor: Option<i8>,
+    /// Hour dial: virtualized animated state handle.
+    clock_dial: widgets::ClockDialHandle,
     /// Share-donut hover states — one per share-grid column (4 max).
     donuts: [widgets::DonutHandle; 4],
     /// Vendor quota channels poll at this cadence (network calls stay rare).
@@ -772,6 +774,7 @@ impl Component for Shell {
             cal_month: cal_month_of(range),
             cal_anchor: None,
             clock_anchor: None,
+            clock_dial: widgets::ClockDialHandle::default(),
             donuts: std::array::from_fn(|_| widgets::DonutHandle::default()),
             quota_at: None,
             open_menu: None,
@@ -989,6 +992,7 @@ impl Component for Shell {
                 let Some(day) = self.single_day() else {
                     return;
                 };
+                self.clock_dial.pick_optimistic(h, 23);
                 let r = match self.clock_anchor.take() {
                     None => {
                         self.clock_anchor = Some(h);
@@ -1001,6 +1005,7 @@ impl Component for Shell {
             Msg::ClockFullDay => {
                 if let Some(day) = self.single_day() {
                     self.clock_anchor = None;
+                    self.clock_dial.reset_full_day();
                     self.set_range(Range::custom_days(day, day), context);
                 }
             }
@@ -1932,6 +1937,7 @@ impl Shell {
                     editing: self.editing,
                     trend: &self.trend,
                     heat: &self.heat,
+                    clock_dial: &self.clock_dial,
                     cols: self.overview_cols,
                     ruler: &self.ruler,
                     donuts: &self.donuts,
@@ -2209,6 +2215,14 @@ impl Shell {
         if let Range::Custom { start_ms, end_ms } = r {
             self.config.range_start_ms = Some(start_ms);
             self.config.range_end_ms = Some(end_ms);
+            if let Some(day) = self.single_day() {
+                let span = pages::hour_span(day, start_ms, end_ms);
+                self.clock_dial.sync(Some(span), self.clock_anchor);
+            } else {
+                self.clock_dial.sync(None, None);
+            }
+        } else {
+            self.clock_dial.sync(None, None);
         }
         self.config.save();
         self.refresh_views(context, false);
@@ -2236,6 +2250,36 @@ impl Shell {
             };
             context.spawn_background(move |_| {
                 power::worker("gtt-scan");
+                match load_all(req) {
+                    Ok(s) => Msg::Loaded(s),
+                    Err(e) => Msg::Failed(e),
+                }
+            });
+        }
+    }
+
+    fn reload_views(&mut self, context: &ComponentContext<Self>) {
+        if !self.scanning {
+            diag!("[reload] fast view reload without disk scan");
+            self.scanning = true;
+            let force_views = std::mem::take(&mut self.views_stale);
+            let prev_cube = if std::mem::take(&mut self.cube_rebuild) {
+                None
+            } else {
+                self.snap.as_ref().map(|s| Arc::clone(&s.cube))
+            };
+            let req = LoadReq {
+                range: self.range,
+                apps: self.app_filter.clone(),
+                models: self.model_filter.clone(),
+                force_prices: false,
+                force_views,
+                prev_cube,
+                filter_gen: self.filter_gen,
+                scan: false,
+            };
+            context.spawn_background(move |_| {
+                power::worker("gtt-reload");
                 match load_all(req) {
                     Ok(s) => Msg::Loaded(s),
                     Err(e) => Msg::Failed(e),
@@ -2275,12 +2319,11 @@ impl Shell {
         } else {
             // Nothing loaded yet, or the cube can't answer this window exactly
             // (a custom edge off the day boundary): the SQL path, in the
-            // background. Restart even if a scan is in flight — it captured
-            // the old range/filters.
-            diag!("[view] cube declined — background reload");
+            // background. Fast reload without rescanning all files on disk!
+            diag!("[view] cube declined — fast reload without disk scan");
             self.views_stale = true;
             self.scanning = false;
-            self.start_scan(context);
+            self.reload_views(context);
         }
     }
 

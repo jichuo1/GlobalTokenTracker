@@ -417,12 +417,6 @@ fn cal_month(
     vstack(2.0, rows)
 }
 
-/// Hour dial geometry: slot circles on a ring around a centre readout.
-const DIAL: f64 = 212.0;
-const DIAL_SLOT: f64 = 24.0;
-const DIAL_RING: f64 = 92.0;
-const DIAL_HUB: f64 = 64.0;
-
 /// Local wall-clock hour of an epoch-ms instant (system zone).
 fn local_hour(ms: i64) -> i8 {
     jiff::Timestamp::from_millisecond(ms)
@@ -432,7 +426,7 @@ fn local_hour(ms: i64) -> i8 {
 
 /// Inclusive hour slots `(first, last)` a single-day window covers; a window
 /// reaching the next local midnight ends at slot 23.
-fn hour_span(day: jiff::civil::Date, start_ms: i64, end_ms: i64) -> (i8, i8) {
+pub fn hour_span(day: jiff::civil::Date, start_ms: i64, end_ms: i64) -> (i8, i8) {
     use globaltokentracker_core::viewmodel::local_day_start;
     let midnight = day.tomorrow().map(local_day_start).unwrap_or(i64::MAX);
     let last = if end_ms >= midnight {
@@ -441,138 +435,6 @@ fn hour_span(day: jiff::civil::Date, start_ms: i64, end_ms: i64) -> (i8, i8) {
         local_hour(end_ms - 1)
     };
     (local_hour(start_ms), last)
-}
-
-/// 24-hour clock face: hour slots on a ring (0 at the top, clockwise), the
-/// picked span washed in accent with solid endpoints and two hands pointing
-/// at them; the centre reads the span's length. `span = None` → the window
-/// covers several days, so the dial is shown dimmed and inert. Hours after
-/// the current one on today are dimmed and inert, like future calendar days.
-fn hour_dial(
-    theme: &Theme,
-    ctx: &mut ViewContext<Shell>,
-    span: Option<(i8, i8)>,
-    live_until: i8,
-) -> View {
-    let c = DIAL / 2.0;
-    let accent = theme.accent_cf;
-    let pos = |h: i8, r: f64| {
-        let a = f64::from(h) / 24.0 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2;
-        (c + r * a.cos(), c + r * a.sin())
-    };
-    let mut parts: Vec<View> = vec![
-        Ellipse::new()
-            .width(DIAL)
-            .height(DIAL)
-            .fill(Brush::Solid(rgba(theme.subtle_cf, 0.06)))
-            .stroke(theme.divider)
-            .stroke_thickness(1.0)
-            .into(),
-    ];
-    // Always two hands (zero-length when inert) so the slot keys behind them
-    // stay put as the dial toggles between live and inert.
-    // Hands run from the hub's rim to the slot, clear of the readout.
-    for h in span.map_or([None, None], |(a, b)| [Some(a), Some(b)]) {
-        let (x0, y0) = h.map_or((c, c), |h| pos(h, DIAL_HUB / 2.0));
-        let (x, y) = h.map_or((c, c), |h| pos(h, DIAL_RING - DIAL_SLOT / 2.0 - 2.0));
-        parts.push(
-            Line::new()
-                .x1(x0)
-                .y1(y0)
-                .x2(x)
-                .y2(y)
-                .stroke(Brush::Solid(rgba(accent, 0.8)))
-                .stroke_thickness(2.0)
-                .into(),
-        );
-    }
-    for h in 0..24i8 {
-        let (x, y) = pos(h, DIAL_RING);
-        let live = span.is_some() && h <= live_until;
-        let (endpoint, inside) = match span {
-            Some((a, b)) => (h == a || h == b, h > a && h < b),
-            None => (false, false),
-        };
-        let mut slot = Border::new()
-            .width(DIAL_SLOT)
-            .height(DIAL_SLOT)
-            .corner_radius(CornerRadius::uniform(DIAL_SLOT / 2.0))
-            .canvas_left(x - DIAL_SLOT / 2.0)
-            .canvas_top(y - DIAL_SLOT / 2.0)
-            // Same hit-test rule as the calendar cells: never a null brush.
-            .background(Brush::Solid(Color::argb(0, 0, 0, 0)));
-        if endpoint {
-            slot = slot.background(Brush::Solid(rgba(accent, 1.0)));
-        } else if inside {
-            slot = slot.background(Brush::Solid(rgba(accent, 0.30)));
-        }
-        if live {
-            slot = slot.on_pointer_pressed(ctx.callback(move |_| Msg::ClockPick(h)));
-        }
-        parts.push(
-            slot.content(
-                TextBlock::new()
-                    .text(h.to_string())
-                    .font_size(theme.label_size)
-                    .horizontal_alignment(HorizontalAlignment::Center)
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .foreground(if !live {
-                        theme.subtle
-                    } else if endpoint {
-                        Brush::Solid(Color::rgb(255, 255, 255))
-                    } else {
-                        theme.text
-                    }),
-            ),
-        );
-    }
-    let readout: String = match span {
-        Some((0, 23)) => t!("全天").into(),
-        Some((a, b)) => tf!("{} 小时", b - a + 1),
-        None => "—".into(),
-    };
-    let hub = DIAL_HUB;
-    let base = theme
-        .page_bg
-        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
-    let hub_base: View = Border::new()
-        .background(base)
-        .corner_radius(CornerRadius::uniform(hub / 2.0))
-        .into();
-    let hub_bg: View = Border::new()
-        .background(theme.card_bg)
-        .corner_radius(CornerRadius::uniform(hub / 2.0))
-        .into();
-    let hub_frame: View = Border::new()
-        .border_brush(theme.divider)
-        .border_thickness(Thickness::uniform(1.0))
-        .corner_radius(CornerRadius::uniform(hub / 2.0))
-        .content(
-            TextBlock::new()
-                .text(readout)
-                .font_size(theme.body_size)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .horizontal_alignment(HorizontalAlignment::Center)
-                .vertical_alignment(VerticalAlignment::Center)
-                .foreground(if span.is_some() {
-                    theme.text
-                } else {
-                    theme.subtle
-                }),
-        );
-    parts.push(
-        Grid::new()
-            .width(hub)
-            .height(hub)
-            .canvas_left(c - hub / 2.0)
-            .canvas_top(c - hub / 2.0)
-            .children([hub_base, hub_bg, hub_frame]),
-    );
-    Canvas::new()
-        .width(DIAL)
-        .height(DIAL)
-        .opacity(if span.is_some() { 1.0 } else { 0.5 })
-        .keyed_children(keyed(parts))
 }
 
 /// Width tiers of the custom-range card (`cols` = `REFLOW_MIN_CELL` steps of
@@ -623,6 +485,7 @@ fn custom_range_row(
     end_ms: i64,
     cal: CalView,
     cols: usize,
+    clock_dial: &w::ClockDialHandle,
 ) -> View {
     use globaltokentracker_core::viewmodel::local_date;
     let now = jiff::Zoned::now();
@@ -731,7 +594,7 @@ fn custom_range_row(
 
     // Hour block: dial + its caption column.
     let live_until = if first == today { now.hour() } else { 23 };
-    let dial = hour_dial(theme, ctx, span, live_until);
+    let dial = w::clock_dial(theme, clock_dial, span, cal.clock_anchor, live_until, ctx);
     let dial_hint = match (span, cal.clock_anchor) {
         (None, _) => t!("选择单日后可按时段统计"),
         (Some(_), Some(_)) => t!("再点一个整点作为另一端"),
@@ -1669,6 +1532,7 @@ pub struct OverviewArgs<'a> {
     pub editing: bool,
     pub trend: &'a w::TrendHandle,
     pub heat: &'a w::HeatHandle,
+    pub clock_dial: &'a w::ClockDialHandle,
     /// Width tier from the ruler: `REFLOW_MIN_CELL` steps, 1..=`WIDTH_TIERS`
     /// (reflow grids cap it at `REFLOW_MAX_COLS`).
     pub cols: usize,
@@ -1798,7 +1662,13 @@ pub fn overview_page(
 
     if let Range::Custom { start_ms, end_ms } = s.vm.range {
         col.push(custom_range_row(
-            theme, ctx, start_ms, end_ms, args.cal, args.cols,
+            theme,
+            ctx,
+            start_ms,
+            end_ms,
+            args.cal,
+            args.cols,
+            args.clock_dial,
         ));
     }
 

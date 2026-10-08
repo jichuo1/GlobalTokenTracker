@@ -288,6 +288,136 @@ impl Default for DonutHandle {
     }
 }
 
+/// Virtual animation and interaction state for the 24-hour clock dial selector.
+#[derive(Default)]
+pub struct ClockDialShared {
+    pub hover_hour: Cell<Option<i8>>,
+    /// Current interpolated hour angles for the start and end hands (0.0..24.0).
+    pub cur_start_hour: Cell<f32>,
+    pub cur_end_hour: Cell<f32>,
+    pub target_start_hour: Cell<f32>,
+    pub target_end_hour: Cell<f32>,
+    pub anim_from_start: Cell<f32>,
+    pub anim_from_end: Cell<f32>,
+    pub anim_start_time: Cell<Option<std::time::Instant>>,
+    pub animating: Cell<bool>,
+    pub initialized: Cell<bool>,
+    pub virtual_anchor: Cell<Option<i8>>,
+}
+
+/// Owned by `Shell`; cloned handle flows into the custom-range clock dial each render.
+#[derive(Clone)]
+pub struct ClockDialHandle {
+    pub shared: Rc<ClockDialShared>,
+    pub inv: Invalidator,
+}
+
+impl Default for ClockDialHandle {
+    fn default() -> Self {
+        Self {
+            shared: Rc::new(ClockDialShared::default()),
+            inv: Invalidator::new(),
+        }
+    }
+}
+
+impl ClockDialHandle {
+    /// Synchronize state from external model (e.g. range / anchor change).
+    pub fn sync(&self, span: Option<(i8, i8)>, anchor: Option<i8>) {
+        let (s, e) = match span {
+            Some((a, b)) => (a as f32, b as f32),
+            None => (0.0, 0.0),
+        };
+        if !self.shared.initialized.get() {
+            self.shared.cur_start_hour.set(s);
+            self.shared.cur_end_hour.set(e);
+            self.shared.target_start_hour.set(s);
+            self.shared.target_end_hour.set(e);
+            self.shared.virtual_anchor.set(anchor);
+            self.shared.initialized.set(true);
+            return;
+        }
+        let cur_s_tgt = self.shared.target_start_hour.get();
+        let cur_e_tgt = self.shared.target_end_hour.get();
+        let cur_anc = self.shared.virtual_anchor.get();
+        if (cur_s_tgt - s).abs() > 0.05 || (cur_e_tgt - e).abs() > 0.05 || cur_anc != anchor {
+            self.shared.virtual_anchor.set(anchor);
+            self.shared
+                .anim_from_start
+                .set(self.shared.cur_start_hour.get());
+            self.shared
+                .anim_from_end
+                .set(self.shared.cur_end_hour.get());
+            self.shared.target_start_hour.set(s);
+            self.shared.target_end_hour.set(e);
+            self.shared
+                .anim_start_time
+                .set(Some(std::time::Instant::now()));
+            self.shared.animating.set(true);
+            self.inv.invalidate();
+        }
+    }
+
+    /// User clicked an hour: update virtual state immediately and kick off rotation animation.
+    pub fn pick_optimistic(&self, h: i8, live_until: i8) {
+        if h > live_until {
+            return;
+        }
+        let now = std::time::Instant::now();
+        match self.shared.virtual_anchor.get() {
+            None => {
+                // First click: anchor at h!
+                self.shared.virtual_anchor.set(Some(h));
+                self.shared
+                    .anim_from_start
+                    .set(self.shared.cur_start_hour.get());
+                self.shared
+                    .anim_from_end
+                    .set(self.shared.cur_end_hour.get());
+                self.shared.target_start_hour.set(h as f32);
+                self.shared.target_end_hour.set(h as f32);
+                self.shared.anim_start_time.set(Some(now));
+                self.shared.animating.set(true);
+                self.inv.invalidate();
+            }
+            Some(first) => {
+                // Second click: span resolved!
+                self.shared.virtual_anchor.set(None);
+                let (start, end) = (first.min(h), first.max(h));
+                self.shared
+                    .anim_from_start
+                    .set(self.shared.cur_start_hour.get());
+                self.shared
+                    .anim_from_end
+                    .set(self.shared.cur_end_hour.get());
+                self.shared.target_start_hour.set(start as f32);
+                self.shared.target_end_hour.set(end as f32);
+                self.shared.anim_start_time.set(Some(now));
+                self.shared.animating.set(true);
+                self.inv.invalidate();
+            }
+        }
+    }
+
+    /// Reset to full day.
+    pub fn reset_full_day(&self) {
+        self.shared.virtual_anchor.set(None);
+        self.shared
+            .anim_from_start
+            .set(self.shared.cur_start_hour.get());
+        self.shared
+            .anim_from_end
+            .set(self.shared.cur_end_hour.get());
+        self.shared.target_start_hour.set(0.0);
+        self.shared.target_end_hour.set(23.0);
+        self.shared
+            .anim_start_time
+            .set(Some(std::time::Instant::now()));
+        self.shared.animating.set(true);
+        self.inv.invalidate();
+    }
+}
+
 /// Canvas height for the trend chart: adapts to width tiers so wide/high-resolution
 /// windows don't collapse into an overly flat, thin strip.
 pub fn trend_height(cols: usize) -> f64 {
@@ -1367,6 +1497,393 @@ pub fn ruled_row(theme: &Theme, content: impl Into<View>) -> View {
     )
 }
 
+/// Resolves a pointer coordinate within a `size×size` clock face to an hour slot (0..=23).
+pub fn clock_hit(x: f64, y: f64, size: f64) -> Option<i8> {
+    let c = size / 2.0;
+    let dx = x - c;
+    let dy = y - c;
+    let r = (dx * dx + dy * dy).sqrt();
+    if r >= 40.0 && r <= (size / 2.0) {
+        let a = (dy.atan2(dx) + std::f64::consts::FRAC_PI_2).rem_euclid(std::f64::consts::TAU);
+        let h = ((a / std::f64::consts::TAU * 24.0).round() as i8).rem_euclid(24);
+        Some(h)
+    } else {
+        None
+    }
+}
+
+/// 24-hour clock face selector: Direct2D animated demand canvas with continuous
+/// pointer rotation, differentiated start/end indicators, smooth connecting sweep
+/// arc, and optimistic virtualized state decoupled from heavy disk scans.
+pub fn clock_dial(
+    theme: &Theme,
+    dial: &ClockDialHandle,
+    span: Option<(i8, i8)>,
+    anchor: Option<i8>,
+    live_until: i8,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    dial.sync(span, anchor);
+
+    let card_bg = theme.card_cf;
+    let subtle = theme.subtle_cf;
+    let divider = theme.divider_cf;
+    let text_color = windows_canvas::ColorF::from_rgba8(235, 235, 235, 255);
+    let accent = theme.accent_cf;
+    let family = theme.font_family.clone();
+    let label_pt = (theme.label_size * 0.92).max(9.5) as f32;
+    let body_pt = theme.body_size as f32;
+    let small_pt = (theme.label_size * 0.82).max(8.5) as f32;
+
+    let shared = dial.shared.clone();
+    let inv = dial.inv.clone();
+
+    let dial_sz = 232.0f64;
+    let c = (dial_sz * 0.5) as f32;
+
+    Border::new()
+        .width(dial_sz)
+        .height(dial_sz)
+        .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
+        .on_pointer_moved(ctx.callback({
+            let dial = dial.clone();
+            move |e: PointerEventInfo| {
+                let h = clock_hit(e.x, e.y, dial_sz);
+                if dial.shared.hover_hour.get() != h {
+                    dial.shared.hover_hour.set(h);
+                    dial.inv.invalidate();
+                }
+                Msg::Noop
+            }
+        }))
+        .on_pointer_exited(ctx.callback({
+            let dial = dial.clone();
+            move |_| {
+                if dial.shared.hover_hour.get().is_some() {
+                    dial.shared.hover_hour.set(None);
+                    dial.inv.invalidate();
+                }
+                Msg::Noop
+            }
+        }))
+        .on_pointer_pressed(ctx.callback({
+            let dial = dial.clone();
+            move |e: PointerEventInfo| {
+                let (dx, dy) = (e.x - dial_sz * 0.5, e.y - dial_sz * 0.5);
+                let r = (dx * dx + dy * dy).sqrt();
+                if r <= 32.0 {
+                    dial.reset_full_day();
+                    Msg::ClockFullDay
+                } else if let Some(h) = clock_hit(e.x, e.y, dial_sz) {
+                    if h <= live_until {
+                        dial.pick_optimistic(h, live_until);
+                        Msg::ClockPick(h)
+                    } else {
+                        Msg::Noop
+                    }
+                } else {
+                    Msg::Noop
+                }
+            }
+        }))
+        .content(windows_canvas::canvas_invalidated(&dial.inv, move |ctx| {
+            use windows_canvas::{
+                CapStyle, ColorF, Ellipse, LineJoin, ParagraphAlignment, PathBuilder, Rect,
+                StrokeStyleBuilder, TextAlignment, TextFormat, Vector2,
+            };
+
+            ctx.clear(card_bg);
+
+            // 1. Interpolation step for continuous, decoupled rotation animation
+            let now = std::time::Instant::now();
+            if shared.animating.get()
+                && let Some(t0) = shared.anim_start_time.get()
+            {
+                let elapsed = now.duration_since(t0).as_secs_f32();
+                let duration = 0.28; // 280ms smooth sweep
+                if elapsed < duration {
+                    let t = elapsed / duration;
+                    let ease = 1.0 - (1.0 - t).powi(3);
+
+                    let s0 = shared.anim_from_start.get();
+                    let s_tgt = shared.target_start_hour.get();
+                    let s_diff = ((s_tgt - s0 + 12.0).rem_euclid(24.0)) - 12.0;
+                    shared
+                        .cur_start_hour
+                        .set((s0 + s_diff * ease).rem_euclid(24.0));
+
+                    let e0 = shared.anim_from_end.get();
+                    let e_tgt = shared.target_end_hour.get();
+                    let e_diff = ((e_tgt - e0 + 12.0).rem_euclid(24.0)) - 12.0;
+                    shared
+                        .cur_end_hour
+                        .set((e0 + e_diff * ease).rem_euclid(24.0));
+
+                    inv.invalidate();
+                } else {
+                    shared
+                        .cur_start_hour
+                        .set(shared.target_start_hour.get().rem_euclid(24.0));
+                    shared
+                        .cur_end_hour
+                        .set(shared.target_end_hour.get().rem_euclid(24.0));
+                    shared.animating.set(false);
+                }
+            }
+
+            let s_hr = shared.cur_start_hour.get();
+            let e_hr = shared.cur_end_hour.get();
+            let theta_s = (s_hr / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            let theta_e = (e_hr / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+
+            let subtle_brush = ctx.create_solid_brush(subtle)?;
+            let divider_brush = ctx.create_solid_brush(divider)?;
+            let text_brush = ctx.create_solid_brush(text_color)?;
+            let accent_brush = ctx.create_solid_brush(accent)?;
+            let white_brush = ctx.create_solid_brush(ColorF::from_rgb8(255, 255, 255))?;
+            let dial_bg_brush =
+                ctx.create_solid_brush(ColorF::new(subtle.r, subtle.g, subtle.b, 0.06))?;
+            let track_ring_brush =
+                ctx.create_solid_brush(ColorF::new(divider.r, divider.g, divider.b, 0.35))?;
+            let in_span_brush =
+                ctx.create_solid_brush(ColorF::new(accent.r, accent.g, accent.b, 0.28))?;
+            let hover_brush =
+                ctx.create_solid_brush(ColorF::new(accent.r, accent.g, accent.b, 0.18))?;
+            let start_halo_brush =
+                ctx.create_solid_brush(ColorF::new(accent.r, accent.g, accent.b, 0.65))?;
+            let arc_brush =
+                ctx.create_solid_brush(ColorF::new(accent.r, accent.g, accent.b, 0.35))?;
+
+            // 2. Base dial plate & faint track
+            ctx.fill_ellipse(&Ellipse::circle(Vector2::new(c, c), 105.0), &dial_bg_brush);
+            ctx.draw_ellipse(
+                &Ellipse::circle(Vector2::new(c, c), 105.0),
+                &divider_brush,
+                1.0,
+            );
+            ctx.draw_ellipse(
+                &Ellipse::circle(Vector2::new(c, c), 92.0),
+                &track_ring_brush,
+                1.0,
+            );
+
+            // 3. Connecting Sweep Arc between Start Hand and End Hand
+            if span.is_some() {
+                let arc_span = (theta_e - theta_s).rem_euclid(std::f32::consts::TAU);
+                if arc_span > 0.03 {
+                    let n =
+                        ((arc_span / (std::f32::consts::TAU / 96.0)).ceil() as usize).clamp(4, 96);
+                    let mut pts = Vec::with_capacity(n + 1);
+                    for k in 0..=n {
+                        let a = theta_s + arc_span * (k as f32) / (n as f32);
+                        pts.push(Vector2::new(c + 92.0 * a.cos(), c + 92.0 * a.sin()));
+                    }
+                    let mut path_fig = PathBuilder::new(ctx.device())?.begin_hollow(pts[0]);
+                    for pt in &pts[1..] {
+                        path_fig = path_fig.line_to(*pt);
+                    }
+                    let path = path_fig.end_open().build()?;
+                    let arc_style = ctx.device().create_stroke_style(
+                        &StrokeStyleBuilder::new()
+                            .start_cap(CapStyle::Round)
+                            .end_cap(CapStyle::Round)
+                            .line_join(LineJoin::Round),
+                    )?;
+                    ctx.draw_path_styled(&path, &arc_brush, 7.0, &arc_style);
+                }
+            }
+
+            // 4. 24 Hour Slots
+            let s_target = (shared.target_start_hour.get().round() as i8).rem_euclid(24);
+            let e_target = (shared.target_end_hour.get().round() as i8).rem_euclid(24);
+            let is_single = s_target == e_target;
+            let hover_h = shared.hover_hour.get();
+
+            let tf_slot = TextFormat::new(&family, label_pt)?
+                .with_alignment(TextAlignment::Center)
+                .with_paragraph_alignment(ParagraphAlignment::Center);
+            let tf_slot_bold = TextFormat::new_bold(&family, label_pt)?
+                .with_alignment(TextAlignment::Center)
+                .with_paragraph_alignment(ParagraphAlignment::Center);
+
+            for h in 0..24i8 {
+                let a_h = (h as f32 / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                let hx = c + 92.0 * a_h.cos();
+                let hy = c + 92.0 * a_h.sin();
+                let slot_pos = Vector2::new(hx, hy);
+                let live = span.is_some() && h <= live_until;
+                let is_start = span.is_some() && h == s_target;
+                let is_end = span.is_some() && h == e_target;
+                let is_inside = span.is_some()
+                    && !is_single
+                    && if s_target <= e_target {
+                        h > s_target && h < e_target
+                    } else {
+                        h > s_target || h < e_target
+                    };
+                let is_hover = hover_h == Some(h);
+
+                if is_start && is_end {
+                    ctx.fill_ellipse(&Ellipse::circle(slot_pos, 12.0), &accent_brush);
+                    ctx.draw_ellipse(&Ellipse::circle(slot_pos, 14.5), &start_halo_brush, 1.5);
+                } else if is_start {
+                    // Differentiated Start Point: Concentric Double Ring + Inner Anchor Pin
+                    ctx.draw_ellipse(&Ellipse::circle(slot_pos, 14.5), &start_halo_brush, 1.5);
+                    ctx.fill_ellipse(&Ellipse::circle(slot_pos, 12.0), &accent_brush);
+                    let pin_pos = Vector2::new(hx - 5.5 * a_h.cos(), hy - 5.5 * a_h.sin());
+                    ctx.fill_ellipse(&Ellipse::circle(pin_pos, 2.0), &white_brush);
+                } else if is_end {
+                    // Differentiated End Point: Target Bracket Ring + Directional Arrowhead
+                    ctx.fill_ellipse(&Ellipse::circle(slot_pos, 12.0), &accent_brush);
+                    ctx.draw_ellipse(&Ellipse::circle(slot_pos, 14.0), &white_brush, 1.5);
+                    let arrow_pts = [
+                        Vector2::new(hx + 15.5 * a_h.cos(), hy + 15.5 * a_h.sin()),
+                        Vector2::new(
+                            hx + 12.0 * a_h.cos() - 3.5 * a_h.sin(),
+                            hy + 12.0 * a_h.sin() + 3.5 * a_h.cos(),
+                        ),
+                        Vector2::new(
+                            hx + 12.0 * a_h.cos() + 3.5 * a_h.sin(),
+                            hy + 12.0 * a_h.sin() - 3.5 * a_h.cos(),
+                        ),
+                    ];
+                    if let Ok(arrow_path) = PathBuilder::new(ctx.device())?.polygon(arrow_pts) {
+                        ctx.fill_path(&arrow_path, &white_brush);
+                    }
+                } else if is_inside {
+                    ctx.fill_ellipse(&Ellipse::circle(slot_pos, 11.0), &in_span_brush);
+                } else if is_hover && live {
+                    ctx.fill_ellipse(&Ellipse::circle(slot_pos, 12.0), &hover_brush);
+                }
+
+                let (num_brush, num_tf) = if is_start || is_end {
+                    (&white_brush, &tf_slot_bold)
+                } else if is_inside {
+                    (&text_brush, &tf_slot_bold)
+                } else if is_hover && live {
+                    (&accent_brush, &tf_slot_bold)
+                } else if live {
+                    (&subtle_brush, &tf_slot)
+                } else {
+                    (&track_ring_brush, &tf_slot)
+                };
+
+                let text_rect = Rect::new(hx - 12.0, hy - 12.0, hx + 12.0, hy + 12.0);
+                ctx.draw_text(&h.to_string(), num_tf, &text_rect, num_brush);
+            }
+
+            // 5. Rotating Hands
+            if span.is_some() {
+                let style_hand = ctx.device().create_stroke_style(
+                    &StrokeStyleBuilder::new()
+                        .start_cap(CapStyle::Round)
+                        .end_cap(CapStyle::Round)
+                        .line_join(LineJoin::Round),
+                )?;
+
+                // Start Hand (concentric circular origin anchor)
+                let p_start_tail = Vector2::new(c + 32.0 * theta_s.cos(), c + 32.0 * theta_s.sin());
+                let p_start_head = Vector2::new(c + 78.0 * theta_s.cos(), c + 78.0 * theta_s.sin());
+                let mut fig_start = PathBuilder::new(ctx.device())?.begin_hollow(p_start_tail);
+                fig_start = fig_start.line_to(p_start_head);
+                let path_start = fig_start.end_open().build()?;
+                ctx.draw_path_styled(&path_start, &accent_brush, 2.5, &style_hand);
+
+                ctx.fill_ellipse(&Ellipse::circle(p_start_head, 4.0), &accent_brush);
+                ctx.fill_ellipse(&Ellipse::circle(p_start_head, 2.0), &white_brush);
+
+                // End Hand (directional arrowhead pointer)
+                let p_end_tail = Vector2::new(c + 32.0 * theta_e.cos(), c + 32.0 * theta_e.sin());
+                let p_end_head = Vector2::new(c + 76.0 * theta_e.cos(), c + 76.0 * theta_e.sin());
+                let mut fig_end = PathBuilder::new(ctx.device())?.begin_hollow(p_end_tail);
+                fig_end = fig_end.line_to(p_end_head);
+                let path_end = fig_end.end_open().build()?;
+                ctx.draw_path_styled(&path_end, &accent_brush, 2.5, &style_hand);
+
+                let arrow_pts = [
+                    Vector2::new(c + 80.0 * theta_e.cos(), c + 80.0 * theta_e.sin()),
+                    Vector2::new(
+                        c + 72.0 * theta_e.cos() - 4.5 * theta_e.sin(),
+                        c + 72.0 * theta_e.sin() + 4.5 * theta_e.cos(),
+                    ),
+                    Vector2::new(
+                        c + 72.0 * theta_e.cos() + 4.5 * theta_e.sin(),
+                        c + 72.0 * theta_e.sin() - 4.5 * theta_e.cos(),
+                    ),
+                ];
+                if let Ok(arrow_path) = PathBuilder::new(ctx.device())?.polygon(arrow_pts) {
+                    ctx.fill_path(&arrow_path, &accent_brush);
+                }
+            }
+
+            // 6. Center Hub
+            ctx.fill_ellipse(
+                &Ellipse::circle(Vector2::new(c, c), 32.0),
+                &ctx.create_solid_brush(card_bg)?,
+            );
+            ctx.draw_ellipse(
+                &Ellipse::circle(Vector2::new(c, c), 32.0),
+                &divider_brush,
+                1.0,
+            );
+
+            let tf_hub_title = TextFormat::new_bold(&family, body_pt)?
+                .with_alignment(TextAlignment::Center)
+                .with_paragraph_alignment(ParagraphAlignment::Center);
+            let tf_hub_sub = TextFormat::new(&family, small_pt)?
+                .with_alignment(TextAlignment::Center)
+                .with_paragraph_alignment(ParagraphAlignment::Center);
+
+            match (span, shared.virtual_anchor.get()) {
+                (Some(_), Some(anc)) => {
+                    let rect_sub = Rect::new(c - 30.0, c - 15.0, c + 30.0, c);
+                    let rect_main = Rect::new(c - 30.0, c - 2.0, c + 30.0, c + 16.0);
+                    ctx.draw_text(tr("起点"), &tf_hub_sub, &rect_sub, &accent_brush);
+                    ctx.draw_text(
+                        &format!("{anc:02}:00"),
+                        &tf_hub_title,
+                        &rect_main,
+                        &text_brush,
+                    );
+                }
+                (Some((0, 23)), None) => {
+                    let rect = Rect::new(c - 30.0, c - 16.0, c + 30.0, c + 16.0);
+                    ctx.draw_text(tr("全天"), &tf_hub_title, &rect, &text_brush);
+                }
+                (Some((a, b)), None) => {
+                    if a == b {
+                        let rect_sub = Rect::new(c - 30.0, c - 15.0, c + 30.0, c);
+                        let rect_main = Rect::new(c - 30.0, c - 2.0, c + 30.0, c + 16.0);
+                        ctx.draw_text(&format!("{a:02}:00"), &tf_hub_title, &rect_sub, &text_brush);
+                        ctx.draw_text(tr("1 小时"), &tf_hub_sub, &rect_main, &subtle_brush);
+                    } else {
+                        let rect_top = Rect::new(c - 30.0, c - 15.0, c + 30.0, c);
+                        let rect_bot = Rect::new(c - 30.0, c - 2.0, c + 30.0, c + 16.0);
+                        let hours = b - a + 1;
+                        ctx.draw_text(
+                            &tf!("{} 小时", hours),
+                            &tf_hub_title,
+                            &rect_top,
+                            &text_brush,
+                        );
+                        ctx.draw_text(
+                            &format!("{a:02}:00–{:02}:00", b + 1),
+                            &tf_hub_sub,
+                            &rect_bot,
+                            &subtle_brush,
+                        );
+                    }
+                }
+                _ => {
+                    let rect = Rect::new(c - 30.0, c - 16.0, c + 30.0, c + 16.0);
+                    ctx.draw_text("—", &tf_hub_title, &rect, &subtle_brush);
+                }
+            }
+
+            Ok(())
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::donut_hit;
@@ -1406,5 +1923,23 @@ mod tests {
         assert_eq!(super::heat_cell_max(6), 19.0);
 
         assert!(super::heat_height(11.0, 6) > super::heat_height(11.0, 4));
+    }
+
+    #[test]
+    fn clock_hit_resolves_hours() {
+        use super::clock_hit;
+        assert_eq!(clock_hit(106.0, 14.0, 212.0), Some(0)); // 12 o'clock top
+        assert_eq!(clock_hit(198.0, 106.0, 212.0), Some(6)); // 3 o'clock right
+        assert_eq!(clock_hit(106.0, 198.0, 212.0), Some(12)); // 6 o'clock bottom
+        assert_eq!(clock_hit(14.0, 106.0, 212.0), Some(18)); // 9 o'clock left
+        assert_eq!(clock_hit(106.0, 106.0, 212.0), None); // center hub
+        assert_eq!(clock_hit(2.0, 2.0, 212.0), None); // outside
+
+        // 232px dial (center 116, slot radius 92..94)
+        assert_eq!(clock_hit(116.0, 24.0, 232.0), Some(0));
+        assert_eq!(clock_hit(208.0, 116.0, 232.0), Some(6));
+        assert_eq!(clock_hit(116.0, 208.0, 232.0), Some(12));
+        assert_eq!(clock_hit(24.0, 116.0, 232.0), Some(18));
+        assert_eq!(clock_hit(116.0, 116.0, 232.0), None);
     }
 }

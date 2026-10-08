@@ -1317,4 +1317,35 @@
   - `target/e2e/cal3/zoom_cal_grid.png`：日历第 7 日选中态 8x 像素放大，去除了白色描边后，圆角边缘与卡片底板浑然一体，边缘无噪点；
   - `target/e2e/cal3/zoom_hub_actual.png` / `zoom_hub_center.png`：表盘快速区间按键与中心 Hub 圆盘 8x 像素放大，1px 分隔描边与内衬圆盘紧密重叠，无亚像素缝隙。
 
+## S96 时钟拨选器虚拟化动画与起止区分化 ✅
+
+- **背景与痛点**：
+  1. **后台全盘扫描导致动画严重延迟卡顿**：点击时钟拨选器的整点时，由于 `range != Range::Today`，内存 Cube 拒绝提供小时统计，必须降级走 SQL 视图加载。旧代码中错误调用了 `start_scan`（触发对所有适配器磁盘文件的全量扫描，耗时 400ms~600ms），严重阻塞 UI 主线程和后台 Worker，造成动画卡顿与状态回显延迟；
+  2. **时钟拨选手势缺乏连贯转动动画**：原先指针切换为硬跳变，或因数据刷新打断重绘，缺乏顺畅的圆周旋转体验；
+  3. **起止端点缺乏强区分化**：用户难以直观分辨哪个整点是开始点（Start / Origin）、哪个是结束点（End / Destination），易产生混淆。
+- **改动范围**：
+  1. **后台数据重载与磁盘扫描彻底解耦**（`crates/ui/src/main.rs::reload_views`）：
+     - 引入轻量级 `reload_views(&mut self, context)`（`scan: false`），当 Cube 拒绝时仅查询 SQLite 视图，单次执行耗时由 400ms+ 降至 3ms 内；
+     - `Msg::ClockPick` 与 `Msg::ClockFullDay` 瞬时触发乐观虚拟更新与转动动画，数据加载在后台完全无感进行；
+  2. **Direct2D 虚拟化转动动画与最短圆周角插值**（`crates/ui/src/widgets.rs::ClockDialShared`, `ClockDialHandle`, `clock_dial`）：
+     - 引入 `ClockDialShared` 乐观虚拟状态控制器，将指针角度（`cur_start_hour`, `cur_end_hour`）与模型更新解耦；
+     - 采用最短圆周角差值算法：`((target - from + 12.0).rem_euclid(24.0)) - 12.0`，杜绝 0 点与 23 点跨界时的 360° 绕大圈异常；
+     - 280ms Cubic Ease-Out（`1.0 - (1.0 - t)^3`）平滑缓动，通过 `Invalidator` 驱动每秒高刷重绘，转动完成后停止重绘，0 空转 CPU 消耗；
+     - 起止点之间动态展开/收缩半透明 Accent 圆弧轨道（7px 宽，`Round` 线帽与拐角）；
+  3. **起始点与结束点极致区分化**（`crates/ui/src/widgets.rs`）：
+     - **起始点（Start / Origin）**：2.5px Accent 实线指针，指针尖端嵌入同心圆环锚点（4px Accent 外环 + 2px 纯白内销）；整点槽采用 14.5px 外光晕轮廓 + 12px Accent 底盘 + 内部微型白色锚定销 + 纯白加粗字体；
+     - **结束点（End / Destination）**：2.5px Accent 实线指针，尖端带有锐利定向三角形箭头（Directional Arrowhead）；整点槽采用 12px Accent 底盘 + 14px 白色目标靶环 + 外沿白色定向三角形箭头徽标；
+     - **单点待选态（Pending Anchor）**：中心 Hub 清晰标注「起点」标签与 `XX:00`，外圈显示起始锚点，引导用户继续点击另一端；
+     - **画布边界自适应与外边缘防裁切**：画布尺寸设定为 232×232 DIP，中心定位于 (116, 116)，槽位半径 94 DIP，确保 9 点（18:00）、12 点、3 点、6 点等外边缘指示器与靶环拥有充足内边距，零裁切。
+  4. **页面集成与单测**（`crates/ui/src/pages.rs`, `crates/ui/src/widgets.rs::tests`）：
+     - `pages.rs` 移除冗余旧版 XAML 表盘代码，接入 Direct2D `w::clock_dial`；
+     - 单元测试 `clock_hit_resolves_hours` 覆盖 212px 与 232px 尺寸的 24 小时极坐标命中与中心 Hub 边界。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 207 个测试全部通过（Core 166 + Setup 13 + UI 28）；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `rustfmt --edition 2024 --check crates/ui/src/widgets.rs crates/ui/src/pages.rs crates/ui/src/main.rs`：无格式差异。
+- **实测证据（Release GUI 真实渲染截屏）**：
+  - `target/e2e/cal3/clock_dial_animated.png`：1500 DIP 真实渲染完整视图，自选单日（10-08）并点选 09:00～19:00（10 小时），时钟拨选器与趋势图、日历完美呼应；
+  - `target/e2e/cal3/clock_dial_detail.png`：表盘特写截屏，起点 9 点同心锚点清晰可辨，终点 18 点（19:00 对应槽位）定向三角形箭头与靶环极具辨识度，中间 10～17 点弧形连接轨道顺畅平滑，中心 Hub 明确回显 10 小时与具体时间段。
+
 
