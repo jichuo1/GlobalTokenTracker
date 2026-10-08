@@ -69,13 +69,42 @@ pub fn slide_children(children: Vec<View>, slide: &Slide) -> Vec<View> {
 /// Card chrome: border + background + optional accent edge. All skin values
 /// come from `theme` — a skin swap restyles every card at once.
 pub fn card(theme: &Theme, content: View) -> View {
-    Border::new()
-        .background(theme.card_bg)
-        .border_brush(theme.card_border)
-        .border_thickness(theme.card_border_thickness())
-        .corner_radius(CornerRadius::uniform(theme.radius))
-        .padding(Thickness::uniform(theme.pad))
-        .content(content)
+    if theme.accent_edge {
+        Border::new()
+            .background(theme.card_bg)
+            .border_brush(theme.card_border)
+            .border_thickness(Thickness::uniform(1.0))
+            .corner_radius(CornerRadius::uniform(theme.radius))
+            .content(
+                Grid::new()
+                    .columns([GridLength::Auto, GridLength::STAR])
+                    .children([
+                        Border::new()
+                            .grid_column(0)
+                            .width(3.0)
+                            .background(theme.accent)
+                            .corner_radius(CornerRadius::new(
+                                (theme.radius - 1.0).max(0.0),
+                                0.0,
+                                (theme.radius - 1.0).max(0.0),
+                                0.0,
+                            ))
+                            .into(),
+                        Border::new()
+                            .grid_column(1)
+                            .padding(Thickness::uniform(theme.pad))
+                            .content(content),
+                    ]),
+            )
+    } else {
+        Border::new()
+            .background(theme.card_bg)
+            .border_brush(theme.card_border)
+            .border_thickness(theme.card_border_thickness())
+            .corner_radius(CornerRadius::uniform(theme.radius))
+            .padding(Thickness::uniform(theme.pad))
+            .content(content)
+    }
 }
 
 /// Icon + title + hairline rule — the line is the visual divider the design
@@ -342,11 +371,12 @@ pub fn trend_strip(
                 // Max label (top-left) + faint mid gridline.
                 let max_text = fmt::tokens_exact(max as u64);
                 ctx.draw_text(&max_text, &tf, &Rect::new(0.0, 0.0, 160.0, top), &ink);
-                let mid_y = top + plot_h * 0.5;
+                let mid_y = (top + plot_h * 0.5).floor() + 0.5;
+                let base_y = bottom.floor() + 0.5;
                 ctx.draw_line(Vector2::new(0.0, mid_y), Vector2::new(w, mid_y), &line, 1.0);
                 ctx.draw_line(
-                    Vector2::new(0.0, bottom),
-                    Vector2::new(w, bottom),
+                    Vector2::new(0.0, base_y),
+                    Vector2::new(w, base_y),
                     &line,
                     1.0,
                 );
@@ -386,7 +416,9 @@ pub fn trend_strip(
                     } else {
                         1.5
                     });
-                    let x = slot * i as f32 + (slot - bar_w) * 0.5;
+                    let x = (slot * i as f32 + (slot - bar_w) * 0.5).round();
+                    let y_top = (bottom - bh).round();
+                    let y_bot = bottom.round();
                     let lit = i == last || hover == Some(i);
                     let brush = ctx.create_solid_brush(ColorF::new(
                         accent.r,
@@ -395,13 +427,18 @@ pub fn trend_strip(
                         accent.a * if lit { 1.0 } else { 0.45 },
                     ))?;
                     let bar = windows_canvas::RoundedRect::new(
-                        Rect::new(x, bottom - bh, x + bar_w, bottom),
+                        Rect::new(x, y_top, x + bar_w, y_bot),
                         corner,
                         corner,
                     );
                     ctx.fill_rounded_rect(&bar, &brush);
                     if hover == Some(i) {
-                        ctx.draw_rounded_rect(&bar, &ink, 1.0);
+                        let hover_inset = windows_canvas::RoundedRect::new(
+                            Rect::new(x + 0.5, y_top + 0.5, x + bar_w - 0.5, y_bot - 0.5),
+                            (corner - 0.5).max(1.0),
+                            (corner - 0.5).max(1.0),
+                        );
+                        ctx.draw_rounded_rect(&hover_inset, &ink, 1.0);
                         // Hover detail top-right: "MM-DD · 1,234 tok".
                         ctx.draw_text(
                             &tf!(
@@ -462,8 +499,10 @@ pub fn trend_strip(
                     let legend_w = windows_canvas::TextLayout::new(legend_label, &tf, 200.0, top)
                         .map(|l| l.metrics().width + 20.0)
                         .unwrap_or(100.0);
-                    let lx = (max_end + 16.0).min((w - 220.0 - legend_w).max(max_end + 4.0));
-                    let ly = top * 0.5;
+                    let lx = (max_end + 16.0)
+                        .min((w - 220.0 - legend_w).max(max_end + 4.0))
+                        .round();
+                    let ly = (top * 0.5).round();
                     ctx.draw_line(
                         Vector2::new(lx, ly),
                         Vector2::new(lx + 14.0, ly),
@@ -516,12 +555,18 @@ pub fn trend_strip(
                     let pw = 216.0f32;
                     let ph = 26.0 + lines.len() as f32 * line_h + 10.0;
                     let px = (slot * i as f32 + slot * 0.5 - pw * 0.5)
-                        .clamp(4.0, (w - pw - 4.0).max(4.0));
-                    let py = top + 2.0;
+                        .clamp(4.0, (w - pw - 4.0).max(4.0))
+                        .round();
+                    let py = (top + 2.0).round();
                     let panel = windows_canvas::RoundedRect::new(
                         Rect::new(px, py, px + pw, py + ph),
                         7.0,
                         7.0,
+                    );
+                    let frame_panel = windows_canvas::RoundedRect::new(
+                        Rect::new(px + 0.5, py + 0.5, px + pw - 0.5, py + ph - 0.5),
+                        6.5,
+                        6.5,
                     );
                     // Near-opaque dark card (Fluent tooltip idiom; reads on both themes).
                     let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
@@ -529,7 +574,7 @@ pub fn trend_strip(
                     let head = ctx.create_solid_brush(accent)?;
                     let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
                     ctx.fill_rounded_rect(&panel, &bg);
-                    ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                    ctx.draw_rounded_rect(&frame_panel, &frame, 1.0);
                     ctx.draw_text(
                         &day_label,
                         &tf,
@@ -755,14 +800,28 @@ pub fn heatmap(
 
                 for (i, d) in days.iter().enumerate() {
                     let (c, r) = (i / 7, i % 7);
-                    let x = x0 + c as f32 * pitch;
-                    let y = y0 + r as f32 * pitch;
+                    let x = (x0 + c as f32 * pitch).round();
+                    let y = (y0 + r as f32 * pitch).round();
+                    let cell_sz = cell.round();
+                    let corner = if cols_tier >= 6 {
+                        3.5
+                    } else if cols_tier >= 5 {
+                        3.0
+                    } else {
+                        2.5
+                    };
                     let lv = heat::level(metric.value(d), &t);
                     let brush = level_brush(lv)?;
-                    let rr = RoundedRect::new(Rect::new(x, y, x + cell, y + cell), 2.5, 2.5);
+                    let rr =
+                        RoundedRect::new(Rect::new(x, y, x + cell_sz, y + cell_sz), corner, corner);
                     ctx.fill_rounded_rect(&rr, &brush);
                     if hover == Some(i) {
-                        ctx.draw_rounded_rect(&rr, &ink, 1.5);
+                        let hover_rr = RoundedRect::new(
+                            Rect::new(x + 0.5, y + 0.5, x + cell_sz - 0.5, y + cell_sz - 0.5),
+                            (corner - 0.5).max(1.0),
+                            (corner - 0.5).max(1.0),
+                        );
+                        ctx.draw_rounded_rect(&hover_rr, &ink, 1.0);
                     }
                 }
 
@@ -808,16 +867,22 @@ pub fn heatmap(
                     &Rect::new(lx, by, lx + word_w(less) + 4.0, by + bottom),
                     &ink,
                 );
-                lx += word_w(less) + 6.0;
+                lx = (lx + word_w(less) + 6.0).round();
                 for lv in 0..5u8 {
                     let brush = level_brush(lv)?;
+                    let l_cell = legend_cell.round();
                     let rr = RoundedRect::new(
-                        Rect::new(lx, by + 1.0, lx + legend_cell, by + 1.0 + legend_cell),
+                        Rect::new(
+                            lx,
+                            (by + 1.0).round(),
+                            lx + l_cell,
+                            (by + 1.0).round() + l_cell,
+                        ),
                         2.0,
                         2.0,
                     );
                     ctx.fill_rounded_rect(&rr, &brush);
-                    lx += legend_cell + 2.0;
+                    lx += l_cell + 2.0;
                 }
                 ctx.draw_text(more, &tf, &Rect::new(lx + 4.0, by, w, by + bottom), &ink);
 
@@ -836,20 +901,25 @@ pub fn heatmap(
                         x0 + (i / 7) as f32 * pitch + cell * 0.5,
                         y0 + (i % 7) as f32 * pitch,
                     );
-                    let px = (cx - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
-                    let below = cy + pitch + 4.0;
+                    let px = (cx - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0)).round();
+                    let below = (cy + pitch + 4.0).round();
                     let py = if below + ph <= h {
                         below
                     } else {
-                        (cy - ph - 4.0).max(2.0)
+                        (cy - ph - 4.0).max(2.0).round()
                     };
                     let panel = RoundedRect::new(Rect::new(px, py, px + pw, py + ph), 7.0, 7.0);
+                    let frame_panel = RoundedRect::new(
+                        Rect::new(px + 0.5, py + 0.5, px + pw - 0.5, py + ph - 0.5),
+                        6.5,
+                        6.5,
+                    );
                     let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
                     let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
                     let head = ctx.create_solid_brush(accent)?;
                     let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
                     ctx.fill_rounded_rect(&panel, &bg);
-                    ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                    ctx.draw_rounded_rect(&frame_panel, &frame, 1.0);
                     ctx.draw_text(
                         &d.date,
                         &tf,
@@ -1013,7 +1083,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                         let lit = hovered == Some(i);
                         let ro = if lit { r_out + 2.5 } else { r_out };
                         let n =
-                            (((a1c - a0) / (std::f32::consts::TAU / 120.0)).ceil() as usize).max(2);
+                            (((a1c - a0) / (std::f32::consts::TAU / 240.0)).ceil() as usize).max(2);
                         let mut pts = Vec::with_capacity(2 * (n + 1));
                         for k in 0..=n {
                             let t = a0 + (a1c - a0) * k as f32 / n as f32;
@@ -1058,17 +1128,22 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                     let ar = r_out + 16.0;
                     let (bx, by) = (cx + ar * am.cos(), cy + ar * am.sin());
                     let (pw, ph) = (150.0f32, 58.0f32);
-                    let px = (bx - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
-                    let py = (by - ph * 0.5).clamp(4.0, (h - ph - 4.0).max(4.0));
+                    let px = (bx - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0)).round();
+                    let py = (by - ph * 0.5).clamp(4.0, (h - ph - 4.0).max(4.0)).round();
                     let panel = windows_canvas::RoundedRect::new(
                         Rect::new(px, py, px + pw, py + ph),
                         7.0,
                         7.0,
                     );
+                    let frame_panel = windows_canvas::RoundedRect::new(
+                        Rect::new(px + 0.5, py + 0.5, px + pw - 0.5, py + ph - 0.5),
+                        6.5,
+                        6.5,
+                    );
                     let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
                     let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
                     ctx.fill_rounded_rect(&panel, &bg);
-                    ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                    ctx.draw_rounded_rect(&frame_panel, &frame, 1.0);
                     let short: String = if name.chars().count() > 18 {
                         crate::tf!("{}…", name.chars().take(17).collect::<String>())
                     } else {

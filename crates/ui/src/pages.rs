@@ -299,7 +299,10 @@ fn cal_day(
         // brush so the whole cell still receives pointer input.
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)));
     if endpoint {
-        cell = cell.background(Brush::Solid(rgba(accent, 1.0)));
+        cell = cell
+            .background(Brush::Solid(rgba(accent, 1.0)))
+            .border_brush(Brush::Solid(Color::argb(72, 255, 255, 255)))
+            .border_thickness(Thickness::uniform(1.0));
     } else if inside {
         cell = cell.background(Brush::Solid(rgba(accent, 0.30)));
     } else if day == today {
@@ -502,7 +505,10 @@ fn hour_dial(
             // Same hit-test rule as the calendar cells: never a null brush.
             .background(Brush::Solid(Color::argb(0, 0, 0, 0)));
         if endpoint {
-            slot = slot.background(Brush::Solid(rgba(accent, 1.0)));
+            slot = slot
+                .background(Brush::Solid(rgba(accent, 1.0)))
+                .border_brush(Brush::Solid(Color::argb(72, 255, 255, 255)))
+                .border_thickness(Thickness::uniform(1.0));
         } else if inside {
             slot = slot.background(Brush::Solid(rgba(accent, 0.30)));
         }
@@ -538,6 +544,8 @@ fn hour_dial(
             .height(hub)
             .corner_radius(CornerRadius::uniform(hub / 2.0))
             .background(theme.card_bg)
+            .border_brush(theme.divider)
+            .border_thickness(Thickness::uniform(1.0))
             .canvas_left(c - hub / 2.0)
             .canvas_top(c - hub / 2.0)
             .content(

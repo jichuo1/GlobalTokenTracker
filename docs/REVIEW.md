@@ -1254,3 +1254,34 @@
   - `target/e2e/cal3/highres-overview-last30-w2500.png`：2500 DIP 30 天总览，多模型切片下 4 环图左环右字，长模型名完整无截断；
   - `target/e2e/cal3/highres-detail-settled.png`：1500 DIP 明细表启用 `DETAIL_PLAN_WIDE`，时间、工具、token 数字和成本列宽宽裕对齐；
   - `target/e2e/cal3/highres-price-settled.png`：1500 DIP 价格表启用 `PRICE_PLAN_WIDE`，模型名与价格列宽均匀舒展。
+
+## S94 控件边缘绘制优化 ✅
+
+- **背景与痛点**：Direct2D 画布（`TrendStrip`、`Heatmap`、`Donut`）与界面容器控件（`Card`、`Border`、`Hub`、`Cell`）在绘制 1.0px 线条、多边形圆弧与描边时，存在亚像素模糊、描边外溢与粗糙折角问题：① D2D `DrawLine` 落在整数坐标时跨越两个物理像素呈现半透明双行发虚；② 柱体与浮层 Tooltip 矩形外框在 `DrawRoundedRectangle(1.0)` 时向内外各扩 0.5px，溢出到柱体或格子外造成脏边；③ 热力图各单元格坐标未取整，存在微小浮点亚像素抖动；④ 环形图扇区剖分密度为 120 段（~3° 步进），高分大屏下圆弧多边形棱角可见；⑤ 卡片 `accent_edge` 原先仅为占位布尔量，未实现真实圆角匹配的强调色边；⑥ 24 小时表盘中心 Hub 圆盘缺少边框，与表盘灰底边界模糊；选中的日历与时钟端点高亮缺乏锐利描边。
+- **改动范围**：
+  1. **卡片强调色侧边与圆角精准嵌套**（`crates/ui/src/widgets.rs::card`）：
+     - 当 `theme.accent_edge` 为 true 时，内嵌 3px 宽 `theme.accent` 色条；
+     - 左上与左下圆角采用 `(theme.radius - 1.0).max(0.0)` 精确吻合外框圆角，实现零溢出、零缝隙的卡片左侧 Accent 条。
+  2. **趋势图（Trend Strip）像素对齐与内缩描边**（`crates/ui/src/widgets.rs::trend_strip`）：
+     - 中间虚线与底基准线采用 `y.floor() + 0.5` 半像素对齐，1.0px 线条精准落在单物理像素行，彻底根除发虚；
+     - 柱体坐标 `x`, `y_top`, `y_bot` 全面 `.round()` 像素对齐；悬停外框采用 0.5px 几何内缩（`Rect::new(x + 0.5, y_top + 0.5, x + bar_w - 0.5, y_bot - 0.5)`），外描边严合柱体，杜绝脏边；
+     - 图例折线、指示器坐标取整；悬停 Tooltip 框坐标取整且描边外框内缩 0.5px。
+  3. **活跃热力图（Heatmap）格子像素对齐与圆角平滑**（`crates/ui/src/widgets.rs::heatmap`）：
+     - 各单元格 `x`, `y`, `cell_sz` 全面 `.round()` 取整，根除行列间亚像素抖动偏差；
+     - 单元格圆角随列宽分档平滑过渡（2.5 / 3.0 / 3.5 DIP）；悬停描边框内缩 0.5px，不污染单元格间距；
+     - 图例样本色块与 Tooltip 浮层采用同样精细内缩描边。
+  4. **环形图（Donut）曲线剖分加倍与气泡内缩**（`crates/ui/src/widgets.rs::donut`）：
+     - 扇区圆弧多边形剖分密度从 120 段提升至 240 段（`TAU / 240.0`），步进由 ~3° 收紧至 ~1.5°，高分屏下圆弧极致平滑无折角；
+     - 悬停浮层气泡框坐标像素取整，1px 边框采用 0.5px 内缩绘制。
+  5. **表盘中心 Hub 与端点选中边缘锐化**（`crates/ui/src/pages.rs`）：
+     - 表盘中心 Hub 圆盘补充 `.border_brush(theme.divider).border_thickness(Thickness::uniform(1.0))`，强化枢纽圆盘外轮廓；
+     - 24 小时表盘整点槽端点与日历端点单元格增加 `Color::argb(72, 255, 255, 255)` 1px 微光边框，提升实心 Accent 边界锐度与质感。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 206 个测试全部通过（Core 166 + Setup 13 + UI 27）；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `rustfmt --edition 2024 --check crates/ui/src/widgets.rs crates/ui/src/pages.rs`：无格式差异。
+- **实测证据（Release GUI 真实渲染截屏）**：
+  - `target/e2e/cal3/edge-test-w1500.png`：1500 DIP 视图，趋势图柱体与基准线极为锐利，热力图格子无亚像素锯齿，环形图圆弧极度平滑、气泡浮层无 1px 描边溢出；
+  - `target/e2e/cal3/edge-custom-w1500.png`：自定义视图，卡片左侧 Accent 条圆角紧密贴合外框，日历选中端点与 24 小时表盘端点槽带精致微光轮廓，中心 Hub 具清晰 1px 分隔线边界；
+  - `target/e2e/cal3/edge-tip-w1500.png`：小时趋势柱悬停 Tooltip 框体像素对齐与 0.5px 内缩描边，文字与深色卡片边界对比清晰无杂色。
+
