@@ -1436,6 +1436,45 @@
   - `installer/package.ps1`：打包生成新版本安装程序覆盖安装；
   - 实测运行验证：`WinSta0\Default` 桌面上主窗口 `HWND=3541640` 正常呈现，`Vis=True`，标题为 `GlobalTokenTracker`，进程正常响应。
 
+## S100 SQLite 零拷贝内存映射优化与历史事件分卷冷归档机制 ✅
+
+- **背景与痛点**：
+  - 用户指令：“现在加上吧，前瞻储备，做完记得review”。
+  - 承接《GlobalTokenTracker 深度性能 Review 报告》第 8 节中的两项前瞻性架构优化储备，针对数十万至百万级事件极端规模场景未雨绸缪：
+    1. **SQLite 零拷贝内存映射与内存参数优化**：为数据库引擎注入 `PRAGMA mmap_size`、`PRAGMA temp_store`、`PRAGMA cache_size` 与 `PRAGMA busy_timeout`，进一步消除冷读取拷贝损耗，加速多维分析折叠与长历史扫描；
+    2. **历史数据冷热分层分卷归档（Log Archiving）**：建立冷热数据分层机制，允许将超过保存天数（如 90 天或 30 天）的海量原始事件明细安全导出至独立的冷数据库卷（如 `backups/archive-YYYYMMDD.db`），同时在主库保留完整的 `daily_rollups` 聚合统计，实现工作集轻量化与毫秒级极速响应。
+- **改动范围**：
+  1. **SQLite 高性能内存映射与参数注入**（`crates/core/src/store/schema.sql` & `crates/core/src/store/mod.rs`）：
+     - 在 `schema.sql` 模式定义与连接初始化 `apply_pragmas(&self)` 中统一执行：
+       - `PRAGMA mmap_size = 67108864;`（64MB 零拷贝内存映射，消除操作系统内核态到用户态的数据缓冲二次拷贝）；
+       - `PRAGMA temp_store = MEMORY;`（临时表、排序与分组完全位于内存中，极大提升 Cube 多维折叠性能）；
+       - `PRAGMA cache_size = -64000;`（64MB 专用页缓存池）；
+       - `PRAGMA busy_timeout = 5000;`（5 秒锁争用自愈等待，避免高频并发下的锁异常）。
+  2. **跨库原子附加归档与冷卷导出引擎**（`crates/core/src/store/query.rs` & `crates/core/src/store/mod.rs`）：
+     - 定义结果结构体 `ArchiveReport { archived_events, archive_path, cutoff_ms }`；
+     - 实现 `pub fn archive_events(&self, before_ms: i64, archive_path: &Path) -> Result<ArchiveReport>`：
+       - 利用原生 `ATTACH DATABASE '{path}' AS archive;` 在 SQLite 引擎层实现极速跨库数据流转，规避应用层数据反序列化与重复分配内存；
+       - 在归档库幂等创建 `usage_events` 镜像表及时间、工具复合索引；
+       - 采用单一事务执行 `INSERT OR IGNORE INTO archive.usage_events SELECT * FROM main.usage_events WHERE ts_start < ?1;` 与 `DELETE FROM main.usage_events WHERE ts_start < ?1;`，确保归档的幂等性与绝对原子性；
+       - 事务提交后安全执行 `DETACH DATABASE archive;`；
+     - 增加 `default_archive_path(&self, cutoff_ms: i64) -> PathBuf`，默认规范生成 `<data_dir>/backups/archive-YYYYMMDD.db`。
+  3. **CLI 归档子命令与空间回收**（`crates/cli/src/main.rs`）：
+     - 新增 `archive` 子命令：`globaltokentracker-cli archive [--keep-days 90] [--out <path>] [--vacuum]`；
+     - 执行前自动调用 `rebuild_rollups` 校验并巩固聚合数据，执行 `archive_events` 无损转移旧明细，支持 `--vacuum` 原地紧凑收缩主账本文件。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 211 个测试用例 100% 通过（Core 170 + Setup 13 + UI 28，新增 `sqlite_pragmas_applied` 与 `archive_events_transfers_data_preserves_rollups_and_removes_from_main` 单元测试）；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `cargo fmt --check`：格式完全合规；
+  - `installer/package.ps1`：成功构建新版单文件安装程序 `GlobalTokenTracker-Setup-0.4.0-win-x64.exe`（10.48 MB）并安装运行。
+- **实测证据（真机生产数据端到端验证）**：
+  - **Pragma 验证**：在真机文件库上查询验证 `PRAGMA mmap_size = 67108864`、`PRAGMA temp_store = 2 (MEMORY)`、`PRAGMA busy_timeout = 5000` 均精准生效；
+  - **归档端到端验证**：使用真机 7.3 万条生产数据副本执行 `archive --keep-days 30 --out cold.db --vacuum`：
+    - `daily_rollups: 262 rows verified/rebuilt before archive`（262 天日级聚合数据 100% 完整留存）；
+    - `archived 34536 raw events older than 30d -> ...\cold.db (rollups preserved)`（34,536 条 30 天前原始事件零误差导出至冷库并从主库移出）；
+    - `ledger vacuumed and compacted`（主库碎片页面彻底回收紧凑）；
+  - **前台 UI 运行验证**：UI 进程 PID 45804 在 `WinSta0\Default` 桌面平稳运行，内存仅 173MB，响应敏捷，界面交互正常。
+
+
 
 
 

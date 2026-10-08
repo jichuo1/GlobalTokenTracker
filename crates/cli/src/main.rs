@@ -70,6 +70,18 @@ enum Cmd {
         #[arg(long)]
         vacuum: bool,
     },
+    /// Archive raw events older than --keep-days to a cold archive DB (preserves rollups in ledger).
+    Archive {
+        /// Retention threshold in days (events older than this are moved to archive).
+        #[arg(long, default_value_t = 90)]
+        keep_days: i64,
+        /// Archive database destination (default: <data_dir>/backups/archive-YYYYMMDD.db).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Reclaim file space in ledger afterwards.
+        #[arg(long, default_value_t = true)]
+        vacuum: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -190,6 +202,31 @@ fn main() -> Result<()> {
             if vacuum {
                 engine.store.vacuum()?;
                 println!("vacuumed");
+            }
+        }
+        Cmd::Archive {
+            keep_days,
+            out,
+            vacuum,
+        } => {
+            let n = engine.store.rebuild_rollups(&local_offset())?;
+            println!("daily_rollups: {n} rows verified/rebuilt before archive");
+            let cutoff = jiff::Zoned::now()
+                .checked_sub(jiff::SignedDuration::from_hours(keep_days * 24))
+                .unwrap()
+                .timestamp()
+                .as_millisecond();
+            let dest = out.unwrap_or_else(|| engine.store.default_archive_path(cutoff));
+            let r = engine.store.archive_events(cutoff, &dest)?;
+            println!(
+                "archived {} raw events older than {}d -> {} (rollups preserved)",
+                r.archived_events,
+                keep_days,
+                r.archive_path.display()
+            );
+            if vacuum {
+                engine.store.vacuum()?;
+                println!("ledger vacuumed and compacted");
             }
         }
     }
