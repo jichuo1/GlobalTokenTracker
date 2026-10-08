@@ -221,6 +221,10 @@ pub struct Shell {
     /// Bumped whenever the auto-check chain is re-armed — a timer carrying an
     /// older value belongs to a cancelled chain and is ignored.
     update_gen: u64,
+    /// Bumped whenever the periodic refresh timer is re-armed or cancelled.
+    refresh_gen: u64,
+    /// Bumped whenever the source file watcher is re-armed or cancelled.
+    watch_gen: u64,
     update_banner_dismissed: bool,
     /// An update-check request is in flight (auto checks leave `update`
     /// untouched, so `Checking` alone can't guard against overlap).
@@ -243,9 +247,10 @@ pub enum MenuKind {
 pub enum Msg {
     Loaded(LoadOutcome),
     Failed(String),
-    Tick,
+    Tick(u64),
     Rescan,
-    WatchFired,
+    WatchFired(u64),
+    WatchFallback(u64),
     Tray(tray::TrayAction),
     Nav(Option<String>),
     DetailPage(i64),
@@ -607,16 +612,16 @@ fn short_error(e: &str) -> String {
     out
 }
 
-/// Arms one periodic-refresh timer. `secs == 0` (仅文件变更) skips arming —
+/// Arms one periodic-refresh timer of generation `gen_id`. `secs == 0` (仅文件变更) skips arming —
 /// the file watcher still live-refreshes on source changes.
-fn arm_refresh(context: &ComponentContext<Shell>, secs: u64) {
+fn arm_refresh(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
     if secs == 0 {
         return;
     }
     context.spawn_background(move |_| {
         power::worker("gtt-timer");
         std::thread::sleep(std::time::Duration::from_secs(secs));
-        Msg::Tick
+        Msg::Tick(gen_id)
     });
 }
 
@@ -634,21 +639,26 @@ fn source_roots() -> Vec<PathBuf> {
 }
 
 /// Live refresh: block on notify events, debounce, then report once.
-fn arm_watcher(context: &ComponentContext<Shell>) {
+fn arm_watcher(context: &ComponentContext<Shell>, gen_id: u64) {
     let roots = source_roots();
     if roots.is_empty() {
         return;
     }
     context.spawn_background(move |token| {
         power::worker("gtt-watch");
-        diag!("[watch] armed on {} roots: {:?}", roots.len(), roots);
+        diag!(
+            "[watch] armed (gen {}) on {} roots: {:?}",
+            gen_id,
+            roots.len(),
+            roots
+        );
         if watch::wait_for_change(&roots, &token) {
-            Msg::WatchFired
+            Msg::WatchFired(gen_id)
         } else {
             // Watch failed/cancelled — fall back to a slow poll so changes are
-            // still picked up eventually.
+            // still picked up eventually in file-watch mode.
             std::thread::sleep(std::time::Duration::from_secs(120));
-            Msg::Tick
+            Msg::WatchFallback(gen_id)
         }
     });
 }
@@ -715,8 +725,10 @@ impl Component for Shell {
         });
         // The watcher is the refresh source only in 仅文件变更 mode; in
         // timer mode per-file writes would defeat the configured cadence.
+        let refresh_gen = 0u64;
+        let watch_gen = 0u64;
         if config.refresh_secs == 0 {
-            arm_watcher(context);
+            arm_watcher(context, watch_gen);
         }
         let tray = tray::install();
         if tray.is_some() {
@@ -762,6 +774,8 @@ impl Component for Shell {
             scanning: true,
             pending_rescan: false,
             last_error: None,
+            refresh_gen,
+            watch_gen,
             app_filter: config.apps.clone(),
             model_filter: config.models.clone(),
             config,
@@ -806,6 +820,10 @@ impl Component for Shell {
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
             Msg::Loaded(outcome) => {
+                let is_real_scan = match &outcome {
+                    LoadOutcome::Fresh(s) => s.scanned,
+                    LoadOutcome::Unchanged { .. } => true,
+                };
                 let mut fresh = false;
                 let mut startup_snapshot = false;
                 let price_due = match outcome {
@@ -920,8 +938,14 @@ impl Component for Shell {
                 } else if self.pending_rescan {
                     self.pending_rescan = false;
                     self.start_scan(context);
-                } else {
-                    arm_refresh(context, self.config.refresh_secs);
+                } else if self.config.refresh_secs > 0 {
+                    // Only re-arm timer if this load was an actual disk scan!
+                    // (Fast reload_views has scanned=false; leaving views_stale or filters changed
+                    // must never multiply or restart the 30s cadence).
+                    if is_real_scan {
+                        self.refresh_gen += 1;
+                        arm_refresh(context, self.refresh_gen, self.config.refresh_secs);
+                    }
                 }
             }
             Msg::Failed(e) => {
@@ -932,12 +956,24 @@ impl Component for Shell {
                 if self.pending_rescan {
                     self.pending_rescan = false;
                     self.start_scan(context);
-                } else {
-                    arm_refresh(context, self.config.refresh_secs);
+                } else if self.config.refresh_secs > 0 {
+                    self.refresh_gen += 1;
+                    arm_refresh(context, self.refresh_gen, self.config.refresh_secs);
                 }
             }
-            Msg::Tick => {
-                self.start_scan(context);
+            Msg::Tick(gen_id) => {
+                if gen_id != self.refresh_gen || self.config.refresh_secs == 0 {
+                    diag!(
+                        "[timer] dropped tick: gen {} (current {}), refresh_secs={}",
+                        gen_id,
+                        self.refresh_gen,
+                        self.config.refresh_secs
+                    );
+                } else if self.scanning {
+                    self.pending_rescan = true;
+                } else {
+                    self.start_scan(context);
+                }
             }
             Msg::Rescan => {
                 // Manual refresh dismisses an open picker — the user moved on.
@@ -947,6 +983,10 @@ impl Component for Shell {
                 // the aggregates from the raw events.
                 self.cube_rebuild = true;
                 globaltokentracker_core::adapters::forget_scan_memos();
+                // Invalidate in-flight timer so manual refresh resets the countdown cleanly
+                if self.config.refresh_secs > 0 {
+                    self.refresh_gen += 1;
+                }
                 self.start_scan(context);
             }
             Msg::SetRange(r) => {
@@ -1120,17 +1160,18 @@ impl Component for Shell {
                 if REFRESH_OPTIONS.iter().any(|(s, _)| *s == secs)
                     && secs != self.config.refresh_secs
                 {
-                    let was_off = self.config.refresh_secs == 0;
                     self.config.refresh_secs = secs;
                     self.config.save();
+                    self.refresh_gen += 1;
+                    self.watch_gen += 1;
                     if secs == 0 {
                         // Entering 仅文件变更: the watcher (which lapses in
                         // timer mode) becomes the refresh source again.
-                        arm_watcher(context);
-                    } else if was_off && !self.scanning {
-                        // Leaving it: kick one timer now so the new cadence
+                        arm_watcher(context, self.watch_gen);
+                    } else if !self.scanning {
+                        // In timer mode: kick one timer now so the new cadence
                         // starts without waiting for the next scan to end.
-                        arm_refresh(context, secs);
+                        arm_refresh(context, self.refresh_gen, secs);
                     }
                 }
                 // Single-select semantics: a pick light-dismisses the panel.
@@ -1391,16 +1432,31 @@ impl Component for Shell {
                     self.arm_canvas_stage(context, 16);
                 }
             }
-            Msg::WatchFired => {
-                diag!("[watch] fired, scanning={}", self.scanning);
+            Msg::WatchFired(gen_id) => {
+                diag!("[watch] fired (gen {}), scanning={}", gen_id, self.scanning);
                 // Only 仅文件变更 mode scans on file events — in timer mode
-                // the next Tick picks up everything, and this one in-flight
+                // the next Tick picks up everything, and any in-flight
                 // watcher lapses (not re-armed).
-                if self.config.refresh_secs == 0 {
-                    arm_watcher(context);
+                if self.config.refresh_secs == 0 && gen_id == self.watch_gen {
+                    self.watch_gen += 1;
+                    arm_watcher(context, self.watch_gen);
                     if self.scanning {
                         self.pending_rescan = true;
                     } else {
+                        self.start_scan(context);
+                    }
+                }
+            }
+            Msg::WatchFallback(gen_id) => {
+                diag!(
+                    "[watch] fallback fired (gen {}), scanning={}",
+                    gen_id,
+                    self.scanning
+                );
+                if self.config.refresh_secs == 0 && gen_id == self.watch_gen {
+                    self.watch_gen += 1;
+                    arm_watcher(context, self.watch_gen);
+                    if !self.scanning {
                         self.start_scan(context);
                     }
                 }
@@ -2429,9 +2485,55 @@ impl Shell {
 }
 
 /// Process start — the reference for the `[startup]` diagnostics.
+#[cfg(windows)]
+struct SingleInstanceGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn ensure_single_instance() -> Option<SingleInstanceGuard> {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "Local\\GlobalTokenTracker_SingleInstance_Mutex\0"
+        .encode_utf16()
+        .collect();
+
+    unsafe {
+        let handle = CreateMutexW(std::ptr::null(), 1, name.as_ptr());
+        if handle.is_null() {
+            return None;
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(handle);
+            tray::focus_existing_window();
+            std::process::exit(0);
+        }
+        Some(SingleInstanceGuard { handle })
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_single_instance() -> Option<()> {
+    Some(())
+}
+
+/// Process start — the reference for the `[startup]` diagnostics.
 static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 fn main() {
+    let _instance_guard = ensure_single_instance();
     START.get_or_init(std::time::Instant::now);
     #[cfg(windows)]
     if diag_enabled() {

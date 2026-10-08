@@ -1450,17 +1450,22 @@ fn refresh_menu_items(theme: &Theme, secs: u64, ctx: &mut ViewContext<Shell>) ->
     let mut rows: Vec<View> = Vec::with_capacity(REFRESH_OPTIONS.len());
     for (s, label) in REFRESH_OPTIONS {
         rows.push(
-            RadioButton::new()
-                .group_name("refresh-cadence")
-                .is_checked(s == secs)
-                .on_checked(ctx.callback(move |on: bool| {
-                    if on {
-                        Msg::SetRefreshSecs(s)
-                    } else {
-                        Msg::Noop
-                    }
-                }))
-                .content(TextBlock::new().text(tr(label)).font_size(theme.body_size)),
+            Border::new()
+                .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
+                .on_pointer_pressed(ctx.callback(move |_: PointerEventInfo| Msg::SetRefreshSecs(s)))
+                .content(
+                    RadioButton::new()
+                        .group_name("refresh-cadence")
+                        .is_checked(s == secs)
+                        .on_checked(ctx.callback(move |on: bool| {
+                            if on {
+                                Msg::SetRefreshSecs(s)
+                            } else {
+                                Msg::Noop
+                            }
+                        }))
+                        .content(TextBlock::new().text(tr(label)).font_size(theme.body_size)),
+                ),
         );
     }
     rows

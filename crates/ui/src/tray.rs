@@ -126,6 +126,62 @@ pub fn focus_main_window() {
 #[cfg(not(windows))]
 pub fn focus_main_window() {}
 
+/// Focus any existing instance of GlobalTokenTracker running on the desktop.
+#[cfg(windows)]
+pub fn focus_existing_window() {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, EnumWindows, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    };
+    const TITLE: &[u16] = &[
+        0x0047, 0x006C, 0x006F, 0x0062, 0x0061, 0x006C, 0x0054, 0x006F, 0x006B, 0x0065, 0x006E,
+        0x0054, 0x0072, 0x0061, 0x0063, 0x006B, 0x0065, 0x0072, // "GlobalTokenTracker"
+    ];
+    struct Ctx {
+        my_pid: u32,
+        found: HWND,
+    }
+    unsafe extern "system" fn cb(hwnd: HWND, lp: isize) -> i32 {
+        unsafe {
+            let ctx = &mut *(lp as *mut Ctx);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == ctx.my_pid {
+                return 1;
+            }
+            let n = GetWindowTextLengthW(hwnd);
+            if n != TITLE.len() as i32 {
+                return 1;
+            }
+            let mut buf = [0u16; 64];
+            if GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) == n
+                && buf[..n as usize] == *TITLE
+            {
+                ctx.found = hwnd;
+                return 0; // stop enumeration
+            }
+            1
+        }
+    }
+    unsafe {
+        let mut ctx = Ctx {
+            my_pid: GetCurrentProcessId(),
+            found: std::ptr::null_mut(),
+        };
+        EnumWindows(Some(cb), &mut ctx as *mut Ctx as isize);
+        if !ctx.found.is_null() {
+            AllowSetForegroundWindow(u32::MAX);
+            ShowWindow(ctx.found, SW_RESTORE);
+            SetForegroundWindow(ctx.found);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn focus_existing_window() {}
+
 /// Hide the main window — Win32 `SW_HIDE` works where `WindowRef` (0.100.0)
 /// exposes nothing. Tray icon keeps the process reachable; left click or
 /// "显示" restores via `focus_main_window` (SW_RESTORE unhides).

@@ -1384,5 +1384,39 @@
     - `gemini_antigravity`：1244 条事件，输入 8.80M tokens，输出 566K tokens，缓存读 158.74M tokens，精准估算计费 **$20.63**（原先为 $0.00 unpriced）；
     - `qoder`：112 条计费交互，精准统计 **875.7 credits** 点数（涵盖 `smodel` 与 `ultimate` 模型），彻底清除旧版 130 余条 0 值死数据。
 
+## S98 刷新周期节流与文件监视严格隔离修复 ✅
+
+- **背景与痛点**：
+  - 用户反馈：“同步数据的时间应该和刷新时间一致，而不是即使设置了每 30 秒刷新仍然是每一条消息出来之后就转圈同步一下数据”。
+  - 核心根因定位剖析：
+    1. **多重实例并发竞态（Multi-Instance Race）**：原程序缺少进程级互斥体（Single-Instance Mutex），多次启动或自启会在后台累积多个 `globaltokentracker-ui.exe` 进程，多个进程持有各自的定时器与数据库扫描，导致界面频繁转圈。
+    2. **定时器无限叠加泄露（Timer Multiplication Leak）**：`arm_refresh` 未设代际序号（`refresh_gen`），在视图重算、价目同步或初始化加载（`reload_views`、`Msg::Loaded`）时重复创建后台休眠线程，使单进程累积多个 timer 线程，将 30 秒周期切碎为高频触发。
+    3. **文件监视（Watcher）与定时器（Timer）职责未绝对隔离**：文件监视器在定时刷新模式下未完全失效，旧监视线程未带代际校验，且在失败超时时错误回退到触发 `Msg::Tick`，使得外部 AI 对话写入日志文件时立刻触发扫描。
+    4. **刷新菜单单选项交互阻断**：WinUI 3 单选按钮再次点击已选中项时不会触发 `on_checked`，导致点击未关闭下拉框且让用户误以为选择未生效。
+- **改动范围**：
+  1. **跨进程单实例互斥与激活**（`crates/ui/src/main.rs` & `crates/ui/src/tray.rs`）：
+     - 在 `main()` 启动入口通过 Win32 `CreateMutexW` 创建命名互斥体 `Local\GlobalTokenTracker_SingleInstance_Mutex`；
+     - 若互斥体已存在（`ERROR_ALREADY_EXISTS`），通过 `tray::focus_existing_window()` 枚举窗口、恢复并置顶前台，本进程安全退出（ExitCode 0），杜绝多实例并存。
+  2. **定时器与监视器代际隔离机制**（`crates/ui/src/main.rs`）：
+     - `Shell` 增加 `refresh_gen: u64` 与 `watch_gen: u64`，消息枚举更新为 `Msg::Tick(u64)`、`Msg::WatchFired(u64)`、`Msg::WatchFallback(u64)`；
+     - 定时器线程带 generation 闭包启动，到期校验 `gen_id == self.refresh_gen`，过期或处于仅文件模式时丢弃；
+     - 明确限定仅真正的全量磁盘扫描（`is_real_scan == true`）完成后才重装定时器，视图重折叠（`reload_views`、`refresh_views`）绝不重装或叠加定时器；
+     - `Msg::SetRefreshSecs` 在切换刷新周期时立即推进 `refresh_gen += 1` 与 `watch_gen += 1`，瞬时作废在途线程；
+     - `Msg::WatchFired` 与 `Msg::WatchFallback` 严格限制仅在 `refresh_secs == 0`（仅文件变更）且代际一致时处理，定时模式下彻底静默。
+  3. **下拉菜单点击体验优化**（`crates/ui/src/pages.rs`）：
+     - `refresh_menu_items` 单选项外层包裹透明命中测试 `Border`，绑定 `on_pointer_pressed`，点击任意行均派发 `Msg::SetRefreshSecs` 并关闭菜单面板。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 209 个测试全部通过（Core 168 + Setup 13 + UI 28）；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `cargo fmt --check`：全工作区代码格式合规；
+  - `installer/package.ps1`：打包生成全新单一安装程序 `GlobalTokenTracker-Setup-0.4.0-win-x64.exe` 并静默安装至用户环境。
+- **实测证据（运行期日志与行为）**：
+  - **单实例互斥验证**：重复启动新进程直接返回 ExitCode 0，现有进程保持 1 个。
+  - **严格 30 秒周期验证**（`GTT_DEBUG=1`）：
+    - 启动时 394ms 完成数据库快照显示，1358ms 完成首轮启动扫描并安装代际 1 的 30 秒定时器；
+    - 在 1358ms ~ 31358ms 期间，即使价目同步完成或向 `~/.claude` 等文件目录写入新数据，**UI 保持绝对静默，0 次扫描、0 次转圈**；
+    - 达到 31358ms（恰好 30 秒）后触发第二次磁盘扫描（耗时 10ms），节奏严密且无多余刷新。
+
+
 
 
