@@ -966,6 +966,7 @@ fn heat_card(
             metric,
             args.heat,
             args.canvas_ready < 6,
+            args.cols,
             ctx,
         ),
     ];
@@ -1073,6 +1074,7 @@ fn overview_widget(
                             trend,
                             args.config.trend_line,
                             args.canvas_ready < 1,
+                            args.cols,
                             ctx,
                         ),
                     )),
@@ -1156,6 +1158,7 @@ fn overview_widget(
                         handle: &args.donuts[i],
                         // Trend takes stage 1, donut `i` stage 2+i.
                         defer: args.canvas_ready < 2 + i,
+                        wide: args.cols >= 5,
                     },
                     ctx,
                 ));
@@ -1892,9 +1895,28 @@ const DETAIL_PLANS: [Plan; 4] = [
     ],
 ];
 
+/// Wide-window plan for high-resolution displays (width >= ~1350 DIP):
+/// expands time, tool, numeric metrics and duration so wide displays don't
+/// allocate 75%+ of the screen to just the model column while numbers crowd.
+pub const DETAIL_PLAN_WIDE: Plan = &[
+    (0, Some(136.0)),
+    (1, Some(116.0)),
+    (2, None),
+    (3, Some(108.0)),
+    (4, Some(108.0)),
+    (5, Some(108.0)),
+    (6, Some(112.0)),
+    (7, Some(80.0)),
+];
+
 fn detail_layout(theme: &Theme, width: f64) -> (Vec<GridLength>, [Option<i32>; 8]) {
     let k = font_scale(theme);
-    plan_layout(pick_plan(&DETAIL_PLANS, width, k), k)
+    let plan = if width >= 1350.0 * k {
+        DETAIL_PLAN_WIDE
+    } else {
+        pick_plan(&DETAIL_PLANS, width, k)
+    };
+    plan_layout(plan, k)
 }
 
 fn dcell(col: i32, v: View) -> View {
@@ -2502,9 +2524,25 @@ const PRICE_PLANS: [Plan; 4] = [
     &[(0, None), (1, Some(76.0)), (2, Some(76.0)), (5, Some(96.0))],
 ];
 
+/// Wide-window plan for high-resolution displays (width >= ~1350 DIP):
+/// offers generous cell widths for $/1M token prices and corroboration badges.
+pub const PRICE_PLAN_WIDE: Plan = &[
+    (0, None),
+    (1, Some(112.0)),
+    (2, Some(112.0)),
+    (3, Some(112.0)),
+    (4, Some(112.0)),
+    (5, Some(136.0)),
+];
+
 fn price_layout(theme: &Theme, width: f64) -> (Vec<GridLength>, [Option<i32>; 6]) {
     let k = font_scale(theme);
-    plan_layout(pick_plan(&PRICE_PLANS, width, k), k)
+    let plan = if width >= 1350.0 * k {
+        PRICE_PLAN_WIDE
+    } else {
+        pick_plan(&PRICE_PLANS, width, k)
+    };
+    plan_layout(plan, k)
 }
 
 /// $/1M values vary from 0.0001 to thousands — trim, don't pad.
@@ -3395,5 +3433,23 @@ mod tests {
         let (wide, _) = plan_layout::<8>(DETAIL_PLANS[1], 2.0);
         assert!(matches!(wide[0], GridLength::Pixel(w) if (w - 168.0).abs() < 1e-9));
         assert!(wide[2] == GridLength::STAR);
+    }
+
+    #[test]
+    fn high_res_wide_table_plans_expand_columns() {
+        let (wide_cols, wide_at) = plan_layout::<8>(DETAIL_PLAN_WIDE, 1.0);
+        assert_eq!(wide_cols.len(), 8);
+        assert_eq!(wide_at[0], Some(0)); // time
+        assert_eq!(wide_at[2], Some(2)); // model (STAR)
+        // Time column is 136 DIP in the wide plan (vs 90 DIP in normal plans).
+        assert_eq!(wide_cols[0], GridLength::Pixel(136.0));
+        assert_eq!(wide_cols[2], GridLength::STAR);
+
+        let (price_cols, price_at) = plan_layout::<6>(PRICE_PLAN_WIDE, 1.0);
+        assert_eq!(price_cols.len(), 6);
+        assert_eq!(price_at[0], Some(0)); // model (STAR)
+        assert_eq!(price_cols[0], GridLength::STAR);
+        assert_eq!(price_cols[1], GridLength::Pixel(112.0));
+        assert_eq!(price_cols[5], GridLength::Pixel(136.0));
     }
 }

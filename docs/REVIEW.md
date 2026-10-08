@@ -1224,3 +1224,33 @@
 - **ui**：`Shell.clock_anchor` 新增消息 `Msg::ClockPick(h)` / `Msg::ClockFullDay`；日历点选、快捷选择、顶部预设都会清掉待配对的整点。宽度标尺 `fit_cols` 上限从 4 放宽到 `WIDTH_TIERS=6`，`reflow_grid` 用 `REFLOW_MAX_COLS=4` 封顶，统计卡和占比环形图的行为不变。卡片排布分档（`CalLayout`）：≤2 列为上下堆叠，月历下方的信息块与表盘作为一组整体居中，两者共用左边线（按用户反馈调整）；3–4 列为单月 | 信息在上、表盘在下；5 列为单月 | 信息 | 表盘一行；≥6 列为双月 | 信息 | 表盘一行。各档按该档最窄宽度验算过，不会溢出。表盘里的指针始终保留两根（不可用时长度为 0），避免切换可用/不可用状态时后面的子元素 key 错位。
 - **测试**：新增 `custom_hours_are_inclusive_and_end_at_midnight`（覆盖反序、23 点到次日零点、0..=23 与 `custom_days` 完全相同、纽约 2026-11-01 回拨日 01 点那格为 2h / 全天为 25h）和 `hourly_only_for_today_and_single_day_windows`。
 - **验证**：`cargo test --workspace`（core 166 / setup 13 / ui 25 全部通过）；`cargo clippy --workspace --all-targets -- -D warnings` 0 条；触及文件 rustfmt 干净（`ui/src/main.rs` 的格式差异为既有）。release 截图（`target\e2e\cal3`，账本副本）：`crop-2500.png`（≥6 列）、`d2c-2100.png`（5 列）、`crop-1400.png`（3–4 列）、`d2c-1170.png`（最小窗口宽，居中堆叠）。数据核对：10-07 09:00–19:00 界面显示 737 个事件 / 238,805,403 tok，与 SQL 直查完全一致；按小时分桶只落在 10–17 点，与趋势图横轴吻合。实测点击：鼠标先点 12、再点 15 → `ui.json` 保存为 `1791345600000..1791360000000`（12:00–16:00），界面显示「4 小时」。
+
+## S93 高分辨率与大宽屏 UI 针对性优化 ✅
+
+- **背景与痛点**：在高分辨率显示器（如 2K / 4K / 超宽带鱼屏，窗口宽度 ≥ 1400 DIP、≥ 2000 DIP 及全屏 2560 DIP）下，原有固定尺寸与窄屏预设暴露出多处视觉失调：① 趋势图高度固定 160 DIP，在 2500 宽屏下横纵比高达 15:1 呈现极扁长纸带感，且少分桶（如 7 天或按小时）时柱宽上限 20 DIP 细如牙签；② 热力图格子上限 14 DIP，右侧图例按卡片宽度 `w - legend_w` 右对齐，导致在 2500px 下图例被甩到卡片极右侧，与网格之间留下超 1400px 的空白鸿沟；③ 占比环形图在每列 ≥ 350 DIP 的宽卡片中仍保持上下堆叠，纵向留白严重且模型名被限制在 16 字符提前出现省略号；④ 明细表与价目表在宽度 ≥ 1350 DIP 时，STAR 列（模型名）独占 70%~80% 宽度，而时间、工具、token 数字和佐证徽章仍挤在窄列宽中。
+- **改动范围**：
+  1. **趋势图（Trend）高分屏伸展自适应**（`crates/ui/src/widgets.rs`）：
+     - 新增 `trend_height(cols: usize) -> f64`：按宽度分档动态调整高度（普通屏 160 DIP，宽屏 cols=5 为 190 DIP，超宽屏 cols ≥ 6 为 220 DIP），消除扁平感；
+     - 柱宽上限 `max_bar` 随可用宽度动态放宽：普通 20 DIP，宽屏（w ≥ 1400）放宽至 32 DIP，超宽大屏（w ≥ 2000）放宽至 44 DIP，少分桶或小时视图时柱体饱满挺拔；圆角随柱宽自适应平滑（2~4 DIP）；
+     - 移动平均线在宽屏下折线宽度从 2.0 提升至 2.5，数据点半径从 3.0 提升至 3.5。
+  2. **活跃热力图（Heatmap）防割裂与自适应伸展**（`crates/ui/src/widgets.rs`）：
+     - 新增 `heat_cell_max(cols)` 与 `heat_height(label_pt, cols)`：高分宽屏下格子尺寸上限从 14.0 放宽至 16.5 DIP（cols=5）与 19.0 DIP（cols ≥ 6），间距微调至 3.5 DIP，画布高度自适应到 185 / 208 DIP；
+     - 修复图例对齐：图例对齐点改为贴合网格实际右边缘 `grid_right - legend_w`（`lx_edge > x0 + 200 && w > grid_right + 60` 时生效），彻底根治 2500 宽屏下留存 1400 像素空白鸿沟的严重割裂缺陷。
+  3. **占比分布环形图（Donuts）宽屏左右分栏**（`crates/ui/src/widgets.rs`）：
+     - `DonutSpec` 新增 `wide: bool`；在 `args.cols >= 5` 时，由上下堆叠自动切换为**左侧环形图 + 右侧图例列表**水平分栏布局；
+     - 图例中长模型名截断限制从 16 字符放宽至 28 字符，主流长模型名无需显示省略号。
+  4. **明细表与价目表大宽屏 Plan**（`crates/ui/src/pages.rs`）：
+     - 新增 `DETAIL_PLAN_WIDE`（时间 136 DIP、工具 116 DIP、输入/输出/缓存各 108 DIP、成本 112 DIP、时长 80 DIP）与 `PRICE_PLAN_WIDE`（输入/输出/缓存各 112 DIP、佐证 136 DIP）；
+     - 在 `width >= 1350.0 * k` 时启用，让大屏下各关键度量舒展呈现，避免模型列独占空间导致数字拥挤。
+- **测试**：
+  - `widgets::tests::high_res_adaptive_sizing`：覆盖趋势图高度与热力图尺寸随分档放大；
+  - `pages::tests::high_res_wide_table_plans_expand_columns`：覆盖明细与价格宽屏方案列宽扩展。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 206 个测试全部通过（Core 166 + Setup 13 + UI 27）；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `rustfmt --edition 2024 --check crates/ui/src/widgets.rs crates/ui/src/pages.rs`：干净无格式差异。
+- **实测证据（Release GUI 真实渲染截屏）**：
+  - `target/e2e/cal3/highres-w2500.png`：2500 DIP 超宽屏单日自定义视图，双月日历与 24 小时表盘整齐铺开，趋势图柱宽 44 DIP 挺拔饱满，热力图格子放大至 19 DIP 且图例精准贴合网格右缘无孤岛，环形图左右分栏舒展；
+  - `target/e2e/cal3/highres-overview-last30-w2500.png`：2500 DIP 30 天总览，多模型切片下 4 环图左环右字，长模型名完整无截断；
+  - `target/e2e/cal3/highres-detail-settled.png`：1500 DIP 明细表启用 `DETAIL_PLAN_WIDE`，时间、工具、token 数字和成本列宽宽裕对齐；
+  - `target/e2e/cal3/highres-price-settled.png`：1500 DIP 价格表启用 `PRICE_PLAN_WIDE`，模型名与价格列宽均匀舒展。

@@ -242,6 +242,18 @@ impl Default for DonutHandle {
     }
 }
 
+/// Canvas height for the trend chart: adapts to width tiers so wide/high-resolution
+/// windows don't collapse into an overly flat, thin strip.
+pub fn trend_height(cols: usize) -> f64 {
+    if cols >= 6 {
+        220.0
+    } else if cols >= 5 {
+        190.0
+    } else {
+        160.0
+    }
+}
+
 /// 30-day token trend — Direct2D demand canvas: rounded bars (today at full
 /// alpha, history softened), faint mid gridline + hairline baseline, sparse
 /// date ticks and a max label drawn by DirectWrite — `theme.font_family` is
@@ -256,6 +268,7 @@ pub fn trend_strip(
     trend: &TrendHandle,
     avg: bool,
     defer: bool,
+    cols: usize,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     // The average is taken over everything received, before the last-60
@@ -290,7 +303,7 @@ pub fn trend_strip(
     };
     let shared = trend.shared.clone();
     Border::new()
-        .height(160.0)
+        .height(trend_height(cols))
         // Null Background = XAML skips hit-testing entirely; Transparent keeps
         // the canvas invisible yet receives PointerMoved/Exited.
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
@@ -340,7 +353,17 @@ pub fn trend_strip(
 
                 let n = days.len() as f32;
                 let slot = w / n;
-                let bar_w = (slot * 0.62).clamp(3.0, 20.0);
+                // In wide / high-resolution displays or with few buckets (e.g. hourly or 7-day),
+                // let bars stretch wider so they don't look like thin toothpicks on a wide card.
+                let max_bar = if w >= 2000.0 {
+                    44.0
+                } else if w >= 1400.0 {
+                    32.0
+                } else {
+                    20.0
+                };
+                let bar_w = (slot * 0.58).clamp(3.0, max_bar);
+                let corner = (bar_w * 0.12).clamp(2.0, 4.0);
                 let last = days.len() - 1;
                 let hover = shared.hover.get().filter(|&i| i <= last);
                 // GTT_TIPTEST=<idx> forces the tooltip in test builds — injected
@@ -373,8 +396,8 @@ pub fn trend_strip(
                     ))?;
                     let bar = windows_canvas::RoundedRect::new(
                         Rect::new(x, bottom - bh, x + bar_w, bottom),
-                        2.5,
-                        2.5,
+                        corner,
+                        corner,
                     );
                     ctx.fill_rounded_rect(&bar, &brush);
                     if hover == Some(i) {
@@ -415,12 +438,14 @@ pub fn trend_strip(
                                 .end_cap(windows_canvas::CapStyle::Round)
                                 .line_join(windows_canvas::LineJoin::Round),
                         )?;
-                        ctx.draw_path_styled(&path, &brush, 2.0, &style);
+                        let stroke_w = if w >= 1400.0 { 2.5 } else { 2.0 };
+                        ctx.draw_path_styled(&path, &brush, stroke_w, &style);
                     }
                     if days.len() <= 31 {
+                        let pt_r = if w >= 1400.0 { 3.5 } else { 3.0 };
                         for i in 0..days.len() {
                             ctx.fill_ellipse(
-                                &windows_canvas::Ellipse::new(pt(i), 3.0, 3.0),
+                                &windows_canvas::Ellipse::new(pt(i), pt_r, pt_r),
                                 &brush,
                             );
                         }
@@ -593,7 +618,6 @@ impl Default for HeatHandle {
     }
 }
 
-const HEAT_CELL_MAX: f32 = 14.0;
 const HEAT_CELL_MIN: f32 = 6.0;
 const HEAT_GAP: f32 = 3.0;
 /// Quartile-level alpha of the accent colour (level 0 is the divider colour).
@@ -606,11 +630,23 @@ fn heat_strips(label_pt: f32) -> (f32, f32) {
     (top, bottom)
 }
 
-/// Canvas height for the nominal cell size; narrower windows shrink the cells
-/// and the grid is centred vertically in this box.
-pub fn heat_height(label_pt: f64) -> f64 {
+pub fn heat_cell_max(cols: usize) -> f32 {
+    if cols >= 6 {
+        19.0
+    } else if cols >= 5 {
+        16.5
+    } else {
+        14.0
+    }
+}
+
+/// Canvas height for the nominal cell size; adapts to width tiers so wide/high-resolution
+/// windows get comfortably sized cells instead of tiny squares lost in wide cards.
+pub fn heat_height(label_pt: f64, cols: usize) -> f64 {
     let (top, bottom) = heat_strips(label_pt as f32);
-    f64::from(top + bottom + 7.0 * (HEAT_CELL_MAX + HEAT_GAP)) + 4.0
+    let cell_max = heat_cell_max(cols);
+    let gap = if cols >= 6 { 3.5 } else { HEAT_GAP };
+    f64::from(top + bottom + 7.0 * (cell_max + gap)) + 4.0
 }
 
 /// GitHub-style activity heatmap: 7 rows (Mon–Sun) × one column per week, one
@@ -623,6 +659,7 @@ pub fn heatmap(
     metric: crate::heat::HeatMetric,
     handle: &HeatHandle,
     defer: bool,
+    cols_tier: usize,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let days: Vec<globaltokentracker_core::viewmodel::HeatDay> = days.to_vec();
@@ -634,7 +671,7 @@ pub fn heatmap(
     let label_pt = theme.label_size as f32;
     let shared = handle.shared.clone();
     Border::new()
-        .height(heat_height(theme.label_size))
+        .height(heat_height(theme.label_size, cols_tier))
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .on_pointer_moved(ctx.callback(|e: PointerEventInfo| Msg::HeatHover(e.x, e.y)))
         .on_pointer_exited(ctx.callback(|_| Msg::HeatLeave))
@@ -667,10 +704,11 @@ pub fn heatmap(
                 let cols = days.len().div_ceil(7);
                 let (top, bottom) = heat_strips(label_pt);
                 let label_w = (label_pt * 2.8).ceil();
-                let cell =
-                    ((w - label_w) / cols as f32 - HEAT_GAP).clamp(HEAT_CELL_MIN, HEAT_CELL_MAX);
-                let pitch = cell + HEAT_GAP;
-                let grid_h = 7.0 * pitch - HEAT_GAP;
+                let cell_max = heat_cell_max(cols_tier);
+                let gap = if cols_tier >= 6 { 3.5 } else { HEAT_GAP };
+                let cell = ((w - label_w) / cols as f32 - gap).clamp(HEAT_CELL_MIN, cell_max);
+                let pitch = cell + gap;
+                let grid_h = 7.0 * pitch - gap;
                 let y_off = ((h - (top + grid_h + bottom)) * 0.5).max(0.0);
                 let (x0, y0) = (label_w, y_off + top);
                 shared.geom.set(HeatGeom {
@@ -746,6 +784,13 @@ pub fn heatmap(
                 let (less, more) = (tr("少"), tr("多"));
                 let swatches = 5.0 * (legend_cell + 2.0);
                 let legend_w = word_w(less) + swatches + word_w(more) + 12.0;
+                let grid_right = x0 + cols as f32 * pitch;
+                let lx_edge = grid_right - legend_w;
+                let mut lx = if lx_edge > x0 + 200.0 && w > grid_right + 60.0 {
+                    lx_edge
+                } else {
+                    w - legend_w
+                };
                 ctx.draw_text(
                     &tf!(
                         "近一年 {} 天活跃 · 最长连续 {} 天 · 合计 {}",
@@ -754,10 +799,9 @@ pub fn heatmap(
                         heat::fmt_total(metric, s.total)
                     ),
                     &tf,
-                    &Rect::new(x0, by, (w - legend_w - 8.0).max(x0 + 40.0), by + bottom),
+                    &Rect::new(x0, by, (lx - 8.0).max(x0 + 40.0), by + bottom),
                     &ink,
                 );
-                let mut lx = w - legend_w;
                 ctx.draw_text(
                     less,
                     &tf,
@@ -882,6 +926,9 @@ pub struct DonutSpec<'a> {
     pub handle: &'a DonutHandle,
     /// Not this donut's turn to mount yet — placeholder (see `defer_slot`).
     pub defer: bool,
+    /// High-resolution / wide column: lay out donut and legend side-by-side
+    /// instead of stacked, and relax label character truncation.
+    pub wide: bool,
 }
 
 fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> View {
@@ -892,6 +939,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
         key,
         handle,
         defer,
+        wide: _,
     } = spec;
     let slices: Vec<(String, f64)> = slices.to_vec();
     let total: f64 = slices.iter().map(|s| s.1).sum();
@@ -1121,6 +1169,7 @@ pub fn donut_cell(
         key,
         handle,
         defer,
+        wide,
     } = spec;
     let total: f64 = slices.iter().map(|s| s.1).sum();
     let body: View = if total <= 0.0 {
@@ -1131,11 +1180,12 @@ pub fn donut_cell(
             .height(132.0)
             .into()
     } else {
+        let name_limit = if wide { 28 } else { 16 };
         let mut legend: Vec<View> = Vec::with_capacity(slices.len());
         for (i, (name, v)) in slices.iter().enumerate() {
             let pct = format!("{:.1}", v / total * 100.0);
-            let name_short: String = if name.chars().count() > 16 {
-                crate::tf!("{}…", name.chars().take(15).collect::<String>())
+            let name_short: String = if name.chars().count() > name_limit {
+                crate::tf!("{}…", name.chars().take(name_limit - 1).collect::<String>())
             } else {
                 name.clone()
             };
@@ -1166,27 +1216,36 @@ pub fn donut_cell(
                     ]),
             );
         }
-        StackPanel::new()
+        let donut_view = donut(
+            theme,
+            DonutSpec {
+                slices,
+                center,
+                fmt_v,
+                key,
+                handle,
+                defer,
+                wide,
+            },
+            ctx,
+        );
+        let legend_view = StackPanel::new()
             .orientation(Orientation::Vertical)
-            .spacing(6.0)
-            .children([
-                donut(
-                    theme,
-                    DonutSpec {
-                        slices,
-                        center,
-                        fmt_v,
-                        key,
-                        handle,
-                        defer,
-                    },
-                    ctx,
-                ),
-                StackPanel::new()
-                    .orientation(Orientation::Vertical)
-                    .spacing(3.0)
-                    .keyed_children(crate::pages::keyed(legend)),
-            ])
+            .spacing(3.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .keyed_children(crate::pages::keyed(legend));
+        if wide {
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(12.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children([donut_view, legend_view])
+        } else {
+            StackPanel::new()
+                .orientation(Orientation::Vertical)
+                .spacing(6.0)
+                .children([donut_view, legend_view])
+        }
     };
     StackPanel::new()
         .orientation(Orientation::Vertical)
@@ -1242,5 +1301,18 @@ mod tests {
         assert_eq!(donut_hit(190.0, 66.0, 200.0, 132.0, &vals), None); // right band
         assert_eq!(donut_hit(5.0, 5.0, 200.0, 132.0, &vals), None); // outside
         assert_eq!(donut_hit(120.0, 66.0, 200.0, 132.0, &[0.0, 0.0]), None); // no data
+    }
+
+    #[test]
+    fn high_res_adaptive_sizing() {
+        assert_eq!(super::trend_height(4), 160.0);
+        assert_eq!(super::trend_height(5), 190.0);
+        assert_eq!(super::trend_height(6), 220.0);
+
+        assert_eq!(super::heat_cell_max(4), 14.0);
+        assert_eq!(super::heat_cell_max(5), 16.5);
+        assert_eq!(super::heat_cell_max(6), 19.0);
+
+        assert!(super::heat_height(11.0, 6) > super::heat_height(11.0, 4));
     }
 }
