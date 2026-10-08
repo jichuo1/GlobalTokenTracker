@@ -157,6 +157,8 @@ pub struct Shell {
     /// partner (`None` = next click starts a new range).
     cal_month: (i16, i8),
     cal_anchor: Option<jiff::civil::Date>,
+    /// Hour dial: first clicked hour awaiting its partner.
+    clock_anchor: Option<i8>,
     /// Share-donut hover states — one per share-grid column (4 max).
     donuts: [widgets::DonutHandle; 4],
     /// Vendor quota channels poll at this cadence (network calls stay rare).
@@ -186,8 +188,8 @@ pub struct Shell {
     /// Bumped on every tool/model filter change — a load that started under an
     /// older value has stale detail rows and must re-fetch them.
     filter_gen: u64,
-    /// Overview reflow column count — driven by the width ruler's
-    /// Metrics events (4 until the first measurement lands).
+    /// Overview width tier (1..=`pages::WIDTH_TIERS`) — driven by the width
+    /// ruler's Metrics events (4 until the first measurement lands).
     overview_cols: usize,
     /// Page-switch in progress — the new page's top-level blocks spring in
     /// (each with its own damping/velocity) while the old page is pushed out
@@ -280,6 +282,10 @@ pub enum Msg {
     CalMonth(i8),
     /// Inline calendar quick chip ("昨天"|"本周"|"本月"|"上月"|"近 90 天").
     CalQuick(&'static str),
+    /// Hour dial: an hour slot (0..=23) of the single selected day clicked.
+    ClockPick(i8),
+    /// Hour dial: back to the whole selected day.
+    ClockFullDay,
     /// Tool checkbox toggled (app name, new checked state).
     ToggleApp(String, bool),
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
@@ -760,6 +766,7 @@ impl Component for Shell {
             heat: widgets::HeatHandle::default(),
             cal_month: cal_month_of(range),
             cal_anchor: None,
+            clock_anchor: None,
             donuts: std::array::from_fn(|_| widgets::DonutHandle::default()),
             quota_at: None,
             open_menu: None,
@@ -937,6 +944,7 @@ impl Component for Shell {
             Msg::SetRange(r) => {
                 self.open_menu = None;
                 self.cal_anchor = None;
+                self.clock_anchor = None;
                 self.set_range(r, context);
             }
             Msg::PickCustomRange => {
@@ -952,6 +960,7 @@ impl Component for Shell {
                 let r = Range::custom(s, e);
                 self.cal_month = cal_month_of(r);
                 self.cal_anchor = None;
+                self.clock_anchor = None;
                 self.set_range(r, context);
             }
             Msg::CalPick(y, m, d) => {
@@ -961,6 +970,7 @@ impl Component for Shell {
                 if day > jiff::Zoned::now().date() {
                     return;
                 }
+                self.clock_anchor = None;
                 let r = match self.cal_anchor.take() {
                     None => {
                         self.cal_anchor = Some(day);
@@ -969,6 +979,25 @@ impl Component for Shell {
                     Some(first) => Range::custom_days(first, day),
                 };
                 self.set_range(r, context);
+            }
+            Msg::ClockPick(h) => {
+                let Some(day) = self.single_day() else {
+                    return;
+                };
+                let r = match self.clock_anchor.take() {
+                    None => {
+                        self.clock_anchor = Some(h);
+                        Range::custom_hours(day, h, h)
+                    }
+                    Some(first) => Range::custom_hours(day, first, h),
+                };
+                self.set_range(r, context);
+            }
+            Msg::ClockFullDay => {
+                if let Some(day) = self.single_day() {
+                    self.clock_anchor = None;
+                    self.set_range(Range::custom_days(day, day), context);
+                }
             }
             Msg::CalMonth(delta) => {
                 let (y, m) = self.cal_month;
@@ -1002,6 +1031,7 @@ impl Component for Shell {
                 let r = Range::custom_days(first, last);
                 self.cal_month = cal_month_of(r);
                 self.cal_anchor = None;
+                self.clock_anchor = None;
                 self.set_range(r, context);
             }
             Msg::ToggleApp(app, on) => {
@@ -1324,7 +1354,7 @@ impl Component for Shell {
             }
             // Width-ruler metrics → reflow column count changed. The
             // observer already dedupes, so landing here always rebuilds.
-            Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, 4),
+            Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, pages::WIDTH_TIERS),
             Msg::SetTableWidth(w) => self.table_w = w,
             Msg::PriceQuery(q) => {
                 self.price_query = q;
@@ -1892,6 +1922,7 @@ impl Shell {
                     cal: pages::CalView {
                         month: self.cal_month,
                         anchor: self.cal_anchor,
+                        clock_anchor: self.clock_anchor,
                     },
                     canvas_ready,
                 },
@@ -2137,6 +2168,16 @@ impl Shell {
 
     /// Apply + persist a range pick, then reload aggregates (totals/by_app
     /// are indexed; the rescan path is cheap).
+    /// The local day a custom window sits in, when it stays inside one —
+    /// the only case the hour dial is live.
+    fn single_day(&self) -> Option<jiff::civil::Date> {
+        use globaltokentracker_core::viewmodel::local_date;
+        match self.range {
+            Range::Custom { start_ms, .. } if self.range.hourly() => Some(local_date(start_ms)),
+            _ => None,
+        }
+    }
+
     fn set_range(&mut self, r: Range, context: &ComponentContext<Self>) {
         if r == self.range {
             return;

@@ -311,7 +311,8 @@ impl Cube {
 
     /// Everything on the overview that depends on the range/filters. `None`
     /// when the cube cannot answer exactly (a range edge that isn't a day
-    /// boundary in the cube's frame, or `Today`'s hours are from yesterday) —
+    /// boundary in the cube's frame, a single-day custom window wanting hourly
+    /// bars, or `Today`'s hours are from yesterday) —
     /// the caller then falls back to the SQL path.
     pub fn overview_parts(
         &self,
@@ -319,6 +320,11 @@ impl Cube {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Option<OverviewParts> {
+        // Hourly trends only exist for today; a single-day custom window
+        // (hourly bars, maybe sub-day edges) goes to SQL.
+        if range.hourly() && range != Range::Today {
+            return None;
+        }
         let lo = self.bound(range.start_ms())?;
         let hi = self.bound(range.end_ms())?;
         let today_idx = self.aligned_day(day_start_ms(0))?;

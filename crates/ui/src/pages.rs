@@ -37,6 +37,13 @@ fn cell_rc(col: i32, row: i32, v: View) -> View {
 /// Minimum cell width for the reflow grids (stat cards + share donuts).
 const REFLOW_MIN_CELL: f64 = 250.0;
 
+/// Reflow grids never go past 4 across …
+const REFLOW_MAX_COLS: usize = 4;
+
+/// … but the width ruler keeps counting `REFLOW_MIN_CELL` steps up to here so
+/// the custom-range card can tell very wide windows apart (≥ ~1560 DIP).
+pub const WIDTH_TIERS: usize = 6;
+
 /// How many `min_cell`-wide columns fit in `width` DIPs of content
 /// (clamped 1..=max; unknown width → `max`, matching the default window).
 fn fit_cols(width: f64, min_cell: f64, gap: f64, max: usize) -> usize {
@@ -49,7 +56,7 @@ fn fit_cols(width: f64, min_cell: f64, gap: f64, max: usize) -> usize {
 /// N items into `cols` STAR columns × Auto rows — cells stretch to fill
 /// the measured width, so wide windows get wide cards, narrow reflow.
 fn reflow_grid(theme: &Theme, items: Vec<View>, cols: usize) -> View {
-    let cols = cols.clamp(1, items.len().max(1));
+    let cols = cols.clamp(1, items.len().clamp(1, REFLOW_MAX_COLS));
     let rows = items.len().div_ceil(cols);
     Grid::new()
         .columns(vec![GridLength::STAR; cols])
@@ -258,10 +265,9 @@ fn header(theme: &Theme, title: &str, actions: Vec<View>) -> View {
 pub struct CalView {
     pub month: (i16, i8),
     pub anchor: Option<jiff::civil::Date>,
+    /// Hour dial's pending first click.
+    pub clock_anchor: Option<i8>,
 }
-
-const CAL_CELL_W: f64 = 36.0;
-const CAL_CELL_H: f64 = 30.0;
 
 fn rgba(c: windows_canvas::ColorF, alpha: f32) -> Color {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -269,7 +275,7 @@ fn rgba(c: windows_canvas::ColorF, alpha: f32) -> Color {
 }
 
 /// One day cell — a plain `Border` (a real `Button`'s padding clips two-digit
-/// days in a 36 px cell). Range days get a soft accent wash, the endpoints
+/// days in a narrow cell). Range days get a soft accent wash, the endpoints
 /// (or a pending first click) the solid accent, today a hairline outline;
 /// days after today are dimmed and inert.
 fn cal_day(
@@ -278,6 +284,7 @@ fn cal_day(
     day: jiff::civil::Date,
     sel: (jiff::civil::Date, jiff::civil::Date),
     today: jiff::civil::Date,
+    (cw, ch): (f64, f64),
 ) -> View {
     let (y, m, d) = (day.year(), day.month(), day.day());
     let accent = theme.accent_cf;
@@ -285,8 +292,8 @@ fn cal_day(
     let endpoint = day == sel.0 || day == sel.1;
     let inside = day > sel.0 && day < sel.1;
     let mut cell = Border::new()
-        .width(CAL_CELL_W)
-        .height(CAL_CELL_H)
+        .width(cw)
+        .height(ch)
         .corner_radius(CornerRadius::uniform(4.0))
         // A null background never hit-tests — set an explicit transparent
         // brush so the whole cell still receives pointer input.
@@ -319,39 +326,48 @@ fn cal_day(
     )
 }
 
-/// `自定义` range chrome: an inline month calendar (click a start day, then an
-/// end day) beside a text echo of the resolved window. Everything is local
-/// civil dates — no WinRT date values, no time-of-day, no UTC conversion.
-fn custom_range_row(
+/// Which month-navigation arrows a month grid carries — with two months
+/// side by side only the outer edges get one.
+#[derive(Clone, Copy)]
+struct CalNav {
+    prev: bool,
+    next: bool,
+    next_enabled: bool,
+}
+
+/// One month grid: header (‹ / › per `nav`), weekday row, six week rows.
+fn cal_month(
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
-    start_ms: i64,
-    end_ms: i64,
-    cal: CalView,
+    month_first: jiff::civil::Date,
+    sel: (jiff::civil::Date, jiff::civil::Date),
+    today: jiff::civil::Date,
+    size: (f64, f64),
+    nav: CalNav,
 ) -> View {
-    use globaltokentracker_core::viewmodel::local_date;
-    let today = jiff::Zoned::now().date();
-    // end_ms is exclusive — the last INCLUDED day is the one before it.
-    let (first, last) = (local_date(start_ms), local_date(end_ms - 1));
-    let days = first.until(last).map_or(1, |s| s.get_days() + 1);
-    let (y, m) = cal.month;
-    let month_first = jiff::civil::Date::new(y, m, 1).unwrap_or(today);
-    let at_current = (y, m) >= (today.year(), today.month());
-
-    let nav =
-        |label: &'static str, delta: i8, enabled: bool, ctx: &mut ViewContext<Shell>| -> View {
-            Button::new()
-                .width(CAL_CELL_W)
-                .height(CAL_CELL_H)
-                .is_enabled(enabled)
-                .on_click(ctx.callback(move |_| Msg::CalMonth(delta)))
-                .content(label)
-        };
+    let (cw, ch) = size;
+    let (y, m) = (month_first.year(), month_first.month());
+    let arrow = |label: &'static str,
+                 delta: i8,
+                 shown: bool,
+                 enabled: bool,
+                 ctx: &mut ViewContext<Shell>|
+     -> View {
+        if !shown {
+            return Border::new().width(cw).height(ch).into();
+        }
+        Button::new()
+            .width(cw)
+            .height(ch)
+            .is_enabled(enabled)
+            .on_click(ctx.callback(move |_| Msg::CalMonth(delta)))
+            .content(label)
+    };
     let head: View = StackPanel::new()
         .orientation(Orientation::Horizontal)
         .children([
-            nav("‹", -1, true, ctx),
-            Border::new().width(CAL_CELL_W * 5.0).content(
+            arrow("‹", -1, nav.prev, true, ctx),
+            Border::new().width(cw * 5.0).content(
                 TextBlock::new()
                     .text(tf!("{} 年 {} 月", y, m))
                     .font_size(theme.body_size)
@@ -359,7 +375,7 @@ fn custom_range_row(
                     .horizontal_alignment(HorizontalAlignment::Center)
                     .vertical_alignment(VerticalAlignment::Center),
             ),
-            nav("›", 1, !at_current, ctx),
+            arrow("›", 1, nav.next, nav.next_enabled, ctx),
         ]);
     let weekdays: View = StackPanel::new()
         .orientation(Orientation::Horizontal)
@@ -367,7 +383,7 @@ fn custom_range_row(
             ["一", "二", "三", "四", "五", "六", "日"]
                 .iter()
                 .map(|w| -> View {
-                    Border::new().width(CAL_CELL_W).content(
+                    Border::new().width(cw).content(
                         TextBlock::new()
                             .text(tr(w))
                             .font_size(theme.label_size)
@@ -386,9 +402,9 @@ fn custom_range_row(
                 let n = week * 7 + wd - lead + 1;
                 match month_first.checked_add(jiff::Span::new().days(n - 1)) {
                     Ok(day) if n >= 1 && day.month() == m => {
-                        cal_day(theme, ctx, day, (first, last), today)
+                        cal_day(theme, ctx, day, sel, today, size)
                     }
-                    _ => Border::new().width(CAL_CELL_W).height(CAL_CELL_H).into(),
+                    _ => Border::new().width(cw).height(ch).into(),
                 }
             })
             .collect();
@@ -398,61 +414,403 @@ fn custom_range_row(
                 .keyed_children(keyed(cells)),
         );
     }
-    let calendar = vstack(2.0, rows);
+    vstack(2.0, rows)
+}
+
+/// Hour dial geometry: slot circles on a ring around a centre readout.
+const DIAL: f64 = 212.0;
+const DIAL_SLOT: f64 = 24.0;
+const DIAL_RING: f64 = 92.0;
+const DIAL_HUB: f64 = 64.0;
+
+/// Local wall-clock hour of an epoch-ms instant (system zone).
+fn local_hour(ms: i64) -> i8 {
+    jiff::Timestamp::from_millisecond(ms)
+        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).hour())
+        .unwrap_or(0)
+}
+
+/// Inclusive hour slots `(first, last)` a single-day window covers; a window
+/// reaching the next local midnight ends at slot 23.
+fn hour_span(day: jiff::civil::Date, start_ms: i64, end_ms: i64) -> (i8, i8) {
+    use globaltokentracker_core::viewmodel::local_day_start;
+    let midnight = day.tomorrow().map(local_day_start).unwrap_or(i64::MAX);
+    let last = if end_ms >= midnight {
+        23
+    } else {
+        local_hour(end_ms - 1)
+    };
+    (local_hour(start_ms), last)
+}
+
+/// 24-hour clock face: hour slots on a ring (0 at the top, clockwise), the
+/// picked span washed in accent with solid endpoints and two hands pointing
+/// at them; the centre reads the span's length. `span = None` → the window
+/// covers several days, so the dial is shown dimmed and inert. Hours after
+/// the current one on today are dimmed and inert, like future calendar days.
+fn hour_dial(
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+    span: Option<(i8, i8)>,
+    live_until: i8,
+) -> View {
+    let c = DIAL / 2.0;
+    let accent = theme.accent_cf;
+    let pos = |h: i8, r: f64| {
+        let a = f64::from(h) / 24.0 * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2;
+        (c + r * a.cos(), c + r * a.sin())
+    };
+    let mut parts: Vec<View> = vec![
+        Ellipse::new()
+            .width(DIAL)
+            .height(DIAL)
+            .fill(Brush::Solid(rgba(theme.subtle_cf, 0.06)))
+            .stroke(theme.divider)
+            .stroke_thickness(1.0)
+            .into(),
+    ];
+    // Always two hands (zero-length when inert) so the slot keys behind them
+    // stay put as the dial toggles between live and inert.
+    // Hands run from the hub's rim to the slot, clear of the readout.
+    for h in span.map_or([None, None], |(a, b)| [Some(a), Some(b)]) {
+        let (x0, y0) = h.map_or((c, c), |h| pos(h, DIAL_HUB / 2.0));
+        let (x, y) = h.map_or((c, c), |h| pos(h, DIAL_RING - DIAL_SLOT / 2.0 - 2.0));
+        parts.push(
+            Line::new()
+                .x1(x0)
+                .y1(y0)
+                .x2(x)
+                .y2(y)
+                .stroke(Brush::Solid(rgba(accent, 0.8)))
+                .stroke_thickness(2.0)
+                .into(),
+        );
+    }
+    for h in 0..24i8 {
+        let (x, y) = pos(h, DIAL_RING);
+        let live = span.is_some() && h <= live_until;
+        let (endpoint, inside) = match span {
+            Some((a, b)) => (h == a || h == b, h > a && h < b),
+            None => (false, false),
+        };
+        let mut slot = Border::new()
+            .width(DIAL_SLOT)
+            .height(DIAL_SLOT)
+            .corner_radius(CornerRadius::uniform(DIAL_SLOT / 2.0))
+            .canvas_left(x - DIAL_SLOT / 2.0)
+            .canvas_top(y - DIAL_SLOT / 2.0)
+            // Same hit-test rule as the calendar cells: never a null brush.
+            .background(Brush::Solid(Color::argb(0, 0, 0, 0)));
+        if endpoint {
+            slot = slot.background(Brush::Solid(rgba(accent, 1.0)));
+        } else if inside {
+            slot = slot.background(Brush::Solid(rgba(accent, 0.30)));
+        }
+        if live {
+            slot = slot.on_pointer_pressed(ctx.callback(move |_| Msg::ClockPick(h)));
+        }
+        parts.push(
+            slot.content(
+                TextBlock::new()
+                    .text(h.to_string())
+                    .font_size(theme.label_size)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .foreground(if !live {
+                        theme.subtle
+                    } else if endpoint {
+                        Brush::Solid(Color::rgb(255, 255, 255))
+                    } else {
+                        theme.text
+                    }),
+            ),
+        );
+    }
+    let readout: String = match span {
+        Some((0, 23)) => t!("全天").into(),
+        Some((a, b)) => tf!("{} 小时", b - a + 1),
+        None => "—".into(),
+    };
+    let hub = DIAL_HUB;
+    parts.push(
+        Border::new()
+            .width(hub)
+            .height(hub)
+            .corner_radius(CornerRadius::uniform(hub / 2.0))
+            .background(theme.card_bg)
+            .canvas_left(c - hub / 2.0)
+            .canvas_top(c - hub / 2.0)
+            .content(
+                TextBlock::new()
+                    .text(readout)
+                    .font_size(theme.body_size)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .foreground(if span.is_some() {
+                        theme.text
+                    } else {
+                        theme.subtle
+                    }),
+            ),
+    );
+    Canvas::new()
+        .width(DIAL)
+        .height(DIAL)
+        .opacity(if span.is_some() { 1.0 } else { 0.5 })
+        .keyed_children(keyed(parts))
+}
+
+/// Width tiers of the custom-range card (`cols` = `REFLOW_MIN_CELL` steps of
+/// content width, 1..=`WIDTH_TIERS`). Each tier's row is sized to fit the
+/// tier's narrowest width: month 7×cell, divider 49, info ≥ 392 (five
+/// quick buttons), hour block ≈ 400.
+#[derive(Clone, Copy, PartialEq)]
+enum CalLayout {
+    /// ≤2: calendar, info, hour block stacked.
+    Stacked,
+    /// 3–4: one month | info over hour block.
+    Split,
+    /// 5: one month | info | hour block in one row.
+    Row,
+    /// ≥6: two months | info | hour block.
+    WideRow,
+}
+
+impl CalLayout {
+    fn of(cols: usize) -> Self {
+        match cols {
+            0..=2 => Self::Stacked,
+            3..=4 => Self::Split,
+            5 => Self::Row,
+            _ => Self::WideRow,
+        }
+    }
+}
+
+/// Day-cell size: tier 3 is the only one where 44 px cells would squeeze
+/// the info column under its five quick buttons.
+fn cal_cell(cols: usize) -> (f64, f64) {
+    if cols == 3 {
+        (40.0, 32.0)
+    } else {
+        (44.0, 34.0)
+    }
+}
+
+/// `自定义` range chrome: inline month calendar(s) (click a start day, then an
+/// end day), the resolved window with one-tap ranges, and a 24-hour dial that
+/// narrows a single selected day to whole-hour slots. Everything is local
+/// civil date/time — no WinRT date values, no UTC conversion.
+fn custom_range_row(
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+    start_ms: i64,
+    end_ms: i64,
+    cal: CalView,
+    cols: usize,
+) -> View {
+    use globaltokentracker_core::viewmodel::local_date;
+    let now = jiff::Zoned::now();
+    let today = now.date();
+    // end_ms is exclusive — the last INCLUDED day is the one before it.
+    let (first, last) = (local_date(start_ms), local_date(end_ms - 1));
+    let sel = (first, last);
+    let days = first.until(last).map_or(1, |s| s.get_days() + 1);
+    let (y, m) = cal.month;
+    let shown = jiff::civil::Date::new(y, m, 1).unwrap_or(today.first_of_month());
+    let at_current = (y, m) >= (today.year(), today.month());
+    let size = cal_cell(cols);
+    let layout = CalLayout::of(cols);
+
+    let calendar: View = if layout == CalLayout::WideRow {
+        // The shown month sits on the right so ‹/› stay at the outer edges
+        // and a cross-month range reads in one glance.
+        let prev = shown
+            .checked_sub(jiff::Span::new().months(1))
+            .unwrap_or(shown);
+        let left = CalNav {
+            prev: true,
+            next: false,
+            next_enabled: false,
+        };
+        let right = CalNav {
+            prev: false,
+            next: true,
+            next_enabled: !at_current,
+        };
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(24.0)
+            .children([
+                cal_month(theme, ctx, prev, sel, today, size, left),
+                cal_month(theme, ctx, shown, sel, today, size, right),
+            ])
+    } else {
+        let nav = CalNav {
+            prev: true,
+            next: true,
+            next_enabled: !at_current,
+        };
+        cal_month(theme, ctx, shown, sel, today, size, nav)
+    };
+
+    // Hour slots of a single-day window; `None` for multi-day selections.
+    let span = (first == last).then(|| hour_span(first, start_ms, end_ms));
+    let partial = span.is_some_and(|s| s != (0, 23));
+    let hhmm = |h: i8| format!("{h:02}:00");
 
     let hint = if cal.anchor.is_some() {
         t!("再点一个日期作为另一端")
     } else {
         t!("点击起始日，再点击结束日")
     };
-    // One-tap ranges the top preset bar doesn't offer.
+    // One-tap ranges the top preset bar doesn't offer — a shared min width
+    // so the row reads as one control.
     let quick: Vec<View> = ["昨天", "本周", "本月", "上月", "近 90 天"]
         .iter()
         .map(|k| {
             Button::new()
+                .min_width(72.0)
                 .on_click(ctx.callback(move |_| Msg::CalQuick(k)))
                 .content(TextBlock::new().text(tr(k)).font_size(theme.label_size))
         })
         .collect();
-    let info = StackPanel::new()
-        .orientation(Orientation::Vertical)
+    let quick_row = StackPanel::new()
+        .orientation(Orientation::Horizontal)
         .spacing(8.0)
+        .keyed_children(keyed(quick));
+    let (headline, sub) = match span {
+        Some((a, b)) if partial => (
+            tf!("{} {} → {}", first, hhmm(a), hhmm(b + 1)),
+            tf!("共 {} 小时 · {}", b - a + 1, hint),
+        ),
+        _ => (
+            tf!("{} → {}", first, last),
+            tf!("共 {} 天 · {}", days, hint),
+        ),
+    };
+    let info: View = StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(6.0)
         .vertical_alignment(VerticalAlignment::Center)
         .children((
             TextBlock::new()
-                .text(tf!("{} → {} · 共 {} 天", first, last, days))
-                .font_size(theme.body_size)
+                .text(t!("已选区间"))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle),
+            TextBlock::new()
+                .text(headline)
+                .font_size(theme.body_size * 1.5)
                 .font_weight(FontWeight::SEMI_BOLD),
             TextBlock::new()
-                .text(hint)
+                .text(sub)
                 .font_size(theme.label_size)
                 .foreground(theme.subtle),
             TextBlock::new()
                 .text(t!("快捷选择"))
                 .font_size(theme.label_size)
                 .foreground(theme.subtle)
-                .margin(Thickness::new(0.0, 8.0, 0.0, 0.0)),
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(8.0)
-                .keyed_children(keyed(quick)),
+                .margin(Thickness::new(0.0, 14.0, 0.0, 2.0)),
+            quick_row,
         ));
-    // Calendar pinned left, info column vertically centred in the remaining
-    // width — the card reads balanced instead of half empty.
-    w::card(
-        theme,
-        Grid::new()
-            .columns([GridLength::Auto, GridLength::STAR])
+
+    // Hour block: dial + its caption column.
+    let live_until = if first == today { now.hour() } else { 23 };
+    let dial = hour_dial(theme, ctx, span, live_until);
+    let dial_hint = match (span, cal.clock_anchor) {
+        (None, _) => t!("选择单日后可按时段统计"),
+        (Some(_), Some(_)) => t!("再点一个整点作为另一端"),
+        (Some(_), None) => t!("点击起始整点，再点击结束整点"),
+    };
+    let dial_text = StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(6.0)
+        .width(172.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .children((
+            TextBlock::new()
+                .text(t!("按时段"))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle),
+            TextBlock::new()
+                .text(match span {
+                    Some((a, b)) if partial => format!("{} – {}", hhmm(a), hhmm(b + 1)),
+                    Some(_) => t!("全天").into(),
+                    None => "—".into(),
+                })
+                .font_size(theme.body_size * 1.5)
+                .font_weight(FontWeight::SEMI_BOLD),
+            TextBlock::new()
+                .text(dial_hint)
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .text_wrapping(TextWrapping::Wrap),
+            Button::new()
+                .is_enabled(partial)
+                .margin(Thickness::new(0.0, 8.0, 0.0, 0.0))
+                .on_click(ctx.callback(|_| Msg::ClockFullDay))
+                .content(
+                    TextBlock::new()
+                        .text(t!("全天"))
+                        .font_size(theme.label_size),
+                ),
+        ));
+    let hours: View = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(16.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .children((dial, dial_text));
+
+    let rule_v = || -> View {
+        Border::new()
+            .width(1.0)
+            .margin(Thickness::xy(24.0, 0.0))
+            .background(theme.divider)
+            .into()
+    };
+    let rule_h = || -> View { Border::new().height(1.0).background(theme.divider).into() };
+    let body: View = match layout {
+        // One centred column under the calendar; info and the hour block
+        // share a left edge inside it.
+        CalLayout::Stacked => vstack(
+            16.0,
+            vec![
+                Border::new()
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .content(calendar),
+                rule_h(),
+                Border::new()
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .content(vstack(16.0, vec![info, hours])),
+            ],
+        ),
+        // Calendar pinned left; info over the hour block on the right.
+        CalLayout::Split => Grid::new()
+            .columns([GridLength::Auto, GridLength::Auto, GridLength::STAR])
             .children([
                 cell(0, calendar),
-                cell(
-                    1,
-                    StackPanel::new()
-                        .horizontal_alignment(HorizontalAlignment::Center)
-                        .children([info]),
-                ),
+                cell(1, rule_v()),
+                cell(2, vstack(16.0, vec![info, rule_h(), hours])),
             ]),
-    )
+        // Everything on one row: calendar(s) | info | hour block.
+        CalLayout::Row | CalLayout::WideRow => Grid::new()
+            .columns([
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::STAR,
+                GridLength::Auto,
+                GridLength::Auto,
+            ])
+            .children([
+                cell(0, calendar),
+                cell(1, rule_v()),
+                cell(2, info),
+                cell(3, rule_v()),
+                cell(4, hours),
+            ]),
+    };
+    w::card(theme, body)
 }
 
 fn page_frame(theme: &Theme, body: View) -> View {
@@ -698,6 +1056,7 @@ fn overview_widget(
             let trend_title: String = match vm.range {
                 Range::Today => t!("今日 · 按小时").into(),
                 Range::All => t!("全部 · 按天（近 60 桶）").into(),
+                Range::Custom { .. } if vm.range.hourly() => t!("自定义 · 按小时").into(),
                 Range::Custom { .. } => t!("自定义 · 按天").into(),
                 _ => tf!("{rl}趋势", rl),
             };
@@ -1287,7 +1646,8 @@ pub struct OverviewArgs<'a> {
     pub editing: bool,
     pub trend: &'a w::TrendHandle,
     pub heat: &'a w::HeatHandle,
-    /// Reflow column count from the width ruler (stats + share grids).
+    /// Width tier from the ruler: `REFLOW_MIN_CELL` steps, 1..=`WIDTH_TIERS`
+    /// (reflow grids cap it at `REFLOW_MAX_COLS`).
     pub cols: usize,
     /// Bound to the 1-DIP ruler panel mounted on this page.
     pub ruler: &'a ElementRef<SwapChainPanel>,
@@ -1396,7 +1756,7 @@ pub fn overview_page(
             let last = std::cell::Cell::new(0usize);
             let obs = ruler.observe_surface(move |event| {
                 if let SwapChainPanelEvent::Metrics { width, .. } = event {
-                    let cols = fit_cols(width, REFLOW_MIN_CELL, 12.0, 4);
+                    let cols = fit_cols(width, REFLOW_MIN_CELL, 12.0, WIDTH_TIERS);
                     if cols != last.get() {
                         last.set(cols);
                         let _ = on_width.call(cols);
@@ -1414,7 +1774,9 @@ pub fn overview_page(
     );
 
     if let Range::Custom { start_ms, end_ms } = s.vm.range {
-        col.push(custom_range_row(theme, ctx, start_ms, end_ms, args.cal));
+        col.push(custom_range_row(
+            theme, ctx, start_ms, end_ms, args.cal, args.cols,
+        ));
     }
 
     for id in order.iter() {

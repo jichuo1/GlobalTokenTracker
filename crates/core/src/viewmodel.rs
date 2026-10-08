@@ -14,8 +14,8 @@ pub enum Range {
     Week,
     Month,
     All,
-    /// Arbitrary local-day-aligned `[start_ms, end_ms)` window picked on the
-    /// calendar controls (end is exclusive = start-of-day after the last day).
+    /// Arbitrary `[start_ms, end_ms)` window picked on the calendar (local-day
+    /// aligned) or the hour dial (local-hour aligned inside one day).
     Custom {
         start_ms: i64,
         end_ms: i64,
@@ -57,6 +57,46 @@ impl Range {
         };
         let end = b.tomorrow().unwrap_or(b);
         Self::custom(local_day_start_in(tz, a), local_day_start_in(tz, end))
+    }
+
+    /// Inclusive hour slots `[min(h1,h2), max(h1,h2)]` (0..=23) of civil day
+    /// `day` in the system zone — `[start of the first hour, start of the hour
+    /// after the last)`; hour 23 ends at the next local midnight. Wall-clock
+    /// based, so a DST gap or overlap hour simply comes out shorter/longer.
+    pub fn custom_hours(day: jiff::civil::Date, h1: i8, h2: i8) -> Self {
+        Self::custom_hours_in(&jiff::tz::TimeZone::system(), day, h1, h2)
+    }
+
+    fn custom_hours_in(tz: &jiff::tz::TimeZone, day: jiff::civil::Date, h1: i8, h2: i8) -> Self {
+        let (a, b) = (h1.min(h2).clamp(0, 23), h1.max(h2).clamp(0, 23));
+        let at = |h: i8| {
+            day.at(h, 0, 0, 0)
+                .to_zoned(tz.clone())
+                .map(|z| z.timestamp().as_millisecond())
+                .unwrap_or_default()
+        };
+        let end = if b == 23 {
+            local_day_start_in(tz, day.tomorrow().unwrap_or(day))
+        } else {
+            at(b + 1)
+        };
+        Self::custom(at(a), end)
+    }
+
+    /// Trend buckets per local hour: `Today`, or a custom window that stays
+    /// inside one local day (a whole day included).
+    pub fn hourly(self) -> bool {
+        self.hourly_in(&jiff::tz::TimeZone::system())
+    }
+
+    fn hourly_in(self, tz: &jiff::tz::TimeZone) -> bool {
+        match self {
+            Self::Today => true,
+            Self::Custom { start_ms, end_ms } => {
+                local_date_in(tz, start_ms) == local_date_in(tz, end_ms - 1)
+            }
+            _ => false,
+        }
     }
 
     pub fn label(self) -> &'static str {
@@ -207,7 +247,8 @@ pub struct OverviewVm {
     /// Per-model totals in the same range — the pie's "按模型" dimension.
     pub by_model: Vec<ShareRow>,
     /// Trend buckets for the selected range: per local day, or per local hour
-    /// for `Today`. Each bucket carries its tooltip payload (top-3 models).
+    /// for `Today` and single-day custom windows (`Range::hourly`). Each
+    /// bucket carries its tooltip payload (top-3 models).
     pub daily: Vec<TrendBucket>,
     /// All tool names present in the ledger — the app-filter checkbox list
     /// must show tools even when the filter excludes them.
@@ -402,7 +443,7 @@ impl Store {
         // tooltip payload (events + top-3 models by tokens).
         let mut buckets: std::collections::BTreeMap<String, TrendBucket> =
             std::collections::BTreeMap::new();
-        for r in self.bucket_models(start, end, range == Range::Today, &tz, apps, models)? {
+        for r in self.bucket_models(start, end, range.hourly(), &tz, apps, models)? {
             let key = r.bucket.clone();
             let b = buckets.entry(key.clone()).or_insert_with(|| TrendBucket {
                 date: key,
@@ -615,6 +656,41 @@ mod tests {
             (24 + 23 + 24) * 3_600_000
         );
         assert_eq!(local_date_in(&ny, r.end_ms().unwrap()), date(2026, 3, 10));
+    }
+
+    #[test]
+    fn custom_hours_are_inclusive_and_end_at_midnight() {
+        let utc = TimeZone::UTC;
+        let d = date(2026, 10, 7);
+        let day0 = local_day_start_in(&utc, d);
+        let r = Range::custom_hours_in(&utc, d, 18, 9);
+        assert_eq!(r, Range::custom_hours_in(&utc, d, 9, 18));
+        assert_eq!(r.start_ms(), Some(day0 + 9 * 3_600_000));
+        assert_eq!(r.end_ms(), Some(day0 + 19 * 3_600_000));
+        assert!(r.hourly_in(&utc));
+        // Last slot runs to the next local midnight; 0..=23 is the whole day.
+        let full = Range::custom_hours_in(&utc, d, 0, 23);
+        assert_eq!(full, Range::custom_days_in(&utc, d, d));
+        assert!(full.hourly_in(&utc));
+        let one = Range::custom_hours_in(&utc, d, 5, 5);
+        assert_eq!(one.end_ms().unwrap() - one.start_ms().unwrap(), 3_600_000);
+        // US fall-back: 2026-11-01 01:00 happens twice → the 1..=1 slot is 2h.
+        let ny = TimeZone::get("America/New_York").unwrap();
+        let r = Range::custom_hours_in(&ny, date(2026, 11, 1), 1, 1);
+        assert_eq!(r.end_ms().unwrap() - r.start_ms().unwrap(), 2 * 3_600_000);
+        let r = Range::custom_hours_in(&ny, date(2026, 11, 1), 0, 23);
+        assert_eq!(r.end_ms().unwrap() - r.start_ms().unwrap(), 25 * 3_600_000);
+        assert!(r.hourly_in(&ny));
+    }
+
+    #[test]
+    fn hourly_only_for_today_and_single_day_windows() {
+        let utc = TimeZone::UTC;
+        assert!(Range::Today.hourly_in(&utc));
+        assert!(!Range::Week.hourly_in(&utc));
+        assert!(!Range::All.hourly_in(&utc));
+        let two = Range::custom_days_in(&utc, date(2026, 10, 6), date(2026, 10, 7));
+        assert!(!two.hourly_in(&utc));
     }
 
     #[test]

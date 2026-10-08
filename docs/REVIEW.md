@@ -1204,3 +1204,23 @@
 - **根因**：`extract_payload` 直接 `fs::write` 目标路径 = `CREATE_ALWAYS` 截断 + `write_all`。截断立即生效，而覆盖被杀进程刚释放的 exe 时写/替换会瞬时失败（镜像节回收是异步的，实测 `MoveFileEx REPLACE` 在 taskkill 后 ~3s 内返回 ACCESS_DENIED，90s 后手动同调用立成）；360 安全卫士全程监控该路径（`safemon` PopWndTrackerLog 有该 exe 条目）进一步放大失败面。失败沿 `?` 中断但 GUI 子系统无控制台，用户完全无感。
 - **改动**：载荷与 setup 副本均写 `.<name>.gtt-new` 临时文件 → 校验落盘长度 → `rename_retry`（40×250ms 重试跨镜像回收窗口）原子换入。失败时旧版本完好、仅留临时文件，不再出现 0 字节。
 - **验证**：复现路径实测——旧版进程运行中跑新安装器，`ui/cli/setup.exe` 全部完整替换（10,985,472 / 7,943,168 / 10,937,856B）、无 `.gtt-new` 残留、exit 0、`--launch` 起新进程；sha256 与 release 构建一致。clippy `-D warnings` 0、setup 13 测试过；fmt diff 均为该文件存量风格（95/220/645/685/779/797/813），未连带重排。
+
+## S91 自定义日历卡片按窗口宽度分档排布 ✅
+
+- **问题**：S89 的卡片在宽窗口下月历只占左侧约 400 DIP（36×30 小格），信息列悬浮在剩余宽度正中，中间与下方大片留白；窄窗口下也没有专门处理。
+- **改动**（`pages.rs::custom_range_row`，复用总览宽度标尺的 `overview_cols` 作为分档依据，不新增测量）：
+  - `cols=4`（内容宽 ≥ ~1036 DIP）：**双月并排**（上月 + 当前显示月），‹/› 只放在外侧；跨月区间一眼可见。
+  - `cols=3`：单月历在左，信息列在右。
+  - `cols≤2`：月历居中在上、细分隔线、信息列在下。
+  - 格子按档放大：`cal_cell` 返回 44×34 / 40×32 / 36×30；月历抽出为 `cal_month` + `CalNav`。
+  - 信息列改为左对齐并垂直居中，前面加竖向分隔线；区间日期放大到 1.5× 正文字号，下面是「共 N 天 · 引导语」；快捷按钮统一 `min_width(76)`。i18n：新增「已选区间」「共 {} 天 · {}」，删除不再使用的「{} → {} · 共 {} 天」。
+- **踩坑**：reactor 的 `max_width(f64::INFINITY)` 会直接 panic（"Maximum width must be finite"），并且发生在不可 unwind 的回调里，进程会被 abort。最终方案已去掉 `max_width`。
+- **验证**：`cargo clippy --workspace --all-targets -- -D warnings` 0 条；`cargo test -p globaltokentracker-ui` 25 个通过；触及文件 rustfmt 干净。release 构建（`GTT_DATA_DIR=target\e2e\cal3`，账本用 sqlite backup 副本，区间 09-25..10-05）在三档窗口宽度下截图：`target\e2e\cal3\v2-w2400.png`（双月）、`w1500.png`（单月左右分栏）、`v2-w720.png`（最小窗口宽，上下堆叠）。
+
+## S92 自定义区间增加 24 小时表盘按时段统计 ✅
+
+- **功能**：自定义卡片新增「按时段」表盘：24 个整点槽排成一圈（0 点在顶部，顺时针），选中单日后先点起始整点、再点结束整点（两端都含，反序自动交换），统计窗即缩到该日的 `[起始整点, 结束整点+1h)`；「全天」按钮恢复整日。端点槽为实心强调色，区间内槽为浅色强调，两根指针从中心圆盘边缘指向两端，中心显示时长。选中多日区间时表盘整体变暗且不可点（提示「选择单日后可按时段统计」）；当天晚于当前小时的槽不可点，规则与日历中的未来日期一致。
+- **core**：`Range::custom_hours(day, h1, h2)` 按当地墙钟时间计算，23 点那一格截止到次日当地零点，夏令时跳变或重复的那一小时会相应变短或变长；`Range::hourly()` 在「今日」或自定义窗口落在同一个当地日内时为真。SQL 路径 `bucket_models` 的 hourly 标志改为 `range.hourly()`。`Cube::overview_parts` 遇到非「今日」的 hourly 区间直接放弃（cube 只有日粒度；它本来就拒绝非零点边界，这里补上「整日单日也要按小时出图」的情况），由 SQL 路径兜底。趋势卡标题相应改为「自定义 · 按小时」。
+- **ui**：`Shell.clock_anchor` 新增消息 `Msg::ClockPick(h)` / `Msg::ClockFullDay`；日历点选、快捷选择、顶部预设都会清掉待配对的整点。宽度标尺 `fit_cols` 上限从 4 放宽到 `WIDTH_TIERS=6`，`reflow_grid` 用 `REFLOW_MAX_COLS=4` 封顶，统计卡和占比环形图的行为不变。卡片排布分档（`CalLayout`）：≤2 列为上下堆叠，月历下方的信息块与表盘作为一组整体居中，两者共用左边线（按用户反馈调整）；3–4 列为单月 | 信息在上、表盘在下；5 列为单月 | 信息 | 表盘一行；≥6 列为双月 | 信息 | 表盘一行。各档按该档最窄宽度验算过，不会溢出。表盘里的指针始终保留两根（不可用时长度为 0），避免切换可用/不可用状态时后面的子元素 key 错位。
+- **测试**：新增 `custom_hours_are_inclusive_and_end_at_midnight`（覆盖反序、23 点到次日零点、0..=23 与 `custom_days` 完全相同、纽约 2026-11-01 回拨日 01 点那格为 2h / 全天为 25h）和 `hourly_only_for_today_and_single_day_windows`。
+- **验证**：`cargo test --workspace`（core 166 / setup 13 / ui 25 全部通过）；`cargo clippy --workspace --all-targets -- -D warnings` 0 条；触及文件 rustfmt 干净（`ui/src/main.rs` 的格式差异为既有）。release 截图（`target\e2e\cal3`，账本副本）：`crop-2500.png`（≥6 列）、`d2c-2100.png`（5 列）、`crop-1400.png`（3–4 列）、`d2c-1170.png`（最小窗口宽，居中堆叠）。数据核对：10-07 09:00–19:00 界面显示 737 个事件 / 238,805,403 tok，与 SQL 直查完全一致；按小时分桶只落在 10–17 点，与趋势图横轴吻合。实测点击：鼠标先点 12、再点 15 → `ui.json` 保存为 `1791345600000..1791360000000`（12:00–16:00），界面显示「4 小时」。
