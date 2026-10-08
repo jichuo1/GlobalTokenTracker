@@ -38,7 +38,6 @@ const UNINSTALL_KEY: &str =
 /// console window from our GUI process — it flickers on screen and, under
 /// some endpoint-protection policies, console allocation hangs the child.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 fn local_appdata() -> Result<PathBuf> {
     env::var_os("LOCALAPPDATA")
@@ -846,7 +845,6 @@ fn main() -> Result<()> {
         if launch && quiet {
             let ui = dest.join("globaltokentracker-ui.exe");
             match Command::new(&ui)
-                .creation_flags(DETACHED_PROCESS)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

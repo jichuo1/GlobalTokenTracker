@@ -1417,6 +1417,26 @@
     - 在 1358ms ~ 31358ms 期间，即使价目同步完成或向 `~/.claude` 等文件目录写入新数据，**UI 保持绝对静默，0 次扫描、0 次转圈**；
     - 达到 31358ms（恰好 30 秒）后触发第二次磁盘扫描（耗时 10ms），节奏严密且无多余刷新。
 
+## S99 单实例互斥防幽灵进程闭锁与安装器桌面会话修复 ✅
+
+- **背景与痛点**：
+  - 用户反馈：“怎么软件现在打不开了”。
+  - 核心根因定位剖析：
+    1. **安装器 Detached 标志导致 GUI 无法连接交互桌面**：安装器（`globaltokentracker-setup`）静默带 `--launch` 启动时使用了 Win32 `DETACHED_PROCESS` 标志，导致生成的 GUI 进程脱离了用户的交互桌面会话（`WinSta0\Default`），沦为无可见窗口的孤儿后台进程。
+    2. **单实例互斥刚性闭锁（Single-Instance Deadlock）**：`ensure_single_instance` 发现互斥体已被持有（`ERROR_ALREADY_EXISTS`）时，无论是否有现有可见窗口被激活，均无条件 `std::process::exit(0)`；当后台遗留僵尸/孤儿进程时，用户在桌面双击快捷方式的新进程全部静默退出，造成“软件打不开”的假死现象。
+- **改动范围**：
+  1. **安装器启动 GUI 规范化**（`crates/setup/src/main.rs`）：
+     - 移除无用且导致窗口站隔离的 `DETACHED_PROCESS` 标志，以正常的桌面进程方式拉起 `globaltokentracker-ui.exe`。
+  2. **单实例激活容错回退机制**（`crates/ui/src/tray.rs` & `crates/ui/src/main.rs`）：
+     - `tray::focus_existing_window()` 返回布尔值：成功在当前桌面找到窗口并还原置顶返回 `true`，未找到返回 `false`；
+     - `ensure_single_instance` 仅当 `focus_existing_window()` 确认激活成功时才退出本进程；若未能在桌面找到匹配窗口，输出诊断并允许当前实例继续启动并创建窗口，彻底杜绝孤儿进程导致的用户无法打开界面的问题。
+- **验证命令与结果**：
+  - `cargo test --workspace`：全工作区 209 个测试用例通过；
+  - `cargo clippy --workspace --all-targets -- -D warnings`：0 错误 0 警告；
+  - `installer/package.ps1`：打包生成新版本安装程序覆盖安装；
+  - 实测运行验证：`WinSta0\Default` 桌面上主窗口 `HWND=3541640` 正常呈现，`Vis=True`，标题为 `GlobalTokenTracker`，进程正常响应。
+
+
 
 
 

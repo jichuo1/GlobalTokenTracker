@@ -2516,9 +2516,11 @@ fn ensure_single_instance() -> Option<SingleInstanceGuard> {
             return None;
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            CloseHandle(handle);
-            tray::focus_existing_window();
-            std::process::exit(0);
+            if tray::focus_existing_window() {
+                CloseHandle(handle);
+                std::process::exit(0);
+            }
+            diag!("[startup] existing instance mutex held but no window on desktop — continuing");
         }
         Some(SingleInstanceGuard { handle })
     }

@@ -128,7 +128,7 @@ pub fn focus_main_window() {}
 
 /// Focus any existing instance of GlobalTokenTracker running on the desktop.
 #[cfg(windows)]
-pub fn focus_existing_window() {
+pub fn focus_existing_window() -> bool {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -175,12 +175,17 @@ pub fn focus_existing_window() {
             AllowSetForegroundWindow(u32::MAX);
             ShowWindow(ctx.found, SW_RESTORE);
             SetForegroundWindow(ctx.found);
+            true
+        } else {
+            false
         }
     }
 }
 
 #[cfg(not(windows))]
-pub fn focus_existing_window() {}
+pub fn focus_existing_window() -> bool {
+    false
+}
 
 /// Hide the main window — Win32 `SW_HIDE` works where `WindowRef` (0.100.0)
 /// exposes nothing. Tray icon keeps the process reachable; left click or
