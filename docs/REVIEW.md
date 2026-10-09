@@ -1482,3 +1482,9 @@
 - **调度器**：正式 CLI 优先，旧版只读 SQLite 回退并回读 origin；有效 unavailable 不被绕过，目录缓存不延长额度 TTL。相关 MCP/Skill 实现在独立私密仓库维护，本次公开提交只包含通用 GTT 接口。
 - **验证**：Rust core/CLI 190 项通过、3 项原有外部数据测试跳过；Clippy -D warnings、release 构建通过。调度器 75 项测试、Skill 校验、安装哈希、独立 JSON Schema 与双官方 MCP SDK 客户端验收通过，实际传输 gtt_cli_v1/status=ok。
 - **复核**：外部局部评审超时，无有效报告；Luna 只读复核指出租约故障窗口，主线核对并以 OS 锁、延后清理、等待通知和故障测试修复。未以生成链路/历史观测替代模型能力验收。
+
+## S107 应用版本提升至 0.5.0
+
+- **范围**：根 workspace.package.version 从 0.4.0 提升到 0.5.0，Cargo.lock 中 core/CLI/UI/setup 四个工作区包同步；无第三方依赖或协议主版本变更，旧版本解析测试与历史记录保留。
+- **验证**：cargo metadata --offline --locked 确认四个包均为 0.5.0，逐记录比较锁文件仅四处版本变化；26 项发布工具测试、9 项更新逻辑测试通过，CLI --locked 构建通过。CLI --version 与协调能力响应读回 0.5.0，protocol_version 仍为 1。
+- **构建身份**：Stable v0.5.0 与无 tag 的 Alpha 校验均得到 base/version_name=0.5.0，安装包名 GlobalTokenTracker-Setup-0.5.0-win-x64.exe；版本提升本身不创建 Release/tag。
