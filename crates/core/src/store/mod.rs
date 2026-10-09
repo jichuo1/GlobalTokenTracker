@@ -84,7 +84,7 @@ impl Store {
         Ok(())
     }
 
-    fn try_open(path: &Path) -> Result<Self> {
+    pub(crate) fn try_open(path: &Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
         let store = Self {

@@ -1474,8 +1474,11 @@
     - `ledger vacuumed and compacted`（主库碎片页面彻底回收紧凑）；
   - **前台 UI 运行验证**：UI 进程 PID 45804 在 `WinSta0\Default` 桌面平稳运行，内存仅 173MB，响应敏捷，界面交互正常。
 
+## S106 原生协同观察接口 v1 与兼容桥接
 
-
-
-
-
+- **范围**：core/CLI 新增 coordination capabilities/snapshot/refresh，协议 v1、白名单投影、单事务读取、显式来源与网络额度作用域；沿用已有依赖、账本格式和普通 CLI/UI 行为。刷新先锁后打开，禁止自动备份恢复。
+- **稳定性**：OS 文件锁覆盖完整刷新，owner 心跳与冷却原子提交；暂停、心跳失败、崩溃和孤儿租约可控，禁用来源不扫描/轮询。原有 UI 与普通 scan 未加入协议锁，不宣称全软件统一互斥。
+- **兼容与语义**：缺表/列为 partial，版本不兼容显式报错；模型历史不当生成可用性，credits 余额与 context usage 不换算百分比，未来/过期/重置/非法额度保持 unknown。兼容 provider:region 命名，过滤路径、URL 与常见密钥形态。
+- **调度器**：正式 CLI 优先，旧版只读 SQLite 回退并回读 origin；有效 unavailable 不被绕过，目录缓存不延长额度 TTL。相关 MCP/Skill 实现在独立私密仓库维护，本次公开提交只包含通用 GTT 接口。
+- **验证**：Rust core/CLI 190 项通过、3 项原有外部数据测试跳过；Clippy -D warnings、release 构建通过。调度器 75 项测试、Skill 校验、安装哈希、独立 JSON Schema 与双官方 MCP SDK 客户端验收通过，实际传输 gtt_cli_v1/status=ok。
+- **复核**：外部局部评审超时，无有效报告；Luna 只读复核指出租约故障窗口，主线核对并以 OS 锁、延后清理、等待通知和故障测试修复。未以生成链路/历史观测替代模型能力验收。

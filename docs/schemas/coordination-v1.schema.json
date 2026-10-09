@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:gtt:coordination:v1",
+  "title": "GTT coordination v1 response",
+  "type": "object",
+  "required": ["protocol", "protocol_version", "gtt_version", "operation", "captured_at", "status", "warnings"],
+  "properties": {
+    "protocol": {"const": "gtt.coordination"},
+    "protocol_version": {"type": "integer", "const": 1},
+    "gtt_version": {"type": "string", "maxLength": 64},
+    "operation": {"enum": ["capabilities", "snapshot", "refresh"]},
+    "captured_at": {"type": "integer", "minimum": 1},
+    "status": {"enum": ["ok", "partial", "unavailable"]},
+    "warnings": {"type": "array", "items": {"$ref": "#/$defs/code"}},
+    "error": {"type": "object", "required": ["code", "retryable"], "properties": {"code": {"$ref": "#/$defs/code"}, "retryable": {"type": "boolean"}}},
+    "models": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/model"}},
+    "quotas": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/quota"}},
+    "sources": {"type": "array"},
+    "truncated": {"type": "array", "uniqueItems": true, "items": {"enum": ["sources", "models", "quotas"]}},
+    "observation": {"type": "object", "required": ["consistent", "execution_availability"], "properties": {"consistent": {"const": true}, "execution_availability": {"const": "unknown"}, "latency_normalized": {"const": false}}}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "unavailable"}}}, "then": {"required": ["error"]}},
+    {"if": {"properties": {"operation": {"const": "snapshot"}, "status": {"enum": ["ok", "partial"]}}}, "then": {"required": ["sources", "models", "quotas", "observation", "truncated", "schema_version"]}}
+  ],
+  "$defs": {
+    "code": {"type": "string", "pattern": "^[a-z0-9_]{1,64}$"},
+    "nullableNumber": {"type": ["number", "null"], "minimum": 0},
+    "model": {"type": "object", "required": ["app", "provider_id", "model", "samples", "last_seen", "mean_duration_ms", "mean_ttft_ms", "evidence", "execution_availability"], "properties": {
+      "app": {"type": "string", "maxLength": 128}, "provider_id": {"type": ["string", "null"], "maxLength": 128}, "model": {"type": "string", "maxLength": 128},
+      "samples": {"type": "integer", "minimum": 1}, "last_seen": {"type": "integer", "minimum": 1},
+      "mean_duration_ms": {"$ref": "#/$defs/nullableNumber"}, "mean_ttft_ms": {"$ref": "#/$defs/nullableNumber"},
+      "evidence": {"const": "historical_usage"}, "execution_availability": {"const": "unknown"}
+    }},
+    "quota": {"type": "object", "required": ["app", "account_key", "captured_at", "window_kind", "used", "limit_value", "used_percent", "resets_at", "remaining_percent", "remaining_balance", "value_semantics", "state", "scope"], "properties": {
+      "app": {"type": "string", "maxLength": 128}, "account_key": {"type": ["string", "null"], "pattern": "^[0-9a-f]{16}$"},
+      "captured_at": {"type": "integer"}, "window_kind": {"type": "string", "maxLength": 128}, "resets_at": {"type": ["integer", "null"]},
+      "used": {"$ref": "#/$defs/nullableNumber"}, "limit_value": {"$ref": "#/$defs/nullableNumber"},
+      "used_percent": {"type": ["number", "null"], "minimum": 0, "maximum": 100}, "remaining_percent": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+      "remaining_balance": {"$ref": "#/$defs/nullableNumber"}, "scope": {"const": "app_account_window"},
+      "value_semantics": {"enum": ["allowance_percent", "remaining_balance", "context_usage", "unknown"]},
+      "state": {"enum": ["fresh", "stale", "clock_skew", "reset_passed", "invalid_percent", "unknown"]}
+    }}
+  }
+}

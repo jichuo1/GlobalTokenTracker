@@ -28,11 +28,16 @@ pub struct PollOutcome {
 
 /// Poll every channel with local credentials; absent creds → silent skip.
 pub fn poll_all() -> Vec<PollOutcome> {
+    poll_selected(&["codex", "cursor"])
+}
+
+/// Explicitly scoped polling; other source IDs never trigger network requests.
+pub fn poll_selected(sources: &[&str]) -> Vec<PollOutcome> {
     let mut out = Vec::new();
-    if home(".codex/auth.json").exists() {
+    if sources.contains(&"codex") && home(".codex/auth.json").exists() {
         out.push(outcome("codex", poll_codex()));
     }
-    if cursor_db().is_some() {
+    if sources.contains(&"cursor") && cursor_db().is_some() {
         out.push(outcome("cursor", poll_cursor()));
     }
     out

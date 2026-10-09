@@ -5,6 +5,7 @@
 //! Windows (WinUI 3) and future macOS shells stay thin view layers.
 
 pub mod adapters;
+pub mod coordination;
 pub mod cube;
 pub mod engine;
 pub mod model;

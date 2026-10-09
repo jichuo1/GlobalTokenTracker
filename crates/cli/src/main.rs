@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand};
 use globaltokentracker_core::{Engine, Store, store::default_db_path};
 use tabled::{Table, Tabled};
 
+mod coordination;
+
 #[derive(Parser)]
 #[command(
     name = "globaltokentracker",
@@ -22,6 +24,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Versioned, sanitized coordination data and explicitly scoped refresh.
+    Coordination {
+        #[command(subcommand)]
+        command: coordination::Command,
+        #[arg(long, default_value = "json", value_parser = ["json"], global = true)]
+        format: String,
+        #[arg(long, default_value_t = 1, global = true)]
+        protocol_version: u32,
+    },
     /// Incremental scan of all sources (or one: claude|codex|opencode|zcode).
     Scan { source: Option<String> },
     /// Aggregate report.
@@ -85,18 +96,29 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // Dispatch before logging, path migration, Store creation and price loading.
+    // The machine protocol has exactly one JSON document on stdout.
+    if let Cmd::Coordination {
+        command,
+        protocol_version,
+        ..
+    } = &cli.cmd
+    {
+        return coordination::run(cli.db.as_deref(), command, *protocol_version);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_target(false)
         .init();
-    let cli = Cli::parse();
     let db = cli.db.unwrap_or_else(default_db_path);
     let store = Store::open(&db)?;
     let engine = Engine::new(store)?;
 
     match cli.cmd {
+        Cmd::Coordination { .. } => unreachable!("coordination dispatched above"),
         Cmd::Scan { source } => {
             let t = std::time::Instant::now();
             let r = match source.as_deref() {
