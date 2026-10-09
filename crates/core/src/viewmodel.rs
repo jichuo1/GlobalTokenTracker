@@ -557,7 +557,11 @@ pub mod fmt {
     }
 
     pub fn tokens_total(t: &crate::store::Totals) -> u64 {
-        t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens
+        t.input_tokens
+            + t.output_tokens
+            + t.cache_read_tokens
+            + t.cache_write_tokens
+            + t.unclassified_tokens
     }
 
     /// epoch ms → "MM-DD HH:MM" local.

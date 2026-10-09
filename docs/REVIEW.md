@@ -1488,3 +1488,12 @@
 - **范围**：根 workspace.package.version 从 0.4.0 提升到 0.5.0，Cargo.lock 中 core/CLI/UI/setup 四个工作区包同步；无第三方依赖或协议主版本变更，旧版本解析测试与历史记录保留。
 - **验证**：cargo metadata --offline --locked 确认四个包均为 0.5.0，逐记录比较锁文件仅四处版本变化；26 项发布工具测试、9 项更新逻辑测试通过，CLI --locked 构建通过。CLI --version 与协调能力响应读回 0.5.0，protocol_version 仍为 1。
 - **构建身份**：Stable v0.5.0 与无 tag 的 Alpha 校验均得到 base/version_name=0.5.0，安装包名 GlobalTokenTracker-Setup-0.5.0-win-x64.exe；版本提升本身不创建 Release/tag。
+
+## S113 协作调用计量回流与原生请求去重
+
+- 增加 gtt_coordinator 只读适配器，仅消费脱敏 usage_records v1；导入与水位提交同事务，失败可重试。OpenCode 共享原生消息键，可补全不足的记录；已有完整原生用量及会话聚合不会再计一笔。
+- 增加 unclassified_tokens 并贯通总量、工具/模型、趋势、聚合、明细、CSV 和旧账本/归档迁移。缺少维度的明确总量保留未分类、未定价，调度估算不作为实际用量。
+- Python 协调器记录与作业状态同事务保存，保存失败生成的明确用量和恢复检查计量方式。恢复检查用 UUID 防不同状态库的计数碰撞；旧成功记录可从唯一匹配的返回值补回维度。
+- Review 找到并修复 OpenCode 工具拒绝与模型不匹配路径丢失已返回用量；补上针对这些失败路径的断言。外部有界审查请求达到尝试上限后，按调度规则回退 Luna，主线独立核对。
+- 验证：Python 105 项通过；cargo test --workspace 为 237 项通过、3 项既有忽略；cargo clippy --workspace --all-targets 无告警；CLI/UI Release 构建通过。账本副本首次补入 19 条/150,056 tokens，重扫新增为 0；原生请求未重复入账，未分类 93,670 tokens 均未定价。
+- 没有新增生产依赖。真实数据库、运行配置、供应商标识、提示词、诊断日志均不进入提交；公开仓库仅提交消费端与通用契约，协调器实现保留在私密仓库。

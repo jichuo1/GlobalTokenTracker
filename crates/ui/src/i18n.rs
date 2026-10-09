@@ -114,6 +114,7 @@ pub fn tr(zh: &str) -> &str {
         "事件 {}" => "{} events",
         "全部 {}" => "All-time {}",
         "输入 {}" => "Input {}",
+        "未分类" => "Unclassified",
         "活跃 {}" => "Active {}",
         "今日 · 按小时" => "Today · hourly",
         "全部 · 按天（近 60 桶）" => "All · daily (last 60 buckets)",

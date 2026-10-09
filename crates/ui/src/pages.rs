@@ -974,7 +974,7 @@ fn overview_widget(
                 items
             }
             let app_tok = |a: &globaltokentracker_core::store::AppSummary| {
-                a.input_tokens + a.output_tokens + a.cache_read_tokens
+                a.unclassified_tokens + a.input_tokens + a.output_tokens + a.cache_read_tokens
             };
             let columns = [
                 (
@@ -1056,7 +1056,11 @@ fn overview_widget(
         }
         "apps" => {
             let tokens = |a: &globaltokentracker_core::store::AppSummary| {
-                a.input_tokens + a.output_tokens + a.cache_read_tokens + a.cache_write_tokens
+                a.unclassified_tokens
+                    + a.input_tokens
+                    + a.output_tokens
+                    + a.cache_read_tokens
+                    + a.cache_write_tokens
             };
             let top = vm.by_app.iter().take(8).map(tokens).max().unwrap_or(0);
             let mut rows: Vec<View> = Vec::new();
@@ -1882,6 +1886,13 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool, width: f64) -> View {
         Some("estimated") => cost.push_str(" ≈"),
         Some("provider_reported") => cost.push_str(" ↺"),
         _ => {}
+    }
+    if r.unclassified_tokens > 0 {
+        cost = format!(
+            "{} · {} tokens",
+            tr("未分类"),
+            fmt::tokens_exact(r.unclassified_tokens)
+        );
     }
     let mut cost_children: Vec<View> = vec![dtext(theme, cost, true).into()];
     if r.cost_source.as_deref() == Some("unpriced") {

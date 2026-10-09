@@ -12,6 +12,7 @@ pub struct Totals {
     pub reasoning_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    pub unclassified_tokens: u64,
     pub credits: f64,
     pub cost_usd: f64,
     pub active_ms: u64,
@@ -26,6 +27,7 @@ pub struct AppSummary {
     pub reasoning_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    pub unclassified_tokens: u64,
     pub credits: f64,
     pub cost_usd: f64,
 }
@@ -184,6 +186,7 @@ pub struct EventRow {
     pub reasoning_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    pub unclassified_tokens: u64,
     pub credits: Option<f64>,
     pub cost_usd: Option<f64>,
     pub cost_source: Option<String>,
@@ -212,6 +215,7 @@ pub struct DailyRow {
     pub reasoning_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    pub unclassified_tokens: u64,
     pub cost_usd: f64,
     pub credits: f64,
 }
@@ -234,7 +238,7 @@ impl super::Store {
                         COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                         COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                         COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0),
-                        COALESCE(SUM(active_ms),0)
+                        COALESCE(SUM(active_ms),0), COALESCE(SUM(unclassified_tokens),0)
                  FROM usage_events {w}"
             ),
                 rusqlite::params_from_iter(p.iter()),
@@ -249,6 +253,7 @@ impl super::Store {
                         credits: r.get(6)?,
                         cost_usd: r.get(7)?,
                         active_ms: r.get::<_, i64>(8)? as u64,
+                        unclassified_tokens: r.get::<_, i64>(9)? as u64,
                     })
                 },
             )
@@ -272,7 +277,7 @@ impl super::Store {
         let offset = crate::viewmodel::local_utc_offset();
         let mut st = self.conn().prepare(&format!(
             "SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{offset}') AS d, COUNT(*),
-                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens),0),
                     COALESCE(SUM(cost_usd),0), COALESCE(SUM(duration_ms),0)
              FROM usage_events {w} GROUP BY d"
         ))?;
@@ -317,7 +322,7 @@ impl super::Store {
                     COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                     COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                     COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
-                    COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0)
+                    COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(unclassified_tokens),0)
              FROM usage_events {w} GROUP BY app ORDER BY cost_usd DESC"
         ))?;
         let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
@@ -331,6 +336,7 @@ impl super::Store {
                 cache_write_tokens: r.get::<_, i64>(6)? as u64,
                 credits: r.get(7)?,
                 cost_usd: r.get(8)?,
+                unclassified_tokens: r.get::<_, i64>(9)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -348,7 +354,7 @@ impl super::Store {
         let (w, p) = scope_where(from_ms, to_ms, apps, models);
         let mut st = self.conn().prepare(&format!(
             "SELECT {MODEL_EXPR}, COUNT(*),
-                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens),0),
                     COALESCE(SUM(cost_usd),0)
              FROM usage_events {w} GROUP BY 1 ORDER BY cost_usd DESC"
         ))?;
@@ -387,7 +393,7 @@ impl super::Store {
                     COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                     COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                     COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
-                    COALESCE(SUM(cost_usd),0), COALESCE(SUM(credits),0)
+                    COALESCE(SUM(cost_usd),0), COALESCE(SUM(credits),0), COALESCE(SUM(unclassified_tokens),0)
              FROM usage_events {w}
              GROUP BY d, app ORDER BY d"
         ))?;
@@ -403,6 +409,7 @@ impl super::Store {
                 cache_write_tokens: r.get::<_, i64>(7)? as u64,
                 cost_usd: r.get(8)?,
                 credits: r.get(9)?,
+                unclassified_tokens: r.get::<_, i64>(10)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -432,7 +439,7 @@ impl super::Store {
                     COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                     COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                     COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
-                    COALESCE(SUM(cost_usd),0), COALESCE(SUM(credits),0)
+                    COALESCE(SUM(cost_usd),0), COALESCE(SUM(credits),0), COALESCE(SUM(unclassified_tokens),0)
              FROM usage_events {w}
              GROUP BY h, app ORDER BY h"
         ))?;
@@ -448,6 +455,7 @@ impl super::Store {
                 cache_write_tokens: r.get::<_, i64>(7)? as u64,
                 cost_usd: r.get(8)?,
                 credits: r.get(9)?,
+                unclassified_tokens: r.get::<_, i64>(10)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -485,7 +493,7 @@ impl super::Store {
             "SELECT strftime('{fmt}', ts_start/1000, 'unixepoch', '{utc_offset}') AS k,
                     {MODEL_EXPR},
                     COUNT(*),
-                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens),0),
                     COALESCE(SUM(cost_usd),0)
              FROM usage_events {w}
              GROUP BY k, 2 ORDER BY k"
@@ -510,7 +518,7 @@ impl super::Store {
                     COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                     COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                     COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0),
-                    COALESCE(SUM(active_ms),0)
+                    COALESCE(SUM(active_ms),0), COALESCE(SUM(unclassified_tokens),0)
              FROM usage_events WHERE app=?1",
                 params![app],
                 |r| {
@@ -524,6 +532,7 @@ impl super::Store {
                         credits: r.get(6)?,
                         cost_usd: r.get(7)?,
                         active_ms: r.get::<_, i64>(8)? as u64,
+                        unclassified_tokens: r.get::<_, i64>(9)? as u64,
                     })
                 },
             )
@@ -694,7 +703,7 @@ impl super::Store {
             "SELECT app, model, pricing_model, project, session_id, ts_start,
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
-                    credits, cost_usd, cost_source, duration_ms, raw_ref
+                    credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens
              FROM usage_events {w} ORDER BY ts_start DESC LIMIT ?{li} OFFSET ?{oi}"
         ))?;
         let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
@@ -715,6 +724,7 @@ impl super::Store {
                 cost_source: r.get(13)?,
                 duration_ms: r.get(14)?,
                 raw_ref: r.get(15)?,
+                unclassified_tokens: r.get::<_, i64>(16)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -780,7 +790,7 @@ impl super::Store {
                 "INSERT INTO daily_rollups
                  (date, app, provider, request_model, pricing_model, events,
                   input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
-                  cache_write_5m, cache_write_1h, credits, cost_usd, active_ms)
+                  cache_write_5m, cache_write_1h, credits, cost_usd, active_ms, unclassified_tokens)
                  SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}'),
                         app, COALESCE(provider_id,''), COALESCE(request_model,''),
                         COALESCE(pricing_model,''), COUNT(*),
@@ -788,7 +798,7 @@ impl super::Store {
                         COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                         COALESCE(SUM(cache_write_5m_tokens),0),
                         COALESCE(SUM(cache_write_1h_tokens),0),
-                        SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0)
+                        SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0), COALESCE(SUM(unclassified_tokens),0)
                  FROM usage_events
                  GROUP BY 1,2,3,4,5"
             ),
@@ -846,7 +856,7 @@ impl super::Store {
                 "INSERT INTO daily_rollups
                  (date, app, provider, request_model, pricing_model, events,
                   input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
-                  cache_write_5m, cache_write_1h, credits, cost_usd, active_ms)
+                  cache_write_5m, cache_write_1h, credits, cost_usd, active_ms, unclassified_tokens)
                  SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}'),
                         app, COALESCE(provider_id,''), COALESCE(request_model,''),
                         COALESCE(pricing_model,''), COUNT(*),
@@ -854,7 +864,7 @@ impl super::Store {
                         COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                         COALESCE(SUM(cache_write_5m_tokens),0),
                         COALESCE(SUM(cache_write_1h_tokens),0),
-                        SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0)
+                        SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0), COALESCE(SUM(unclassified_tokens),0)
                  FROM usage_events WHERE {ranges}
                  GROUP BY 1,2,3,4,5"
             ),
@@ -871,7 +881,7 @@ impl super::Store {
             "SELECT app, model, pricing_model, project, session_id, ts_start,
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
-                    credits, cost_usd, cost_source, duration_ms, raw_ref
+                    credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens
              FROM usage_events {w} ORDER BY ts_start"
         ))?;
         let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
@@ -892,6 +902,7 @@ impl super::Store {
                 cost_source: r.get(13)?,
                 duration_ms: r.get(14)?,
                 raw_ref: r.get(15)?,
+                unclassified_tokens: r.get::<_, i64>(16)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -962,6 +973,10 @@ impl super::Store {
                 CREATE INDEX IF NOT EXISTS archive.idx_arch_events_app ON usage_events(app, ts_start);",
             )?;
 
+            let has: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('usage_events', 'archive') WHERE name='unclassified_tokens'", [], |r| r.get(0))?;
+            if has == 0 {
+                conn.execute_batch("ALTER TABLE archive.usage_events ADD COLUMN unclassified_tokens INTEGER NOT NULL DEFAULT 0")?;
+            }
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT OR IGNORE INTO archive.usage_events

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
   duration_ms INTEGER, ttft_ms INTEGER, active_ms INTEGER,
   status TEXT, error TEXT,
   raw_ref TEXT,                          -- 溯源：源文件路径+行号/字节偏移
-  completeness INTEGER NOT NULL DEFAULT 0  -- UPSERT 冲突裁决分（见 store::upsert_event）
+  completeness INTEGER NOT NULL DEFAULT 0, -- UPSERT 冲突裁决分（见 store::upsert_event）
+  unclassified_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_events_time ON usage_events(ts_start);
 CREATE INDEX IF NOT EXISTS idx_events_app ON usage_events(app, ts_start);
@@ -104,6 +105,7 @@ CREATE TABLE IF NOT EXISTS daily_rollups (
   cache_write_5m INTEGER NOT NULL DEFAULT 0,
   cache_write_1h INTEGER NOT NULL DEFAULT 0,
   credits REAL, cost_usd REAL, active_ms INTEGER NOT NULL DEFAULT 0,
+  unclassified_tokens INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (date, app, provider, request_model, pricing_model)
 );
 

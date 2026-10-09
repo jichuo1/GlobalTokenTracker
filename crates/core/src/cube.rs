@@ -38,6 +38,7 @@ struct Group {
     reasoning: u64,
     cache_read: u64,
     cache_write: u64,
+    unclassified: u64,
     credits: f64,
     cost: f64,
     active_ms: u64,
@@ -47,7 +48,7 @@ struct Group {
 impl Group {
     /// Headline token count of the trend/pie convention: input+output+cache_read.
     fn headline(&self) -> u64 {
-        self.input + self.output + self.cache_read
+        self.input + self.output + self.cache_read + self.unclassified
     }
 }
 
@@ -100,6 +101,7 @@ struct Raw {
     reasoning: u64,
     cache_read: u64,
     cache_write: u64,
+    unclassified: u64,
     credits: f64,
     cost: f64,
     active_ms: u64,
@@ -190,6 +192,7 @@ impl Cube {
                 reasoning: r.reasoning,
                 cache_read: r.cache_read,
                 cache_write: r.cache_write,
+                unclassified: r.unclassified,
                 credits: r.credits,
                 cost: r.cost,
                 active_ms: r.active_ms,
@@ -208,7 +211,7 @@ impl Cube {
         let mut st = store.conn().prepare(&format!(
             "SELECT ((ts_start + ?1) % {DAY_MS}) / {HOUR_MS} AS h, app, {MODEL_EXPR},
                     COUNT(*),
-                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens),0),
                     COALESCE(SUM(cost_usd),0)
              FROM usage_events WHERE ts_start >= ?2 GROUP BY h, app, 3"
         ))?;
@@ -363,6 +366,7 @@ impl Cube {
                 reasoning_tokens: 0,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                unclassified_tokens: 0,
                 credits: 0.0,
                 cost_usd: 0.0,
             });
@@ -372,6 +376,7 @@ impl Cube {
             a.reasoning_tokens += g.reasoning;
             a.cache_read_tokens += g.cache_read;
             a.cache_write_tokens += g.cache_write;
+            a.unclassified_tokens += g.unclassified;
             a.credits += g.credits;
             a.cost_usd += g.cost;
             let m = by_model.entry(g.model).or_insert_with(|| ShareRow {
@@ -540,6 +545,7 @@ fn add(t: &mut Totals, g: &Group) {
     t.reasoning_tokens += g.reasoning;
     t.cache_read_tokens += g.cache_read;
     t.cache_write_tokens += g.cache_write;
+    t.unclassified_tokens += g.unclassified;
     t.credits += g.credits;
     t.cost_usd += g.cost;
     t.active_ms += g.active_ms;
@@ -654,7 +660,7 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
                 COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                 COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                 COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(active_ms),0),
-                COALESCE(SUM(duration_ms),0)
+                COALESCE(SUM(duration_ms),0), COALESCE(SUM(unclassified_tokens),0)
          FROM usage_events {filter} GROUP BY d, app, m"
     ))?;
     let rows = st.query_map(rusqlite::params_from_iter(params.iter()), |r| {
@@ -672,6 +678,7 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
             cost: r.get(10)?,
             active_ms: r.get::<_, i64>(11)? as u64,
             duration_ms: r.get::<_, i64>(12)? as u64,
+            unclassified: r.get::<_, i64>(13)? as u64,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -750,6 +757,31 @@ mod tests {
         s
     }
 
+    #[test]
+    fn unclassified_tokens_match_sql_cube_and_model_trends() {
+        let store = Store::open_memory().unwrap();
+        store
+            .upsert_event(&UsageEvent {
+                dedup_key: "gtt-total-only".into(),
+                app: "zcode".into(),
+                model: Some("fixture".into()),
+                ts_start: Some(now_ms()),
+                unclassified_tokens: 23,
+                ..Default::default()
+            })
+            .unwrap();
+        let cube = Cube::build(&store).unwrap();
+        let sql = store.overview(Range::All, None, None).unwrap();
+        let parts = cube.overview_parts(Range::All, None, None).unwrap();
+        assert_eq!(
+            (sql.span.unclassified_tokens, parts.span.unclassified_tokens),
+            (23, 23)
+        );
+        assert_eq!((sql.by_model[0].tokens, parts.by_model[0].tokens), (23, 23));
+        assert_eq!(parts.by_app[0].unclassified_tokens, 23);
+        assert_eq!(parts.daily.iter().map(|b| b.tokens).sum::<u64>(), 23);
+    }
+
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
     }
@@ -759,6 +791,10 @@ mod tests {
         assert_eq!(a.input_tokens, b.input_tokens, "{what} input");
         assert_eq!(a.output_tokens, b.output_tokens, "{what} output");
         assert_eq!(a.reasoning_tokens, b.reasoning_tokens, "{what} reasoning");
+        assert_eq!(
+            a.unclassified_tokens, b.unclassified_tokens,
+            "{what} unclassified"
+        );
         assert_eq!(
             a.cache_read_tokens, b.cache_read_tokens,
             "{what} cache_read"

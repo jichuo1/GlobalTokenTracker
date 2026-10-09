@@ -211,17 +211,33 @@ impl Engine {
 
         // SQLite sources (adapter-managed watermarks).
         for item in sqlite {
+            // Collaboration records and their watermark commit together. A
+            // failed write must remain replayable on the next scan.
+            let tx = if adapter.id() == "gtt_coordinator" {
+                Some(self.store.conn().unchecked_transaction()?)
+            } else {
+                None
+            };
             match adapter.scan_sqlite(item, &self.store) {
                 Ok(outcome) => {
+                    let mut local = ScanReport::default();
                     self.ingest(
                         adapter.id(),
                         adapter.capability(),
                         outcome.events,
                         outcome.quotas,
-                        &mut report,
+                        &mut local,
                     );
-                    report.events_skipped += outcome.skipped;
-                    report.files_scanned += 1;
+                    local.events_skipped += outcome.skipped;
+                    local.files_scanned += 1;
+                    if tx.is_some() && !local.errors.is_empty() {
+                        report.errors.extend(local.errors);
+                    } else {
+                        if let Some(tx) = tx {
+                            tx.commit()?;
+                        }
+                        merge(&mut report, local);
+                    }
                 }
                 Err(e) => report
                     .errors
@@ -428,4 +444,241 @@ fn eco_pool() -> &'static rayon::ThreadPool {
             .build()
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap())
     })
+}
+
+#[cfg(test)]
+mod coordinator_tests {
+    use super::*;
+    use crate::adapters::coordinator::Coordinator;
+    use serde_json::{Value, json};
+
+    struct TestDir(std::path::PathBuf);
+    impl TestDir {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            if self.0.starts_with(std::env::temp_dir()) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    fn record(key: &str) -> Value {
+        json!({"version":1,"record_key":key,"app":"zcode","provider_id":"fixture",
+            "model":"fixture-model","request_model":"fixture-model","session_id":"fixture-session",
+            "ts_start":1700000000000_i64,"duration_ms":10,"status":"failed","measurement":"reported",
+            "native_dedup_key":null,"native_backed":false,"input_tokens":10,"output_tokens":2,
+            "reasoning_tokens":1,"cache_read_tokens":0,"cache_write_5m_tokens":0,"cache_write_1h_tokens":0,
+            "unclassified_tokens":0})
+    }
+
+    fn fixture() -> (TestDir, rusqlite::Connection, SourceItem, Engine) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let name = format!(
+            "gtt-coordinator-test-{}-{}-{}",
+            std::process::id(),
+            crate::store::now_ms(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let dir = TestDir(std::env::temp_dir().join(name));
+        std::fs::create_dir(&dir.0).unwrap();
+        let path = dir.path().join("router-state.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE usage_records(seq INTEGER PRIMARY KEY,record_key TEXT UNIQUE,payload TEXT)").unwrap();
+        let item = SourceItem {
+            key: "fixture-coordinator".into(),
+            path,
+            kind: SourceKind::Sqlite,
+        };
+        (
+            dir,
+            conn,
+            item,
+            Engine::new(Store::open_memory().unwrap()).unwrap(),
+        )
+    }
+
+    fn insert(c: &rusqlite::Connection, seq: i64, r: &Value) {
+        c.execute(
+            "INSERT INTO usage_records VALUES(?1,?2,?3)",
+            rusqlite::params![seq, r["record_key"].as_str(), r.to_string()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn collaboration_totals_replay_upgrade_and_unpriced_exports() {
+        let (_dir, c, item, e) = fixture();
+        let mut unknown = record("total-only");
+        unknown["input_tokens"] = json!(0);
+        unknown["output_tokens"] = json!(0);
+        unknown["unclassified_tokens"] = json!(23);
+        insert(&c, 1, &unknown);
+        let first = e
+            .scan_items(&Coordinator, std::slice::from_ref(&item))
+            .unwrap();
+        assert!(first.errors.is_empty());
+        assert_eq!(first.events_ingested, 1);
+        assert_eq!(
+            e.store
+                .totals(None, None, None, None)
+                .unwrap()
+                .unclassified_tokens,
+            23
+        );
+        assert_eq!(
+            e.store.by_model(None, None, None, None).unwrap()[0].tokens,
+            23
+        );
+        assert_eq!(
+            e.store.export_rows(None, None).unwrap()[0].unclassified_tokens,
+            23
+        );
+        assert_eq!(
+            e.store.export_rows(None, None).unwrap()[0]
+                .cost_source
+                .as_deref(),
+            Some("unpriced")
+        );
+        e.store.rebuild_rollups("+08:00").unwrap();
+        assert_eq!(
+            e.store
+                .conn()
+                .query_row("SELECT unclassified_tokens FROM daily_rollups", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            23
+        );
+        assert_eq!(
+            e.scan_items(&Coordinator, std::slice::from_ref(&item))
+                .unwrap()
+                .events_ingested,
+            0
+        );
+        let mut upgraded = record("total-only");
+        upgraded["output_tokens"] = json!(13);
+        c.execute(
+            "UPDATE usage_records SET seq=2,payload=?1",
+            [upgraded.to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            e.scan_items(&Coordinator, &[item]).unwrap().events_ingested,
+            1
+        );
+        let total = e.store.totals(None, None, None, None).unwrap();
+        assert_eq!(
+            (
+                total.events,
+                total.input_tokens,
+                total.output_tokens,
+                total.unclassified_tokens
+            ),
+            (1, 10, 13, 0)
+        );
+    }
+
+    #[test]
+    fn estimates_and_native_aggregates_never_double_count() {
+        let (_dir, c, item, e) = fixture();
+        let mut estimated = record("estimate");
+        estimated["measurement"] = json!("estimated");
+        insert(&c, 1, &estimated);
+        let mut aggregate = record("native");
+        aggregate["native_backed"] = json!(true);
+        insert(&c, 2, &aggregate);
+        let mut native = record("opencode");
+        native["app"] = json!("opencode");
+        native["native_backed"] = json!(true);
+        native["native_dedup_key"] = json!("opencode:msg:msg_fixture");
+        insert(&c, 3, &native);
+        e.store
+            .upsert_event(&crate::UsageEvent {
+                dedup_key: "opencode:msg:msg_fixture".into(),
+                app: "opencode".into(),
+                input_tokens: 99,
+                ..Default::default()
+            })
+            .unwrap();
+        let report = e.scan_items(&Coordinator, &[item]).unwrap();
+        assert!(report.errors.is_empty());
+        assert_eq!(report.events_ingested, 0);
+        assert_eq!(report.events_skipped, 3);
+        assert_eq!(
+            e.store.totals(None, None, None, None).unwrap().input_tokens,
+            99
+        );
+    }
+
+    #[test]
+    fn complete_native_usage_upgrades_partial_row_without_another_event() {
+        let (_dir, c, item, e) = fixture();
+        let mut native = record("native-partial");
+        native["app"] = json!("opencode");
+        native["native_backed"] = json!(true);
+        native["native_dedup_key"] = json!("opencode:msg:msg_fixture");
+        insert(&c, 1, &native);
+        e.store
+            .upsert_event(&crate::UsageEvent {
+                dedup_key: "opencode:msg:msg_fixture".into(),
+                app: "opencode".into(),
+                input_tokens: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let report = e.scan_items(&Coordinator, &[item]).unwrap();
+        assert!(report.errors.is_empty());
+        let totals = e.store.totals(None, None, None, None).unwrap();
+        assert_eq!(
+            (totals.events, totals.input_tokens, totals.output_tokens),
+            (1, 10, 2)
+        );
+    }
+
+    #[test]
+    fn cursor_and_rows_rollback_when_ledger_write_fails_then_retry() {
+        let (_dir, c, item, e) = fixture();
+        insert(&c, 1, &record("retry"));
+        e.store.conn().execute_batch("CREATE TRIGGER fixture_failure BEFORE INSERT ON usage_events BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+        let failed = e
+            .scan_items(&Coordinator, std::slice::from_ref(&item))
+            .unwrap();
+        assert!(!failed.errors.is_empty());
+        assert_eq!(e.store.load_cursor(&item.key).unwrap().offset, 0);
+        e.store
+            .conn()
+            .execute_batch("DROP TRIGGER fixture_failure")
+            .unwrap();
+        assert_eq!(
+            e.scan_items(&Coordinator, std::slice::from_ref(&item))
+                .unwrap()
+                .events_ingested,
+            1
+        );
+        assert_eq!(e.store.load_cursor(&item.key).unwrap().offset, 1);
+        assert_eq!(
+            e.scan_items(&Coordinator, &[item]).unwrap().events_ingested,
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_version_does_not_advance_cursor_or_partially_ingest() {
+        let (_dir, c, item, e) = fixture();
+        insert(&c, 1, &record("valid"));
+        let mut invalid = record("invalid");
+        invalid["version"] = json!(2);
+        insert(&c, 2, &invalid);
+        let report = e
+            .scan_items(&Coordinator, std::slice::from_ref(&item))
+            .unwrap();
+        assert!(!report.errors.is_empty());
+        assert_eq!(e.store.load_cursor(&item.key).unwrap().offset, 0);
+        assert_eq!(e.store.totals(None, None, None, None).unwrap().events, 0);
+    }
 }

@@ -269,7 +269,7 @@ fn export(engine: &Engine, span: &str, out: Option<&std::path::Path>) -> Result<
     let (f, t) = span_ms(span);
     let rows = engine.store.export_rows(f, t)?;
     let mut buf = String::from(
-        "ts,app,model,pricing_model,project,session,input,output,reasoning,cache_read,cache_write,credits,cost_usd,cost_source,duration_ms,raw_ref\n",
+        "ts,app,model,pricing_model,project,session,input,output,reasoning,cache_read,cache_write,credits,cost_usd,cost_source,duration_ms,raw_ref,unclassified_tokens\n",
     );
     for r in &rows {
         let ts = jiff::Timestamp::from_millisecond(r.ts_start.unwrap_or(0))?
@@ -300,7 +300,7 @@ fn export(engine: &Engine, span: &str, out: Option<&std::path::Path>) -> Result<
             r.duration_ms.map(|v| v.to_string()).unwrap_or_default()
         ));
         csv_cell(&mut buf, r.raw_ref.as_deref().unwrap_or(""));
-        buf.push('\n');
+        buf.push_str(&format!(",{}\n", r.unclassified_tokens));
     }
     match out {
         Some(p) => {

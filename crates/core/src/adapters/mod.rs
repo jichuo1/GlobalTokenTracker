@@ -19,6 +19,7 @@ pub mod cline;
 pub mod codebuddy;
 pub mod codex;
 pub mod commandcode;
+pub mod coordinator;
 pub mod cursor;
 pub mod devin;
 pub mod dsh;
@@ -130,6 +131,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(commandcode::CommandCode),
         Box::new(antigravity::Antigravity),
         Box::new(dsh::Dsh),
+        Box::new(coordinator::Coordinator),
     ]
 }
 

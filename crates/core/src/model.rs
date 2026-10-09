@@ -118,6 +118,9 @@ pub struct UsageEvent {
     pub error: Option<String>,
     /// Source file path + byte offset / row pointer for drill-down audit.
     pub raw_ref: Option<String>,
+    /// Reported total that cannot be assigned to a billing dimension. Included
+    /// in token totals, never guessed into input/output or used for pricing.
+    pub unclassified_tokens: u64,
 }
 
 impl UsageEvent {
@@ -134,6 +137,7 @@ impl UsageEvent {
         n += (self.cost_usd.is_some()) as i32;
         n += (self.credits.is_some()) as i32;
         n += (self.duration_ms.is_some()) as i32;
+        n += (self.unclassified_tokens > 0) as i32;
         n
     }
 
@@ -142,6 +146,7 @@ impl UsageEvent {
     /// would systematically undercount — spec §6.1).
     pub fn is_billable(&self) -> bool {
         self.input_tokens > 0
+            || self.unclassified_tokens > 0
             || self.output_tokens > 0
             || self.reasoning_tokens > 0
             || self.cache_read_tokens > 0
