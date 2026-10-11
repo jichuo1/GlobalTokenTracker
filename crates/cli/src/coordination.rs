@@ -42,7 +42,9 @@ pub fn run(db: Option<&Path>, command: &Command, version: u32) -> Result<()> {
         Command::Snapshot { .. } => "snapshot",
         Command::Refresh { .. } => "refresh",
     };
-    let value = if version != coordination::PROTOCOL_VERSION {
+    let value = if let Err(error) = globaltokentracker_core::external_interface::check(&path) {
+        coordination::failure(operation, error.code())
+    } else if version != coordination::PROTOCOL_VERSION {
         coordination::failure(operation, "unsupported_protocol_version")
     } else {
         match command {

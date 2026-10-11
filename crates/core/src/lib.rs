@@ -8,6 +8,7 @@ pub mod adapters;
 pub mod coordination;
 pub mod cube;
 pub mod engine;
+pub mod external_interface;
 pub mod model;
 pub mod normalize;
 pub mod otel;

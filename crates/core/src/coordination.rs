@@ -74,6 +74,9 @@ fn known_source(source: &str) -> bool {
 }
 
 pub fn capabilities() -> Value {
+    if let Err(error) = crate::external_interface::check(&readonly_db_path()) {
+        return failure("capabilities", error.code());
+    }
     let mut result = response("capabilities", "ok");
     result["features"] = json!({"consistent_read":true, "implicit_refresh":false,
         "source_filter":true, "scoped_refresh":true, "quota_poll_opt_in":true,
@@ -136,6 +139,9 @@ fn finite(value: Option<f64>) -> Option<f64> {
 }
 
 pub fn snapshot(path: &Path, options: &SnapshotOptions) -> Value {
+    if let Err(error) = crate::external_interface::check(path) {
+        return failure("snapshot", error.code());
+    }
     if options.source.as_deref().is_some_and(|s| !known_source(s)) {
         return failure("snapshot", "unknown_source");
     }
@@ -598,6 +604,9 @@ pub fn refresh(
     poll_quota: bool,
     cooldown_secs: u32,
 ) -> Value {
+    if let Err(error) = crate::external_interface::check(path) {
+        return failure("refresh", error.code());
+    }
     if all == source.is_some()
         || source.is_some_and(|s| !known_source(s))
         || !(1..=3600).contains(&cooldown_secs)

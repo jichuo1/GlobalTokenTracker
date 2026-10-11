@@ -3080,6 +3080,8 @@ pub fn settings_page(
     config: &UiConfig,
     update: &UpdateState,
     update_error: Option<&str>,
+    external_interface_enabled: bool,
+    external_interface_error: Option<&str>,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
 ) -> Vec<View> {
@@ -3179,6 +3181,29 @@ pub fn settings_page(
         ),
     );
 
+    let interface_row = setting_row(
+        theme,
+        "外部协同接口",
+        Some("关闭后停用协同查询和新模型调度，不影响用量统计；已发出的模型请求允许完成"),
+        switch(
+            theme,
+            external_interface_enabled,
+            ctx.callback(Msg::SetExternalInterface),
+        ),
+    );
+    let mut interface_rows = vec![interface_row];
+    if let Some(error) = external_interface_error {
+        interface_rows.push(setting_row(
+            theme,
+            "接口状态",
+            None,
+            TextBlock::new()
+                .text(tr(error))
+                .font_size(theme.body_size)
+                .into(),
+        ));
+    }
+
     vec![
         header(theme, tr("设置"), vec![]),
         w::section_header(theme, Symbol::FontColor, tr("外观")),
@@ -3191,6 +3216,8 @@ pub fn settings_page(
             theme,
             vstack(theme.gap, vec![lang_row, autostart_row, close_row]),
         ),
+        w::section_header(theme, Symbol::Setting, tr("外部协同")),
+        w::card(theme, vstack(theme.gap, interface_rows)),
         w::section_header(theme, Symbol::Sync, tr("更新")),
         w::card(
             theme,

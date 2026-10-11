@@ -267,6 +267,18 @@ pub fn tr(zh: &str) -> &str {
         "字体" => "Font",
         "界面字号" => "Font size",
         "通用" => "General",
+        "外部协同" => "External coordination",
+        "外部协同接口" => "External coordination interface",
+        "接口状态" => "Interface status",
+        "关闭后停用协同查询和新模型调度，不影响用量统计；已发出的模型请求允许完成" => {
+            "Disable coordination queries and new model dispatches without affecting usage tracking; requests already sent may finish"
+        }
+        "接口设置读取失败，外部协同已关闭" => {
+            "Interface settings could not be read; external coordination is disabled"
+        }
+        "接口设置保存失败，已显示实际状态" => {
+            "Interface settings could not be saved; the actual state is shown"
+        }
         "语言" => "Language",
         "开机自启动" => "Launch at login",
         "登录 Windows 后自动启动（最小化到托盘）" => {

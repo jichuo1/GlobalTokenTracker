@@ -44,6 +44,7 @@ impl Fixture {
     }
     fn call(&self, args: &[&str]) -> Value {
         let out = Command::new(env!("CARGO_BIN_EXE_globaltokentracker-cli"))
+            .env("GTT_DATA_DIR", &self.0)
             .arg("--db")
             .arg(self.db())
             .arg("coordination")
@@ -65,6 +66,51 @@ impl Drop for Fixture {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
+}
+
+#[test]
+fn disabled_interface_blocks_capabilities_snapshot_and_refresh_without_ledger_changes() {
+    let fixture = Fixture::new();
+    drop(fixture.seed());
+    let settings = globaltokentracker_core::external_interface::path_for_db(&fixture.db());
+    globaltokentracker_core::external_interface::write(&settings, false).unwrap();
+    let before = std::fs::read(fixture.db()).unwrap();
+    for args in [
+        vec!["capabilities"],
+        vec!["snapshot"],
+        vec!["refresh", "--all"],
+    ] {
+        let value = fixture.call(&args);
+        assert_eq!(value["status"], "unavailable");
+        assert_eq!(value["error"]["code"], "external_interface_disabled");
+        assert_eq!(std::fs::read(fixture.db()).unwrap(), before);
+    }
+    globaltokentracker_core::external_interface::write(&settings, true).unwrap();
+    assert_eq!(fixture.call(&["snapshot"])["status"], "ok");
+}
+
+#[test]
+fn explicit_db_does_not_bypass_global_interface_switch() {
+    let global = Fixture::new();
+    let selected = Fixture::new();
+    drop(selected.seed());
+    globaltokentracker_core::external_interface::write(
+        &globaltokentracker_core::external_interface::path_for_db(&global.db()),
+        false,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_globaltokentracker-cli"))
+        .env("GTT_DATA_DIR", &global.0)
+        .args([
+            "--db",
+            selected.db().to_str().unwrap(),
+            "coordination",
+            "capabilities",
+        ])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "external_interface_disabled");
 }
 
 #[test]

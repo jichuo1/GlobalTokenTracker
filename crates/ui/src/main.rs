@@ -145,6 +145,8 @@ pub struct Shell {
     pending_rescan: bool,
     last_error: Option<String>,
     config: UiConfig,
+    external_interface_enabled: bool,
+    external_interface_error: Option<String>,
     theme: Theme,
     editing: bool,
     /// Kept alive for the process lifetime; `!Send`, stays on the UI thread.
@@ -342,6 +344,7 @@ pub enum Msg {
     SetLang(&'static str),
     /// Settings: Run-key launch-at-login toggle; arg is the switch's new state.
     SetAutostart(bool),
+    SetExternalInterface(bool),
     /// Settings: close-button behavior — "" = ask, "quit", "tray".
     SetCloseAction(&'static str),
     /// Title-bar X swallowed by the window subclass — open the ask dialog
@@ -690,6 +693,13 @@ impl Component for Shell {
         // The registry is authoritative — ui.json only mirrors the last write
         // (a fresh install or manual removal clears the flag honestly).
         config.autostart = autostart::enabled();
+        let interface = globaltokentracker_core::external_interface::read(
+            &globaltokentracker_core::external_interface::settings_path(),
+        );
+        let external_interface_enabled = interface.as_ref().is_ok_and(|settings| settings.enabled);
+        let external_interface_error = interface
+            .err()
+            .map(|_| "接口设置读取失败，外部协同已关闭".to_string());
         let range = Range::from_config(&config.range, config.range_start_ms, config.range_end_ms);
         let app_filter = config.apps.clone();
         let model_filter = config.models.clone();
@@ -779,6 +789,8 @@ impl Component for Shell {
             app_filter: config.apps.clone(),
             model_filter: config.models.clone(),
             config,
+            external_interface_enabled,
+            external_interface_error,
             range,
             theme,
             editing: std::env::var("GTT_EDIT").is_ok(),
@@ -1234,6 +1246,22 @@ impl Component for Shell {
                 diag!("[settings] autostart want={on} got={got}");
                 self.config.autostart = got;
                 self.config.save();
+            }
+            Msg::SetExternalInterface(on) => {
+                let path = globaltokentracker_core::external_interface::settings_path();
+                match globaltokentracker_core::external_interface::write(&path, on) {
+                    Ok(settings) => {
+                        self.external_interface_enabled = settings.enabled;
+                        self.external_interface_error = None;
+                    }
+                    Err(_) => {
+                        self.external_interface_enabled =
+                            globaltokentracker_core::external_interface::read(&path)
+                                .is_ok_and(|settings| settings.enabled);
+                        self.external_interface_error =
+                            Some("接口设置保存失败，已显示实际状态".to_string());
+                    }
+                }
             }
             Msg::CloseRequested => match self.config.close_action.as_str() {
                 "quit" => self.quit_now(context),
@@ -2038,6 +2066,8 @@ impl Shell {
                 &self.config,
                 &self.update,
                 self.update_error.as_deref(),
+                self.external_interface_enabled,
+                self.external_interface_error.as_deref(),
                 theme,
                 context,
             ),
