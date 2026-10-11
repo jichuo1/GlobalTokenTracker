@@ -1,7 +1,258 @@
-// Overview: stat tiles, trend (Swift Charts), share donut, activity heatmap,
-// quota strip. Everything renders straight from core's OverviewVM.
+// Overview — the same widgets as the WinUI overview (stats, trend, share,
+// per-tool, heatmap, quotas, unpriced), in a user-ordered, user-hideable
+// layout. Every number comes from core's OverviewVM; the trend series and
+// quota ranking are core's too (trend::drawn, rank_quotas).
 import Charts
 import SwiftUI
+
+// MARK: - Layout (order + hidden, persisted)
+
+enum OverviewWidget: String, CaseIterable, Identifiable, Codable {
+    case stats, trend, share, apps, heat, quotas, unpriced
+    var id: String { rawValue }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .stats: "Summary"
+        case .trend: "Trend"
+        case .share: "Share"
+        case .apps: "By Tool"
+        case .heat: "Activity"
+        case .quotas: "Subscription Quota"
+        case .unpriced: "Unpriced Models"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .stats: "square.grid.2x2"
+        case .trend: "chart.bar.xaxis"
+        case .share: "chart.pie"
+        case .apps: "list.bullet"
+        case .heat: "square.grid.3x3.fill"
+        case .quotas: "gauge.with.dots.needle.50percent"
+        case .unpriced: "questionmark.diamond"
+        }
+    }
+}
+
+/// Widget order + hidden set — the WinUI `PageLayout` for the overview page.
+/// Ids missing from `order` append at the end, so new widgets show up.
+struct OverviewLayout: Codable, Equatable {
+    var order: [OverviewWidget] = OverviewWidget.allCases
+    var hidden: Set<OverviewWidget> = []
+
+    var all: [OverviewWidget] { order + OverviewWidget.allCases.filter { !order.contains($0) } }
+    var visible: [OverviewWidget] { all.filter { !hidden.contains($0) } }
+
+    static let key = "overviewLayout"
+
+    static func load() -> Self {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let l = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
+        return l
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: Self.key)
+        }
+    }
+}
+
+struct OverviewView: View {
+    @Environment(AppModel.self) private var model
+    @ViewState private var layout = OverviewLayout.load()
+    @ViewState private var customizing = false
+
+    var body: some View {
+        Group {
+            if let vm = model.vm {
+                ScrollView {
+                    VStack(spacing: 16) {
+                        if case .available(let u) = model.updateState, !model.updateBannerDismissed {
+                            UpdateBanner(info: u)
+                        }
+                        ForEach(layout.visible) { w in
+                            widget(w, vm: vm)
+                        }
+                    }
+                    .padding(20)
+                }
+                .scrollContentBackground(.hidden)
+                .background(.windowBackground)
+            } else if model.lastError != nil {
+                EmptyState(title: "Couldn't Load Data", symbol: "exclamationmark.triangle",
+                           message: "Check the sidebar for details, then press ⌘R to retry.")
+            } else {
+                ProgressView("Loading ledger…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .navigationTitle("Overview")
+        .navigationSubtitle(model.vm.map { "UTC\($0.tzOffset)" } ?? "")
+        .toolbar {
+            ToolbarItem(placement: .secondaryAction) {
+                Button {
+                    customizing = true
+                } label: {
+                    Label("Customize Overview…", systemImage: "slider.horizontal.3")
+                }
+                .help("Reorder or hide overview cards")
+            }
+        }
+        .sheet(isPresented: $customizing) {
+            CustomizeOverviewSheet(layout: $layout)
+        }
+        .onChange(of: layout) { _, l in l.save() }
+    }
+
+    @ViewBuilder
+    private func widget(_ w: OverviewWidget, vm: OverviewVM) -> some View {
+        switch w {
+        case .stats: StatTiles(vm: vm)
+        case .trend: TrendCard(vm: vm, series: model.trend)
+        case .share: ShareGrid(vm: vm)
+        case .apps: ToolsCard(vm: vm)
+        case .heat: HeatmapCard(days: vm.heat)
+        case .quotas: QuotaStrip(rows: model.quotasRanked)
+        case .unpriced: if !vm.unpriced.isEmpty { UnpricedNote(items: vm.unpriced) }
+        }
+    }
+}
+
+/// Customize sheet: drag to reorder, checkbox to show/hide — the Mac form of
+/// the WinUI edit mode (move up/down + hide per card).
+private struct CustomizeOverviewSheet: View {
+    @Binding var layout: OverviewLayout
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Customize Overview").font(.title3.bold())
+            Text("Drag to reorder. Uncheck a card to hide it.")
+                .font(.callout).foregroundStyle(.secondary)
+            List {
+                ForEach(layout.all) { w in
+                    Toggle(isOn: Binding(
+                        get: { !layout.hidden.contains(w) },
+                        set: { on in
+                            if on { layout.hidden.remove(w) } else { layout.hidden.insert(w) }
+                        }
+                    )) {
+                        Label(w.title, systemImage: w.symbol)
+                    }
+                }
+                .onMove { from, to in
+                    var o = layout.all
+                    o.move(fromOffsets: from, toOffset: to)
+                    layout.order = o
+                }
+            }
+            .listStyle(.bordered)
+            .frame(height: 260)
+            HStack {
+                Button("Restore Defaults") { layout = OverviewLayout() }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.glassProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+}
+
+private struct UpdateBanner: View {
+    let info: UpdateInfo
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.app.fill").font(.title2).foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("New version \(info.version) is available").font(.headline)
+                if let url = URL(string: info.htmlUrl) {
+                    Link("Release notes", destination: url).font(.callout)
+                }
+            }
+            Spacer()
+            Button("Update Now") { model.downloadUpdate() }
+                .buttonStyle(.glassProminent)
+            Button {
+                model.updateBannerDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .help("Dismiss")
+        }
+        .padding(14)
+        .glassEffect(.regular.tint(.accentColor.opacity(0.15)), in: .rect(cornerRadius: 14))
+    }
+}
+
+// MARK: - Stats
+
+private struct StatTiles: View {
+    let vm: OverviewVM
+
+    var body: some View {
+        let rl = Text(vm.range.title)
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 16)], spacing: 16) {
+            Tile(title: Text("\(rl) Tokens"), symbol: "number",
+                 value: Fmt.tokensExact(vm.span.tokens),
+                 detail: Text("Events \(Fmt.count(vm.span.events))"))
+            Tile(title: Text("\(rl) Est. Cost"), symbol: "dollarsign",
+                 value: Fmt.usd(vm.span.costUsd),
+                 detail: Text("All time \(Fmt.usd(vm.all.costUsd))"),
+                 badge: "Estimated")
+            Tile(title: Text("\(rl) Cache Read"), symbol: "memorychip",
+                 value: Fmt.tokensExact(vm.span.cacheReadTokens),
+                 detail: Text("Input \(Fmt.tokensExact(vm.span.inputTokens))"))
+            Tile(title: Text("\(rl) Events"), symbol: "arrow.left.arrow.right",
+                 value: Fmt.count(vm.span.events),
+                 detail: Text("Active \(Fmt.duration(ms: vm.span.activeMs))"))
+        }
+    }
+}
+
+private struct Tile: View {
+    let title: Text
+    let symbol: String
+    let value: String
+    let detail: Text
+    var badge: LocalizedStringKey?
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label { title } icon: { Image(systemName: symbol) }
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let badge {
+                        Text(badge)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(.tint.opacity(0.15), in: .capsule)
+                            .foregroundStyle(.tint)
+                    }
+                }
+                Text(value)
+                    .font(.system(.title, design: .rounded, weight: .semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                detail.font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+        }
+    }
+}
+
+// MARK: - Trend
 
 enum Metric: String, CaseIterable, Identifiable {
     case tokens, cost, events
@@ -22,131 +273,64 @@ enum Metric: String, CaseIterable, Identifiable {
     }
 }
 
-struct OverviewView: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        Group {
-            if let vm = model.vm {
-                ScrollView {
-                    VStack(spacing: 16) {
-                        StatTiles(vm: vm)
-                        TrendCard(vm: vm)
-                        ViewThatFits(in: .horizontal) {
-                            HStack(alignment: .top, spacing: 16) {
-                                ShareCard(vm: vm).frame(minWidth: 360)
-                                ToolsCard(vm: vm).frame(minWidth: 360)
-                            }
-                            VStack(spacing: 16) {
-                                ShareCard(vm: vm)
-                                ToolsCard(vm: vm)
-                            }
-                        }
-                        HeatmapCard(days: vm.heat)
-                        if !vm.quotas.isEmpty { QuotaStrip(rows: vm.quotas) }
-                        if !vm.unpriced.isEmpty { UnpricedNote(items: vm.unpriced) }
-                    }
-                    .padding(20)
-                }
-                .scrollContentBackground(.hidden)
-                .background(.windowBackground)
-            } else if model.lastError != nil {
-                EmptyState(title: "Couldn't Load Data", symbol: "exclamationmark.triangle",
-                           message: "Check the sidebar for details, then press ⌘R to retry.")
-            } else {
-                ProgressView("Loading ledger…").frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .navigationTitle("Overview")
-        .navigationSubtitle(model.vm.map { "UTC\($0.tzOffset)" } ?? "")
-    }
-}
-
-// MARK: - Tiles
-
-private struct StatTiles: View {
-    let vm: OverviewVM
-
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 16)], spacing: 16) {
-            Tile(title: "Tokens", symbol: "number",
-                 value: Fmt.tokensCompact(vm.span.tokens),
-                 detail: Text("Today \(Fmt.tokensCompact(vm.today.tokens))"),
-                 help: Fmt.tokensExact(vm.span.tokens))
-            Tile(title: "Cost", symbol: "dollarsign",
-                 value: Fmt.usd(vm.span.costUsd),
-                 detail: Text("Today \(Fmt.usd(vm.today.costUsd))"))
-            Tile(title: "Requests", symbol: "arrow.left.arrow.right",
-                 value: Fmt.count(vm.span.events),
-                 detail: Text("Today \(Fmt.count(vm.today.events))"))
-            Tile(title: "Active Time", symbol: "clock",
-                 value: Fmt.duration(ms: vm.span.activeMs),
-                 detail: Text("Today \(Fmt.duration(ms: vm.today.activeMs))"))
-        }
-    }
-}
-
-private struct Tile: View {
-    let title: LocalizedStringKey
-    let symbol: String
-    let value: String
-    let detail: Text
-    var help: String?
-
-    var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 6) {
-                Label(title, systemImage: symbol)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.system(.title, design: .rounded, weight: .semibold))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                detail.font(.caption).foregroundStyle(.secondary).monospacedDigit()
-            }
-        }
-        .help(help ?? value)
-    }
-}
-
-// MARK: - Trend
-
 private struct TrendCard: View {
     let vm: OverviewVM
+    let series: TrendSeries?
     @AppStorage("trendMetric") private var metric: Metric = .tokens
+    /// Windows: trend_line — trailing 7-bucket moving average overlay.
+    @AppStorage("trendLine") private var showAverage = false
     @ViewState private var hovered: String?
 
+    /// Card title per range, as on Windows ("Today · hourly", "All · daily (last 60)").
+    private var title: LocalizedStringKey {
+        switch vm.range.key {
+        case "today": "Today · Hourly"
+        case "all": "All Time · Daily (Last 60)"
+        case "custom":
+            (series?.buckets.first?.date.count == 5) ? "Custom · Hourly" : "Custom · Daily"
+        default: "Trend"
+        }
+    }
+
     var body: some View {
-        Card(title: "Trend", trailing: AnyView(
-            Picker("Metric", selection: $metric) {
-                ForEach(Metric.allCases) { Text($0.title).tag($0) }
+        let buckets = series?.buckets ?? vm.daily
+        let avg = series?.avg ?? []
+        Card(title: title, trailing: AnyView(
+            HStack(spacing: 10) {
+                Toggle("7-pt Average", isOn: $showAverage)
+                    .toggleStyle(.checkbox)
+                    .disabled(metric != .tokens)
+                    .help("Moving average over 7 days (7 hours for hourly ranges)")
+                Picker("Metric", selection: $metric) {
+                    ForEach(Metric.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
         )) {
-            if vm.daily.isEmpty {
+            if buckets.isEmpty {
                 Text("No activity in this range.")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 200)
             } else {
-                Chart(vm.daily) { b in
-                    BarMark(
-                        x: .value("Bucket", label(b.date)),
-                        y: .value(metric == .cost ? "Cost" : "Value", value(b))
-                    )
-                    .foregroundStyle(Color.accentColor.gradient)
-                    .opacity(hovered == nil || hovered == label(b.date) ? 1 : 0.45)
-                    .cornerRadius(3)
-                }
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 8)) { _ in
-                        AxisValueLabel()
+                Chart {
+                    ForEach(buckets) { b in
+                        BarMark(x: .value("Bucket", label(b.date)), y: .value("Value", value(b)))
+                            .foregroundStyle(Color.accentColor.gradient)
+                            .opacity(hovered == nil || hovered == label(b.date) ? 1 : 0.45)
+                            .cornerRadius(3)
+                    }
+                    if showAverage && metric == .tokens && avg.count == buckets.count {
+                        ForEach(Array(zip(buckets, avg)), id: \.0.id) { b, a in
+                            LineMark(x: .value("Bucket", label(b.date)), y: .value("Average", a))
+                                .foregroundStyle(.orange)
+                                .lineStyle(StrokeStyle(lineWidth: 2))
+                                .interpolationMethod(.monotone)
+                        }
                     }
                 }
+                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 8)) { _ in AxisValueLabel() } }
                 .chartYAxis {
                     AxisMarks { v in
                         AxisGridLine()
@@ -154,10 +338,12 @@ private struct TrendCard: View {
                     }
                 }
                 .chartXSelection(value: $hovered)
+                .chartFont()
                 .frame(height: 220)
                 .overlay(alignment: .topLeading) {
-                    if let key = hovered, let b = vm.daily.first(where: { label($0.date) == key }) {
-                        TrendTooltip(bucket: b, title: key)
+                    if let key = hovered, let i = buckets.firstIndex(where: { label($0.date) == key }) {
+                        TrendTooltip(bucket: buckets[i], title: key,
+                                     average: showAverage && i < avg.count ? avg[i] : nil)
                     }
                 }
                 .animation(.snappy, value: metric)
@@ -182,12 +368,17 @@ private struct TrendCard: View {
 private struct TrendTooltip: View {
     let bucket: TrendBucket
     let title: String
+    let average: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption.bold())
             Text("\(Fmt.tokensCompact(bucket.tokens)) tokens · \(Fmt.usd(bucket.costUsd))")
                 .font(.caption).monospacedDigit()
+            if let average {
+                Text("7-pt average \(Fmt.tokensCompact(UInt64(max(0, average))))")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             ForEach(bucket.top, id: \.name) { t in
                 Text("\(t.name)  \(Fmt.tokensCompact(t.count))")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -199,29 +390,44 @@ private struct TrendTooltip: View {
     }
 }
 
-// MARK: - Share donut
+// MARK: - Share (four donuts: tool/model × cost/tokens)
 
-private struct ShareCard: View {
+private struct ShareGrid: View {
     let vm: OverviewVM
-    @AppStorage("shareByModel") private var byModel = false
+
+    var body: some View {
+        let byToolCost = vm.byApp.map { (Fmt.app($0.app), $0.costUsd) }
+        let byModelCost = vm.byModel.map { ($0.name, $0.costUsd) }
+        let byToolTokens = vm.byApp.map { (Fmt.app($0.app), Double($0.tokens)) }
+        let byModelTokens = vm.byModel.map { ($0.name, Double($0.tokens)) }
+        Card(title: "\(Text(vm.range.title)) · Share") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 16)], spacing: 16) {
+                Donut(title: "By Tool · Cost", items: byToolCost, format: Fmt.usd)
+                Donut(title: "By Model · Cost", items: byModelCost, format: Fmt.usd)
+                Donut(title: "By Tool · Tokens", items: byToolTokens) { Fmt.tokensCompact(UInt64(max(0, $0))) }
+                Donut(title: "By Model · Tokens", items: byModelTokens) { Fmt.tokensCompact(UInt64(max(0, $0))) }
+            }
+        }
+    }
+}
+
+private struct Donut: View {
+    let title: LocalizedStringKey
+    let slices: [ShareRow]
+    let total: Double
+    let format: (Double) -> String
     @ViewState private var selectedAngle: Double?
 
-    private var slices: [ShareRow] {
-        let rows: [ShareRow] = byModel
-            ? vm.byModel
-            : vm.byApp.map {
-                ShareRow(name: Fmt.app($0.app), events: $0.events, tokens: $0.tokens, costUsd: $0.costUsd)
-            }
-        let sorted = rows.sorted { $0.costUsd > $1.costUsd }
-        guard sorted.count > 7 else { return sorted }
-        let rest = sorted.dropFirst(6)
-        let other = ShareRow(
-            name: String(localized: "Other"),
-            events: rest.reduce(0) { $0 + $1.events },
-            tokens: rest.reduce(0) { $0 + $1.tokens },
-            costUsd: rest.reduce(0) { $0 + $1.costUsd }
-        )
-        return Array(sorted.prefix(6)) + [other]
+    /// Top 6 by value + an "Other" fold; zero rows dropped (no wedge to draw).
+    init(title: LocalizedStringKey, items: [(String, Double)], format: @escaping (Double) -> String) {
+        self.title = title
+        self.format = format
+        let sorted = items.filter { $0.1 > 0 }.sorted { $0.1 > $1.1 }
+        var out = sorted.prefix(6).map { ShareRow(name: $0.0, events: 0, tokens: 0, costUsd: $0.1) }
+        let rest = sorted.dropFirst(6).reduce(0) { $0 + $1.1 }
+        if rest > 0 { out.append(ShareRow(name: String(localized: "Other"), events: 0, tokens: 0, costUsd: rest)) }
+        slices = out
+        total = out.reduce(0) { $0 + $1.costUsd }
     }
 
     private var selected: ShareRow? {
@@ -235,58 +441,39 @@ private struct ShareCard: View {
     }
 
     var body: some View {
-        let total = slices.reduce(0) { $0 + $1.costUsd }
-        Card(title: "Cost Share", trailing: AnyView(
-            Picker("Dimension", selection: $byModel) {
-                Text("Tools").tag(false)
-                Text("Models").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-        )) {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.subheadline).foregroundStyle(.secondary)
             if total <= 0 {
-                Text("No priced usage in this range.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 200)
+                Text("No data").foregroundStyle(.tertiary).frame(maxWidth: .infinity, minHeight: 150)
             } else {
-                HStack(alignment: .center, spacing: 20) {
-                    Chart(slices) { s in
-                        SectorMark(
-                            angle: .value("Cost", s.costUsd),
-                            innerRadius: .ratio(0.62),
-                            angularInset: 1.5
-                        )
+                Chart(slices) { s in
+                    SectorMark(angle: .value("Value", s.costUsd), innerRadius: .ratio(0.62), angularInset: 1.5)
                         .cornerRadius(4)
                         .foregroundStyle(by: .value("Name", s.name))
                         .opacity(selected == nil || selected?.name == s.name ? 1 : 0.4)
+                }
+                .chartLegend(.hidden)
+                .chartAngleSelection(value: $selectedAngle)
+                .chartFont()
+                .chartBackground { _ in
+                    VStack(spacing: 2) {
+                        Text(selected?.name ?? String(localized: "Total"))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text(format(selected?.costUsd ?? total))
+                            .font(.headline).monospacedDigit()
                     }
-                    .chartLegend(.hidden)
-                    .chartAngleSelection(value: $selectedAngle)
-                    .chartBackground { _ in
-                        VStack(spacing: 2) {
-                            Text(selected?.name ?? String(localized: "Total"))
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            Text(Fmt.usd(selected?.costUsd ?? total))
-                                .font(.title3.weight(.semibold)).monospacedDigit()
+                    .frame(maxWidth: 90)
+                }
+                .frame(height: 150)
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(slices) { s in
+                        HStack {
+                            Text(s.name).lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text(Fmt.percent(s.costUsd / total * 100))
+                                .foregroundStyle(.secondary).monospacedDigit()
                         }
-                        .frame(maxWidth: 110)
-                    }
-                    .frame(width: 190, height: 190)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(slices) { s in
-                            HStack {
-                                Text(s.name).lineLimit(1)
-                                Spacer(minLength: 12)
-                                Text(Fmt.usd(s.costUsd)).monospacedDigit()
-                                Text(Fmt.percent(s.costUsd / total * 100))
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                                    .frame(width: 52, alignment: .trailing)
-                            }
-                            .font(.callout)
-                        }
+                        .font(.caption)
                     }
                 }
             }
@@ -294,37 +481,30 @@ private struct ShareCard: View {
     }
 }
 
-// MARK: - Per-tool table
+// MARK: - Per-tool
 
 private struct ToolsCard: View {
     let vm: OverviewVM
 
     var body: some View {
-        let maxTokens = max(1, vm.byApp.map(\.tokens).max() ?? 1)
-        Card(title: "By Tool") {
-            if vm.byApp.isEmpty {
-                Text("No tools recorded in this range.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 120)
+        let top = Array(vm.byApp.prefix(8))
+        let maxTokens = max(1, top.map(\.tokens).max() ?? 1)
+        Card(title: "\(Text(vm.range.title)) · By Tool") {
+            if top.isEmpty {
+                Text("No data").foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 80)
             } else {
                 VStack(spacing: 10) {
-                    ForEach(vm.byApp.sorted { $0.tokens > $1.tokens }) { a in
+                    ForEach(top) { a in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text(Fmt.app(a.app)).fontWeight(.medium)
+                                Text("\(Fmt.app(a.app))  ·  \(Fmt.count(a.events)) events").fontWeight(.medium)
                                 Spacer()
-                                Text(Fmt.tokensCompact(a.tokens)).monospacedDigit()
-                                Text(Fmt.usd(a.costUsd))
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                                    .frame(minWidth: 64, alignment: .trailing)
+                                Text("\(Fmt.tokensExact(a.tokens)) tokens · \(Fmt.usd(a.costUsd))")
+                                    .foregroundStyle(.secondary).monospacedDigit()
                             }
                             .font(.callout)
-                            ProgressView(value: Double(a.tokens), total: Double(maxTokens))
-                                .progressViewStyle(.linear)
-                                .tint(.accentColor)
+                            ProgressView(value: Double(a.tokens), total: Double(maxTokens)).tint(.accentColor)
                         }
-                        .help("\(Fmt.count(a.events)) requests · \(Fmt.tokensExact(a.tokens)) tokens")
                     }
                 }
             }
@@ -334,14 +514,36 @@ private struct ToolsCard: View {
 
 // MARK: - Heatmap
 
+/// Heatmap metric — tokens | cost | calls | duration (Windows: heat_metric).
+enum HeatMetric: String, CaseIterable, Identifiable {
+    case tokens, cost, calls, duration
+    var id: String { rawValue }
+    var title: LocalizedStringKey {
+        switch self {
+        case .tokens: "Tokens"
+        case .cost: "Cost"
+        case .calls: "Requests"
+        case .duration: "Duration"
+        }
+    }
+    func value(_ d: HeatDay) -> Double {
+        switch self {
+        case .tokens: Double(d.tokens)
+        case .cost: d.costUsd
+        case .calls: Double(d.events)
+        case .duration: Double(d.durationMs)
+        }
+    }
+}
+
 private struct HeatmapCard: View {
     let days: [HeatDay]
-    @AppStorage("heatMetric") private var metric: Metric = .tokens
+    @AppStorage("heatMetric") private var metric: HeatMetric = .tokens
 
     var body: some View {
         Card(title: "Activity", trailing: AnyView(
             Picker("Metric", selection: $metric) {
-                ForEach(Metric.allCases) { Text($0.title).tag($0) }
+                ForEach(HeatMetric.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.menu)
             .labelsHidden()
@@ -349,6 +551,16 @@ private struct HeatmapCard: View {
         )) {
             HeatmapGrid(days: days, metric: metric)
                 .frame(height: 7 * 15 + 18)
+            HStack(spacing: 4) {
+                Spacer()
+                Text("Less").font(.caption2).foregroundStyle(.secondary)
+                ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { t in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(t == 0 ? Color.secondary.opacity(0.12) : Color.accentColor.opacity(0.18 + 0.82 * t))
+                        .frame(width: 10, height: 10)
+                }
+                Text("More").font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -359,7 +571,7 @@ private struct HeatmapCard: View {
 /// date math or redraw the grid — only the tooltip re-renders.
 private struct HeatmapGrid: View {
     let days: [HeatDay]
-    let metric: Metric
+    let metric: HeatMetric
 
     struct Cell {
         var day: HeatDay
@@ -378,12 +590,7 @@ private struct HeatmapGrid: View {
         for d in days {
             guard let date = Fmt.bucketDate(d.date) else { continue }
             let slot = (cal.dateComponents([.day], from: first, to: date).day ?? 0) + lead
-            let v: Double = switch metric {
-            case .tokens: Double(d.tokens)
-            case .cost: d.costUsd
-            case .events: Double(d.events)
-            }
-            cells.append(Cell(day: d, week: slot / 7, row: slot % 7, value: v))
+            cells.append(Cell(day: d, week: slot / 7, row: slot % 7, value: metric.value(d)))
             weeks = max(weeks, slot / 7 + 1)
         }
         // 95th percentile tops the scale: one outlier day must not wash every
@@ -441,6 +648,10 @@ private struct HeatHoverLayer: View {
                             .font(.caption.bold())
                         Text("\(Fmt.tokensCompact(d.tokens)) tokens · \(Fmt.usd(d.costUsd)) · \(Fmt.count(d.events)) requests")
                             .font(.caption).monospacedDigit()
+                        if d.durationMs > 0 {
+                            Text("Duration \(Fmt.duration(ms: d.durationMs))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     .padding(8)
                     .glassEffect(.regular, in: .rect(cornerRadius: 10))
@@ -452,48 +663,106 @@ private struct HeatHoverLayer: View {
     }
 }
 
-// MARK: - Quota + unpriced
+// MARK: - Quotas + unpriced
 
 private struct QuotaStrip: View {
     let rows: [QuotaRow]
     @Environment(AppModel.self) private var model
+    static let maxRows = 6  // Windows: QUOTA_STRIP_ROWS
 
     var body: some View {
-        Card(title: "Quota", trailing: AnyView(
+        Card(title: "Subscription Quota", trailing: AnyView(
             Button("Show All") { model.page = .quota }.buttonStyle(.link)
         )) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 12) {
-                ForEach(rows) { q in QuotaMeter(row: q) }
+            if rows.isEmpty {
+                Text("No quota signals yet").foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16)], spacing: 12) {
+                    ForEach(rows.prefix(Self.maxRows)) { q in QuotaMeter(row: q, showApp: true) }
+                }
+                if rows.count > Self.maxRows {
+                    Text("\(rows.count - Self.maxRows) more · see the Quota page")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
 }
 
+/// One quota window — same content as the WinUI quota row: kind, account
+/// badge, balance (credits) or used-% pill, bar, used/limit, reset, capture.
 struct QuotaMeter: View {
     let row: QuotaRow
+    var showApp = false
+
+    private var credits: Bool { row.windowKind == "credits" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("\(Fmt.app(row.app)) · \(Fmt.quotaKind(row.windowKind))").lineLimit(1)
+            HStack(spacing: 6) {
+                Text(showApp ? "\(Fmt.app(row.app)) · \(Fmt.quotaKind(row.windowKind))" : Fmt.quotaKind(row.windowKind))
+                    .fontWeight(.semibold).lineLimit(1)
+                if let acc = row.account {
+                    Pill(text: acc, tint: .secondary)
+                }
                 Spacer()
-                if let pct = row.usedPercent {
-                    Text(Fmt.percent(pct)).monospacedDigit().foregroundStyle(tint(pct))
+                if credits, let u = row.used {
+                    Pill(text: String(localized: "Balance \(Fmt.tokensCompact(UInt64(max(0, u))))"), tint: .secondary)
+                        .help(String(localized: "Balance \(Fmt.tokensExact(UInt64(max(0, u))))"))
+                } else if let pct = row.usedPercent {
+                    Pill(text: Fmt.percent(pct), tint: Self.tint(pct))
                 }
             }
             .font(.callout)
             if let pct = row.usedPercent {
-                ProgressView(value: min(pct, 100), total: 100).tint(tint(pct))
+                ProgressView(value: min(max(pct, 0), 100), total: 100).tint(Self.tint(pct))
             }
-            if let r = row.resetsAt {
-                Text("Resets \(Fmt.date(ms: r), format: .relative(presentation: .named))")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            Text(meta).font(.caption).foregroundStyle(.secondary).help(metaExact)
         }
     }
 
-    private func tint(_ pct: Double) -> Color {
-        pct >= 90 ? .red : pct >= 70 ? .orange : .accentColor
+    /// Windows thresholds: > 80 % danger, > 50 % warning.
+    static func tint(_ pct: Double) -> Color {
+        pct > 80 ? .red : pct > 50 ? .orange : .accentColor
+    }
+
+    private func usage(_ f: @escaping (UInt64) -> String) -> String? {
+        // `credits` rows carry the remaining balance in `used` — the pill.
+        guard !credits else { return nil }
+        let n = { (v: Double) in f(UInt64(max(0, v))) }
+        switch (row.used, row.limitValue) {
+        case let (u?, l?): return String(localized: "Used \(n(u)) / Limit \(n(l))")
+        case let (u?, nil): return String(localized: "Usage \(n(u))")
+        case let (nil, l?): return String(localized: "Limit \(n(l))")
+        default: return nil
+        }
+    }
+
+    private var tail: [String] {
+        var parts: [String] = []
+        if let r = row.resetsAt {
+            parts.append(String(localized: "Resets \(Fmt.date(ms: r).formatted(.relative(presentation: .named)))"))
+        }
+        parts.append(String(localized: "Captured \(Fmt.timestamp(row.capturedAt))"))
+        return parts
+    }
+
+    private var meta: String { ([usage(Fmt.tokensCompact)].compactMap { $0 } + tail).joined(separator: " · ") }
+    private var metaExact: String { ([usage(Fmt.tokensExact)].compactMap { $0 } + tail).joined(separator: " · ") }
+}
+
+struct Pill: View {
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .monospacedDigit()
+            .lineLimit(1)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(tint.opacity(0.15), in: .capsule)
+            .foregroundStyle(tint)
     }
 }
 
@@ -504,8 +773,8 @@ private struct UnpricedNote: View {
         Card {
             Label {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Some models have no known price").font(.headline)
-                    Text(items.map { "\($0.name) (\(Fmt.count($0.count)))" }.joined(separator: ", "))
+                    Text("Unpriced Models").font(.headline)
+                    Text(items.map { "\($0.name)×\(Fmt.count($0.count))" }.joined(separator: ", "))
                         .font(.callout).foregroundStyle(.secondary)
                     Text("Their usage is counted, but no cost is guessed.")
                         .font(.caption).foregroundStyle(.secondary)

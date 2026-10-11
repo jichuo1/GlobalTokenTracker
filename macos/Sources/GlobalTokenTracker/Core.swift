@@ -79,8 +79,27 @@ enum Core {
         try await detached { try call { gtt_sources() } }
     }
 
-    nonisolated static func prices() async throws -> PricesResult {
-        try await detached { try call { gtt_prices() } }
+    struct PricesRequest: Encodable, Sendable {
+        var query = ""
+        var disputedOnly = false
+        var reload = false
+    }
+
+    nonisolated static func prices(_ req: PricesRequest) async throws -> PricesResult {
+        let json = encode(req)
+        return try await detached { try call { json.withCString { gtt_prices($0) } } }
+    }
+
+    /// nil reads the switch; a value writes it, then reports the state on disk.
+    nonisolated static func externalInterface(set: Bool?) async throws -> ExternalInterfaceState {
+        let arg: Int32 = set.map { $0 ? 1 : 0 } ?? -1
+        return try await detached(priority: .utility) { try call { gtt_external_interface(arg) } }
+    }
+
+    nonisolated static func downloadUpdate(channel: String) async throws -> DownloadedUpdate {
+        try await detached(priority: .utility) {
+            try call { channel.withCString { gtt_download_update($0) } }
+        }
     }
 
     nonisolated static func refreshPrices() async throws -> PriceRefreshResult {

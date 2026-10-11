@@ -169,6 +169,13 @@ struct ScanSummary: Decodable, Sendable, Equatable {
     var errors: [String]
 }
 
+/// The trend card's drawn series (core::trend::drawn): at most 60 buckets
+/// plus the 7-bucket moving average aligned to them.
+struct TrendSeries: Decodable, Sendable, Equatable {
+    var buckets: [TrendBucket]
+    var avg: [Double]
+}
+
 struct LoadResult: Decodable, Sendable {
     var fresh: Bool
     var scanMs: UInt64
@@ -176,6 +183,9 @@ struct LoadResult: Decodable, Sendable {
     var scan: ScanSummary
     var vm: OverviewVM?
     var detail: DetailBundle?
+    var trend: TrendSeries?
+    /// vm.quotas ordered most-pressing first (core::viewmodel::rank_quotas).
+    var quotasRanked: [QuotaRow]?
 }
 
 struct DetailPage: Decodable, Sendable {
@@ -222,12 +232,28 @@ struct PriceRow: Decodable, Sendable, Identifiable, Equatable {
     var agree: UInt32
     var total: UInt32
     var quotes: [PriceQuote]
+    /// Sources disagree on this model (core's PriceRow::disputed).
+    var disputed: Bool
     var id: String { model }
 }
 
-struct PricesResult: Decodable, Sendable {
+struct PricesResult: Decodable, Sendable, Equatable {
     var rows: [PriceRow]
+    /// Unfiltered model count.
+    var total: Int
     var syncedAt: Int64?
+}
+
+struct ExternalInterfaceState: Decodable, Sendable, Equatable {
+    var enabled: Bool
+    var invalid: Bool
+    var error: String?
+    var path: String
+}
+
+struct DownloadedUpdate: Decodable, Sendable {
+    var version: String
+    var path: String
 }
 
 struct PriceRefreshResult: Decodable, Sendable {

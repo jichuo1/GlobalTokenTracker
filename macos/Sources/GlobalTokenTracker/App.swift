@@ -17,6 +17,8 @@ struct GlobalTokenTrackerApp: App {
             RootView()
                 .environment(model)
                 .frame(minWidth: 820, minHeight: 560)
+                .appTint()
+                .background(MainWindowHook())
         }
         .defaultSize(width: 1180, height: 780)
         .windowToolbarStyle(.unified)
@@ -25,11 +27,13 @@ struct GlobalTokenTrackerApp: App {
         Settings {
             SettingsView()
                 .environment(model)
+                .appTint()
         }
 
         MenuBarExtra {
             MenuBarPanel()
                 .environment(model)
+                .appTint()
         } label: {
             MenuBarLabel(model: model)
         }
@@ -44,11 +48,22 @@ extension AppModel {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        Prefs.noteLoginLaunch()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Prefs.noteLoginLaunch()
         Prefs.applyDockVisibility()
+        Prefs.applyTheme()
         // Start loading before any scene appears: the menu bar label shows
         // today's numbers even if the window is never opened (login launch).
         MainActor.assumeIsolated { AppModel.shared.start() }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated { CloseAction.isTerminating = true }
+        return .terminateNow
     }
 
     /// Menu-bar resident: closing the last window must not quit.
@@ -63,8 +78,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 /// App-level preferences that act on AppKit / launchd rather than the engine.
+/// Keys mirror the WinUI `UiConfig` fields they stand in for.
 enum Prefs {
     static let showInDockKey = "showInDock"
+    /// window_theme: system | light | dark
+    static let themeKey = "themeMode"
+    /// theme accent: "" (system) or "#rrggbb" from `accents`
+    static let accentKey = "accent"
+    /// D2D chart font family on Windows → chart text font here ("" = system)
+    static let chartFontKey = "chartFont"
+    /// lang: "" (system) | "zh-Hans" | "en"
+    static let languageKey = "appLanguage"
+    /// close_action: "" ask | "menubar" (Windows "tray") | "quit"
+    static let closeActionKey = "closeAction"
+
+    /// The WinUI accent palette (pages.rs ACCENT_OPTIONS).
+    static let accents: [(hex: String, name: String)] = [
+        ("#4d8ae8", "Blue"), ("#10a874", "Green"), ("#8b6fd8", "Purple"),
+        ("#e8853d", "Orange"), ("#d84d5b", "Red"),
+    ]
+
+    @MainActor
+    static func applyTheme() {
+        switch UserDefaults.standard.string(forKey: themeKey) {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
+        }
+    }
+
+    /// Per-app language override, read by Bundle at the next launch.
+    static func applyLanguage(_ code: String) {
+        if code.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+        } else {
+            UserDefaults.standard.set([code], forKey: "AppleLanguages")
+        }
+    }
+
+    @MainActor
+    static func relaunch() {
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+
+    static func refreshLabel(_ secs: Int) -> LocalizedStringKey {
+        switch secs {
+        case 0: "Only when files change"
+        case 60: "Every minute"
+        case 300: "Every 5 minutes"
+        default: "Every \(secs) seconds"
+        }
+    }
+
+    /// Opened as a login item → start in the menu bar with no window (the
+    /// Windows build's `--minimized` autostart). Set once, consumed once.
+    nonisolated(unsafe) private(set) static var launchedAtLogin = false
+
+    static func noteLoginLaunch() {
+        guard let ev = NSAppleEventManager.shared().currentAppleEvent,
+              ev.eventID == kAEOpenApplication,
+              ev.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        else { return }
+        launchedAtLogin = true
+    }
+
+    static func consumeLoginLaunch() -> Bool {
+        defer { launchedAtLogin = false }
+        return launchedAtLogin
+    }
 
     static var showInDock: Bool {
         UserDefaults.standard.object(forKey: showInDockKey) as? Bool ?? true

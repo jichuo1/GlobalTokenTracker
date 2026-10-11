@@ -1,6 +1,8 @@
 // Table pages: Details, Quota, Sources, Prices. SwiftUI `Table` is backed by
 // NSTableView, so rows are virtualized — only visible rows are built, which
-// is what keeps a 60k-event ledger scrolling smoothly.
+// is what keeps a 60k-event ledger scrolling smoothly. Cell content follows
+// the WinUI tables (pages.rs) column for column.
+import AppKit
 import SwiftUI
 
 // MARK: - Details
@@ -26,25 +28,51 @@ struct DetailView: View {
             TableColumn("Tool") { r in Text(Fmt.app(r.app)) }
                 .width(min: 70, ideal: 100)
             TableColumn("Model") { r in
-                Text(r.model ?? "—").help(r.pricingModel.map { "Priced as \($0)" } ?? "")
+                // Windows: the raw model, else the pricing model, else "—".
+                Text(r.model ?? r.pricingModel ?? "—")
+                    .foregroundStyle(.secondary)
+                    .help(r.pricingModel.map { String(localized: "Priced as \($0)") } ?? "")
             }
             .width(min: 120, ideal: 200)
             TableColumn("Project") { r in
                 Text(r.project.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")
                     .help(r.project ?? "")
             }
-            .width(min: 80, ideal: 140)
+            .width(min: 80, ideal: 130)
             TableColumn("Input") { r in num(r.inputTokens) }.width(min: 60, ideal: 80)
             TableColumn("Output") { r in num(r.outputTokens) }.width(min: 60, ideal: 80)
-            TableColumn("Cache Read") { r in num(r.cacheReadTokens) }.width(min: 60, ideal: 90)
-            TableColumn("Cache Write") { r in num(r.cacheWriteTokens) }.width(min: 60, ideal: 90)
-            TableColumn("Cost") { r in
-                Text(r.costUsd.map(Fmt.usd) ?? "—")
+            TableColumn("Cache") { r in
+                num(r.cacheReadTokens + r.cacheWriteTokens, secondary: true)
+                    .help(String(localized: "Read \(Fmt.tokensExact(r.cacheReadTokens)) · Write \(Fmt.tokensExact(r.cacheWriteTokens))"))
+            }
+            .width(min: 60, ideal: 90)
+            TableColumn("Cost") { r in CostCell(row: r) }
+                .width(min: 80, ideal: 130)
+            TableColumn("Duration") { r in
+                Text(r.durationMs.map { Fmt.duration(ms: UInt64(max(0, $0))) } ?? "—")
                     .monospacedDigit()
                     .frame(maxWidth: .infinity, alignment: .trailing)
-                    .help(r.costSource ?? "")
             }
             .width(min: 60, ideal: 80)
+        }
+        // Provenance (raw_ref: source file + offset) — the Windows row tooltip,
+        // here as a context menu so it can be copied for reconciliation.
+        .contextMenu(forSelectionType: EventRow.ID.self) { ids in
+            if let id = ids.first, let r = model.detailRows.first(where: { $0.id == id }) {
+                if let ref = r.rawRef {
+                    Text(ref)
+                    Button("Copy Source Reference") { copy(ref) }
+                }
+                if let sid = r.sessionId {
+                    Button("Copy Session ID") { copy(sid) }
+                }
+                if let p = r.project {
+                    Button("Reveal Project in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
+                    }
+                    .disabled(!FileManager.default.fileExists(atPath: p))
+                }
+            }
         }
         .overlay {
             if model.detailRows.isEmpty && model.vm != nil {
@@ -57,6 +85,7 @@ struct DetailView: View {
                 Text("Showing \(model.detailRows.count) of \(Fmt.count(model.detailTotal))")
                 if model.detailLoadingMore { ProgressView().controlSize(.small) }
                 Spacer()
+                Text("≈ estimated · ↺ provider-reported").foregroundStyle(.tertiary)
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -67,11 +96,49 @@ struct DetailView: View {
         .navigationTitle("Details")
     }
 
-    private func num(_ n: UInt64) -> some View {
+    private func num(_ n: UInt64, secondary: Bool = false) -> some View {
         Text(n == 0 ? "—" : Fmt.tokensExact(n))
             .monospacedDigit()
-            .foregroundStyle(n == 0 ? .tertiary : .primary)
+            .foregroundStyle(n == 0 ? AnyShapeStyle(.tertiary) : secondary ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
             .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func copy(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+    }
+}
+
+/// Cost cell, same rules as the WinUI `event_row`: USD, else credits ("12cr");
+/// "≈" estimated, "↺" provider-reported; unclassified tokens replace the
+/// figure; an "unpriced" pill when no source knows the model.
+private struct CostCell: View {
+    let row: EventRow
+
+    private var text: String {
+        if row.unclassifiedTokens > 0 {
+            return String(localized: "Unclassified · \(Fmt.tokensExact(row.unclassifiedTokens)) tokens")
+        }
+        var s = row.costUsd.map(Fmt.usd)
+            ?? row.credits.map { "\($0.formatted(.number.precision(.fractionLength(0...1))))cr" }
+            ?? "—"
+        switch row.costSource {
+        case "estimated": s += " ≈"
+        case "provider_reported": s += " ↺"
+        default: break
+        }
+        return s
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            if row.costSource == "unpriced" {
+                Pill(text: "unpriced", tint: .orange)
+            }
+            Text(text).monospacedDigit().lineLimit(1)
+        }
+        .help(row.costSource ?? "")
     }
 }
 
@@ -79,24 +146,29 @@ struct DetailView: View {
 
 struct QuotaView: View {
     @Environment(AppModel.self) private var model
+    /// Folded tool groups (Windows: ToggleQuotaGroup), kept for the session.
+    @ViewState private var collapsed: Set<String> = []
 
     var body: some View {
         Group {
             if let groups = model.vm?.quotaGroups, !groups.isEmpty {
                 Form {
                     ForEach(groups) { g in
-                        Section {
+                        Section(isExpanded: Binding(
+                            get: { !collapsed.contains(g.app) },
+                            set: { open in
+                                if open { collapsed.remove(g.app) } else { collapsed.insert(g.app) }
+                            }
+                        )) {
                             ForEach(g.rows) { q in
-                                QuotaMeter(row: q)
-                                    .padding(.vertical, 4)
-                                    .help("Captured \(Fmt.timestamp(q.capturedAt))")
+                                QuotaMeter(row: q).padding(.vertical, 4)
                             }
                         } header: {
                             HStack {
-                                Text(g.display)
+                                Text("\(g.display) · \(g.rows.count) quotas")
                                 Spacer()
                                 if let w = g.worstPct {
-                                    Text(Fmt.percent(w)).monospacedDigit().foregroundStyle(.secondary)
+                                    Pill(text: Fmt.percent(w), tint: QuotaMeter.tint(w))
                                 }
                             }
                         }
@@ -151,9 +223,9 @@ struct SourcesView: View {
                 .width(min: 90, ideal: 120)
             TableColumn("Status") { r in
                 if let err = r.health?.lastError {
-                    Text(err).foregroundStyle(.red).lineLimit(1).help(err)
+                    Pill(text: "⚠ \(err)", tint: .red).help(err)
                 } else if r.health == nil {
-                    Text("Not found on this Mac").foregroundStyle(.secondary)
+                    Text("No data yet").foregroundStyle(.secondary)
                 } else {
                     Text("OK").foregroundStyle(.secondary)
                 }
@@ -179,42 +251,33 @@ struct SourcesView: View {
 
 struct PricesView: View {
     @Environment(AppModel.self) private var model
-    @ViewState private var query = ""
-
-    private func filtered() -> [PriceRow] {
-        let all = model.prices?.rows ?? []
-        let q = query.lowercased().filter { $0.isLetter || $0.isNumber }
-        guard !q.isEmpty else { return all }
-        // Same matching idea as core's `hay`: alphanumerics only, any spelling.
-        return all.filter { r in
-            ([r.model] + r.quotes.map(\.key)).contains {
-                $0.lowercased().filter { $0.isLetter || $0.isNumber }.contains(q)
-            }
-        }
-    }
 
     var body: some View {
-        // Filter once per render; the table and the footer share the result.
-        let rows = filtered()
+        @Bindable var model = model
+        let rows = model.prices?.rows ?? []
         Table(rows) {
             TableColumn("Model") { p in Text(p.model).textSelection(.enabled) }
                 .width(min: 160, ideal: 240)
-            TableColumn("Input / M") { p in price(p.input) }.width(min: 70, ideal: 90)
-            TableColumn("Output / M") { p in price(p.output) }.width(min: 70, ideal: 90)
-            TableColumn("Cache Read / M") { p in price(p.cacheRead) }.width(min: 80, ideal: 110)
-            TableColumn("Cache Write / M") { p in price(p.cacheWrite) }.width(min: 80, ideal: 110)
+            TableColumn("Input") { p in price(p.input) }.width(min: 70, ideal: 90)
+            TableColumn("Output") { p in price(p.output) }.width(min: 70, ideal: 90)
+            TableColumn("Cache Read") { p in price(p.cacheRead) }.width(min: 80, ideal: 100)
+            TableColumn("Cache Write") { p in price(p.cacheWrite) }.width(min: 80, ideal: 100)
             TableColumn("Source") { p in Text(p.source).foregroundStyle(.secondary) }
                 .width(min: 80, ideal: 110)
             TableColumn("Agreement") { p in
-                Label("\(p.agree)/\(p.total)",
-                      systemImage: p.agree == p.total ? "checkmark.seal" : "exclamationmark.bubble")
-                    .foregroundStyle(p.agree == p.total ? Color.secondary : Color.orange)
+                Pill(text: "\(p.agree)/\(p.total)", tint: p.disputed ? .orange : .secondary)
                     .help(tooltip(p))
             }
             .width(min: 70, ideal: 90)
         }
-        .searchable(text: $query, placement: .toolbar, prompt: "Filter models")
+        .searchable(text: $model.priceQuery, placement: .toolbar, prompt: "Search models, e.g. opus 4.6 or gpt mini")
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Toggle(isOn: $model.priceDisputedOnly) {
+                    Label("Disputed Only", systemImage: "exclamationmark.bubble")
+                }
+                .help("Only models the price sources disagree on")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     model.refreshPrices()
@@ -225,27 +288,43 @@ struct PricesView: View {
                 .help("Download the latest prices from every source")
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 8) {
-                if model.isRefreshingPrices {
-                    ProgressView().controlSize(.small)
-                    Text("Updating prices…")
-                } else if let err = model.priceError {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(err.components(separatedBy: "\n").first ?? err).lineLimit(1).help(err)
-                } else {
-                    Text("\(rows.count) models · live sources synced \(Fmt.relative(model.prices?.syncedAt))")
-                }
-                Spacer()
+        .overlay {
+            if model.prices != nil && rows.isEmpty {
+                EmptyState(title: "No Matching Models", symbol: "magnifyingglass")
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.bar)
         }
-        .task { model.loadPrices() }
-        .navigationTitle("Prices")
+        .safeAreaInset(edge: .bottom) { footer(shown: rows.count) }
+        .task { model.loadPrices(reload: true) }
+        .navigationTitle("Prices ($/1M tokens)")
+    }
+
+    private func footer(shown: Int) -> some View {
+        let total = model.prices?.total ?? 0
+        let filtering = !model.priceQuery.trimmingCharacters(in: .whitespaces).isEmpty || model.priceDisputedOnly
+        let sync: String = model.prices?.syncedAt.map {
+            String(localized: "live sources synced \(Fmt.relative($0))")
+        } ?? String(localized: "local seed only, not synced yet")
+        return HStack(spacing: 8) {
+            if model.isRefreshingPrices {
+                ProgressView().controlSize(.small)
+                Text("Syncing…")
+            } else {
+                Text(filtering
+                     ? String(localized: "Matching \(shown) / \(total) models · \(sync)")
+                     : String(localized: "\(total) models · \(sync)"))
+                if let err = model.priceError {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text("Last refresh failed: \(err.components(separatedBy: "\n").first ?? err)")
+                        .lineLimit(1).help(err)
+                }
+            }
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.bar)
     }
 
     private func price(_ v: Double) -> some View {
@@ -254,15 +333,24 @@ struct PricesView: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
+    /// The WinUI corroboration tooltip: the adopted price, who it's from and
+    /// how many agree, then every source's quote with its stance and alias.
     private func tooltip(_ p: PriceRow) -> String {
-        p.quotes.map { q in
-            let mark = switch q.stance {
-            case "agrees": "✓"
-            case "dissents": "✗"
-            default: "·"
+        let money = { (i: Double, o: Double) in "\(Fmt.perMillion(i)) / \(Fmt.perMillion(o))" }
+        var head = money(p.input, p.output)
+        if p.cacheRead > 0 { head += " · " + String(localized: "cache read \(Fmt.perMillion(p.cacheRead))") }
+        if p.cacheWrite > 0 { head += " · " + String(localized: "cache write \(Fmt.perMillion(p.cacheWrite))") }
+        var lines = [head, String(localized: "Adopted \(p.source) (\(p.agree)/\(p.total) agree)")]
+        for q in p.quotes {
+            let (mark, detail): (String, String) = switch q.stance {
+            case "agrees": ("✓", money(q.input, q.output))
+            case "dissents": ("✗", money(q.input, q.output))
+            case "no_data": ("–", String(localized: "no quote"))
+            default: ("·", String(localized: "\(money(q.input, q.output)) (not counted)"))
             }
-            return "\(mark) \(q.source): in \(Fmt.perMillion(q.input)) · out \(Fmt.perMillion(q.output))"
+            let alias = q.key.caseInsensitiveCompare(p.model) == .orderedSame ? "" : "  [\(q.key)]"
+            lines.append("\(mark) \(q.source)  \(detail)\(alias)")
         }
-        .joined(separator: "\n")
+        return lines.joined(separator: "\n")
     }
 }

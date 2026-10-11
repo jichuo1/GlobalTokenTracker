@@ -11,9 +11,22 @@
 // - unchanged scans return `fresh:false` and touch no observable state, so
 //   SwiftUI re-renders nothing;
 // - published values are assigned only when they differ (Equatable VMs).
+import AppKit
 import Foundation
 import Observation
 import SwiftUI
+
+/// Update flow states — the WinUI shell's `UpdateState`.
+enum UpdateState: Equatable {
+    case idle
+    case checking
+    case upToDate
+    case available(UpdateInfo)
+    case downloading(UpdateInfo)
+    /// Verified image opened in Finder; the user drags the app over.
+    case downloaded(UpdateInfo)
+    case failed(String)
+}
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
     case overview, detail, quota, sources, prices
@@ -54,7 +67,17 @@ final class AppModel {
     private(set) var sources: SourcesResult?
     private(set) var prices: PricesResult?
     private(set) var info: CoreInfo?
-    private(set) var update: UpdateCheck?
+    private(set) var trend: TrendSeries?
+    /// Quotas most-pressing first (core's rank_quotas) — the overview strip.
+    private(set) var quotasRanked: [QuotaRow] = []
+    private(set) var externalInterface: ExternalInterfaceState?
+    private(set) var updateState: UpdateState = .idle
+    /// Banner dismissed for this session (Windows: DismissUpdateBanner).
+    var updateBannerDismissed = false
+
+    /// Prices page search — filtered by core (`filter_prices`).
+    var priceQuery = "" { didSet { loadPrices() } }
+    var priceDisputedOnly = false { didSet { loadPrices() } }
 
     // MARK: Status
     private(set) var isLoading = false
@@ -88,7 +111,11 @@ final class AppModel {
         didSet { persist(); armRefresh() }
     }
     var updateChannel: String {
-        didSet { persist() }
+        didSet { persist(); updateState = .idle }
+    }
+    /// Check at launch and every 24 h (Windows: update_auto, default on).
+    var updateAuto: Bool {
+        didSet { persist(); armUpdates() }
     }
 
     // MARK: Internals
@@ -97,6 +124,7 @@ final class AppModel {
     private var pending: LoadRequest?
     private var refreshTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
+    private var updateTask: Task<Void, Never>?
     private var watcher: FileWatcher?
     private var pricesDueHandled = false
     /// Filters changed: the next fresh detail page replaces scrolled pages.
@@ -114,6 +142,7 @@ final class AppModel {
         modelFilter = (d.array(forKey: "modelFilter") as? [String]).map(Set.init)
         refreshSeconds = d.object(forKey: "refreshSeconds") as? Int ?? 30
         updateChannel = d.string(forKey: "updateChannel") ?? "stable"
+        updateAuto = d.object(forKey: "updateAuto") as? Bool ?? true
         rangeInfo = try? Core.window(.describe(range))
     }
 
@@ -132,6 +161,7 @@ final class AppModel {
         defaults.set(modelFilter.map { Array($0).sorted() }, forKey: "modelFilter")
         defaults.set(refreshSeconds, forKey: "refreshSeconds")
         defaults.set(updateChannel, forKey: "updateChannel")
+        defaults.set(updateAuto, forKey: "updateAuto")
     }
 
     // MARK: Lifecycle
@@ -143,10 +173,12 @@ final class AppModel {
         started = true
         Task {
             info = try? await Core.info()
+            externalInterface = try? await Core.externalInterface(set: nil)
             await runLoad(base(scan: false, forceViews: true, forcePrices: true))
             await runLoad(base(scan: true))
             armRefresh()
             armQuota()
+            armUpdates()
         }
     }
 
@@ -202,6 +234,8 @@ final class AppModel {
                 lastScanAt = .now
             }
             if let vm = r.vm, vm != self.vm { self.vm = vm }
+            if let t = r.trend, t != trend { trend = t }
+            if let q = r.quotasRanked, q != quotasRanked { quotasRanked = q }
             if let d = r.detail {
                 mergeDetail(d)
             }
@@ -254,8 +288,16 @@ final class AppModel {
         Task { if let s = try? await Core.sources() { sources = s } }
     }
 
-    func loadPrices() {
-        Task { if let p = try? await Core.prices() { prices = p } }
+    /// Latest-wins: a slower earlier search must not overwrite a newer one.
+    private var priceGen = 0
+
+    func loadPrices(reload: Bool = false) {
+        priceGen += 1
+        let gen = priceGen
+        let req = Core.PricesRequest(query: priceQuery, disputedOnly: priceDisputedOnly, reload: reload)
+        Task {
+            if let p = try? await Core.prices(req), gen == priceGen, p != prices { prices = p }
+        }
     }
 
     func refreshPrices() {
@@ -270,7 +312,7 @@ final class AppModel {
                 if r.rulesRepass || r.repriced > 0 {
                     requestLoad(forceViews: true, rebuild: r.rulesRepass)
                 }
-                if page == .prices || prices != nil { loadPrices() }
+                if page == .prices || prices != nil { loadPrices(reload: true) }
             } catch {
                 priceError = error.localizedDescription
             }
@@ -278,7 +320,52 @@ final class AppModel {
     }
 
     func checkForUpdate() {
-        Task { update = try? await Core.checkUpdate(channel: updateChannel) }
+        if case .downloading = updateState { return }
+        updateState = .checking
+        let channel = updateChannel
+        Task {
+            do {
+                let r = try await Core.checkUpdate(channel: channel)
+                guard channel == updateChannel else { return }
+                updateState = r.update.map { .available($0) } ?? .upToDate
+                if r.update != nil { updateBannerDismissed = false }
+            } catch {
+                updateState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    /// "Update Now": core downloads and SHA-256-verifies the disk image; we
+    /// only open it, so the user gets Finder's drag-to-Applications window.
+    func downloadUpdate() {
+        guard case .available(let u) = updateState else { return }
+        updateState = .downloading(u)
+        let channel = updateChannel
+        Task {
+            do {
+                let d = try await Core.downloadUpdate(channel: channel)
+                NSWorkspace.shared.open(URL(fileURLWithPath: d.path))
+                updateState = .downloaded(u)
+            } catch {
+                updateState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func armUpdates() {
+        updateTask?.cancel()
+        updateTask = nil
+        guard updateAuto, started else { return }
+        updateTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.checkForUpdate()
+                try? await Task.sleep(for: .seconds(24 * 3600), tolerance: .seconds(600))
+            }
+        }
+    }
+
+    func setExternalInterface(_ on: Bool) {
+        Task { externalInterface = try? await Core.externalInterface(set: on) }
     }
 
     // MARK: Background cadence
@@ -340,6 +427,11 @@ final class AppModel {
         if set.contains(app) { set.remove(app) } else { set.insert(app) }
         appFilter = set.count == vm?.apps.count ? nil : set
     }
+
+    /// Bulk scope: `true` = everything (nil filter), `false` = deliberately
+    /// empty view — same semantics as the WinUI filter flyout.
+    func setAllApps(_ on: Bool) { appFilter = on ? nil : [] }
+    func setAllModels(_ on: Bool) { modelFilter = on ? nil : [] }
 
     func toggleModel(_ m: String) {
         var set = modelFilter ?? Set(vm?.models ?? [])

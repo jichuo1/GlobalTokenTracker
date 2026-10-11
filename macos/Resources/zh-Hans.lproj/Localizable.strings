@@ -155,3 +155,143 @@
 "Previous month" = "上个月";
 "Next month" = "下个月";
 "Hour range" = "时段";
+
+/* Windows feature parity — overview (wording follows the WinUI shell) */
+"Summary" = "统计卡片";
+"Share" = "占比分布";
+"Subscription Quota" = "订阅配额";
+"Unpriced Models" = "未计价模型";
+"Customize Overview" = "自定义总览";
+"Customize Overview…" = "自定义总览…";
+"Reorder or hide overview cards" = "调整或隐藏总览卡片";
+"Drag to reorder. Uncheck a card to hide it." = "拖动调整顺序，取消勾选即可隐藏。";
+"Restore Defaults" = "恢复默认";
+"Done" = "完成";
+"%@ Tokens" = "%@ Tokens";
+"%@ Est. Cost" = "%@估算成本";
+"%@ Cache Read" = "%@缓存读";
+"%@ Events" = "%@事件";
+"Events %@" = "事件 %@";
+"All time %@" = "全部 %@";
+"Input %@" = "输入 %@";
+"Active %@" = "活跃 %@";
+"Estimated" = "估算";
+"Today · Hourly" = "今日 · 按小时";
+"All Time · Daily (Last 60)" = "全部 · 按天（近 60 桶）";
+"Custom · Hourly" = "自定义 · 按小时";
+"Custom · Daily" = "自定义 · 按天";
+"7-pt Average" = "7 点均线";
+"7-pt average %@" = "7 点均值 %@";
+"Moving average over 7 days (7 hours for hourly ranges)" = "近 7 天移动平均（按小时区间为 7 小时）";
+"%@ · Share" = "%@ · 占比分布";
+"%@ · By Tool" = "%@ · 按工具";
+"By Tool · Cost" = "按工具 · 费用";
+"By Model · Cost" = "按模型 · 费用";
+"By Tool · Tokens" = "按工具 · Tokens";
+"By Model · Tokens" = "按模型 · Tokens";
+"No data" = "暂无数据";
+"%@  ·  %@ events" = "%@  ·  %@ 事件";
+"Duration" = "时长";
+"Duration %@" = "时长 %@";
+"Less" = "少";
+"More" = "多";
+"No quota signals yet" = "暂无配额信号";
+"%lld more · see the Quota page" = "另有 %lld 项 · 见配额页";
+"Balance %@" = "余额 %@";
+"Used %@ / Limit %@" = "已用 %@ / 上限 %@";
+"Usage %@" = "用量 %@";
+"Limit %@" = "上限 %@";
+"New version %@ is available" = "发现新版本 %@";
+"Release notes" = "查看更新说明";
+"Update Now" = "立即更新";
+"Dismiss" = "关闭";
+
+/* Details */
+"Cache" = "缓存";
+"Read %@ · Write %@" = "读 %@ · 写 %@";
+"Priced as %@" = "按 %@ 计价";
+"Unclassified · %@ tokens" = "未分类 · %@ tokens";
+"≈ estimated · ↺ provider-reported" = "≈ 估算 · ↺ 厂商上报";
+"Copy Source Reference" = "拷贝溯源位置";
+"Copy Session ID" = "拷贝会话 ID";
+"Reveal Project in Finder" = "在访达中显示项目";
+
+/* Quota / Sources */
+"%@ · %lld quotas" = "%@ · %lld 项配额";
+"No data yet" = "尚未扫描";
+
+/* Prices */
+"Prices ($/1M tokens)" = "价目表（$/1M tokens）";
+"Search models, e.g. opus 4.6 or gpt mini" = "搜索模型，如 opus 4.6 或 gpt mini";
+"Disputed Only" = "仅看有分歧的";
+"Only models the price sources disagree on" = "只显示各价格来源有分歧的模型";
+"No Matching Models" = "没有匹配的模型";
+"Syncing…" = "同步中…";
+"Matching %lld / %lld models · %@" = "匹配 %lld / %lld 个模型 · %@";
+"%lld models · %@" = "%lld 个模型 · %@";
+"live sources synced %@" = "在线来源 %@ 同步";
+"local seed only, not synced yet" = "仅本地种子，尚未联网同步";
+"Last refresh failed: %@" = "上次刷新失败：%@";
+"cache read %@" = "缓存读 %@";
+"cache write %@" = "缓存写 %@";
+"Adopted %@ (%u/%u agree)" = "采信 %@（%u/%u 家一致）";
+"no quote" = "无报价";
+"%@ (not counted)" = "%@（未计票）";
+
+/* Filters & toolbar */
+"Select All" = "全选";
+"Select None" = "全不选";
+"%@ %lld/%lld" = "%@ 已选 %lld/%lld";
+"Scan all sources now (⌘R); hold for the refresh cadence" = "立即扫描所有数据源（⌘R）；按住可设置刷新频率";
+
+/* Settings */
+"Appearance" = "外观";
+"Theme" = "主题模式";
+"System" = "跟随系统";
+"Light" = "浅色";
+"Dark" = "深色";
+"Accent color" = "主题色";
+"Blue" = "蓝色";
+"Green" = "绿色";
+"Purple" = "紫色";
+"Orange" = "橙色";
+"Red" = "红色";
+"Chart font" = "字体";
+"System (SF Pro)" = "系统默认（SF Pro）";
+"Applies to chart text only; the interface follows the system font." = "仅作用于图表文字；界面控件字体跟随系统";
+"Language" = "语言";
+"English" = "English";
+"Relaunch to apply the new language." = "重新启动后生效。";
+"Relaunch Now" = "立即重启";
+"When closing the window" = "点击关闭按钮时";
+"Ask every time" = "每次询问";
+"Keep running in the menu bar" = "保留在菜单栏中运行";
+"Quit" = "退出";
+"Opened at login, GlobalTokenTracker starts in the menu bar without a window." = "登录时打开的 GlobalTokenTracker 会直接在菜单栏中运行，不显示窗口。";
+"External Coordination" = "外部协同";
+"External coordination interface" = "外部协同接口";
+"Interface status" = "接口状态";
+"On" = "开";
+"Off" = "关";
+"Couldn't save the setting; showing the actual state" = "接口设置保存失败，已显示实际状态";
+"Settings file is invalid — interface blocked" = "设置文件无效，接口已停用";
+"Turning this off stops coordination queries and new model routing. Usage tracking is unaffected; requests already sent are allowed to finish." = "关闭后停用协同查询和新模型调度，不影响用量统计；已发出的模型请求允许完成";
+"Usage is read locally from each tool's own logs. Nothing leaves this Mac except price, quota and update lookups." = "用量从各工具的本地日志读取。除价格、配额和更新查询外，数据不会离开这台 Mac。";
+"Update channel" = "更新渠道";
+"Preview" = "预览版";
+"Preview builds contain features that aren't released yet and may be unstable." = "预览版包含尚未正式发布的新功能，可能不稳定";
+"Check for updates automatically" = "自动检查更新";
+"At launch and every 24 hours." = "启动时及每 24 小时检查一次";
+"Not checked yet" = "尚未检查";
+"Checking…" = "检查中…";
+"Downloading and verifying…" = "正在下载并校验…";
+"Version %@ is open in Finder — drag it to Applications to finish." = "版本 %@ 已在访达中打开，将其拖入“应用程序”即可完成更新。";
+"Update failed: %@" = "更新失败：%@";
+"Retry" = "重试";
+"Check Now" = "立即检查";
+
+/* Close prompt */
+"Keep GlobalTokenTracker running?" = "保持 GlobalTokenTracker 运行？";
+"It can keep tracking from the menu bar, or quit completely." = "可以在菜单栏中继续统计，也可以完全退出。";
+"Keep in Menu Bar" = "保留在菜单栏";
+"Remember my choice" = "记住我的选择";

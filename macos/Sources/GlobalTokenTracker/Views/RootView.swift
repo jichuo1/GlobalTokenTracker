@@ -74,30 +74,40 @@ struct MainToolbar: ToolbarContent {
                     title: "Tools", symbol: "hammer",
                     items: model.vm?.apps ?? [], label: Fmt.app,
                     isOn: model.isAppSelected, toggle: model.toggleApp,
-                    reset: { model.appFilter = nil }, active: model.appFilter != nil
+                    setAll: model.setAllApps, selected: model.appFilter?.count
                 )
                 FilterMenu(
                     title: "Models", symbol: "cpu",
                     items: model.vm?.models ?? [], label: { $0 },
                     isOn: model.isModelSelected, toggle: model.toggleModel,
-                    reset: { model.modelFilter = nil }, active: model.modelFilter != nil
+                    setAll: model.setAllModels, selected: model.modelFilter?.count
                 )
             }
         }
         ToolbarSpacer(.fixed)
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                model.manualRefresh()
+            // Split button: click scans now; the menu sets the cadence
+            // (Windows: the 刷新 pill in the filter strip).
+            Menu {
+                Picker("Rescan sources", selection: $model.refreshSeconds) {
+                    ForEach(AppModel.refreshOptions, id: \.self) { s in
+                        Text(Prefs.refreshLabel(s)).tag(s)
+                    }
+                }
+                .pickerStyle(.inline)
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
                     .symbolEffect(.rotate, isActive: model.isScanning)
+            } primaryAction: {
+                model.manualRefresh()
             }
-            .help("Scan all sources now (⌘R)")
+            .help("Scan all sources now (⌘R); hold for the refresh cadence")
         }
     }
 }
 
-/// Checklist menu for tool / model filters. `nil` filter = everything on.
+/// Checklist menu for tool / model filters. `selected == nil` = everything
+/// on; `0` = a deliberately empty view (Windows: Some(vec![])).
 struct FilterMenu: View {
     let title: LocalizedStringKey
     let symbol: String
@@ -105,18 +115,29 @@ struct FilterMenu: View {
     let label: (String) -> String
     let isOn: (String) -> Bool
     let toggle: (String) -> Void
-    let reset: () -> Void
-    let active: Bool
+    let setAll: (Bool) -> Void
+    let selected: Int?
 
     var body: some View {
+        let active = selected != nil
         Menu {
-            Button("Show All", action: reset).disabled(!active)
+            Button("Select All") { setAll(true) }.disabled(!active)
+            Button("Select None") { setAll(false) }.disabled(selected == 0)
             Divider()
             ForEach(items, id: \.self) { item in
                 Toggle(label(item), isOn: Binding(get: { isOn(item) }, set: { _ in toggle(item) }))
             }
         } label: {
-            Label(title, systemImage: active ? "\(symbol).fill" : symbol)
+            Label {
+                // "Tools 12/15" when narrowed — the WinUI "已选 12/15" summary.
+                if let n = selected {
+                    Text("\(Text(title)) \(n)/\(items.count)")
+                } else {
+                    Text(title)
+                }
+            } icon: {
+                Image(systemName: active ? "\(symbol).fill" : symbol)
+            }
         }
         .menuIndicator(.hidden)
         .help(title)
