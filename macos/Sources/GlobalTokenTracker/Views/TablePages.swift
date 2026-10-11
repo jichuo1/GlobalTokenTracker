@@ -14,7 +14,13 @@ struct DetailView: View {
             TableColumn("Time") { r in
                 Text(Fmt.timestamp(r.tsStart)).monospacedDigit()
                     // Infinite scroll: the last visible row asks for the next page.
-                    .onAppear { if r.id == model.detailRows.last?.id { model.loadMoreDetail() } }
+                    // Deferred a run-loop turn — mutating the rows while
+                    // NSTableView is laying out cells is a reentrant delegate
+                    // operation (AppKit warns now, will assert later).
+                    .onAppear {
+                        guard r.id == model.detailRows.last?.id else { return }
+                        Task { @MainActor in model.loadMoreDetail() }
+                    }
             }
             .width(min: 120, ideal: 150)
             TableColumn("Tool") { r in Text(Fmt.app(r.app)) }

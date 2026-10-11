@@ -15,7 +15,7 @@
 
 use globaltokentracker_core::store::default_db_path;
 use globaltokentracker_core::viewmodel::Range;
-use globaltokentracker_core::{Cube, Engine, Store, adapters, power, pricing, quota, update};
+use globaltokentracker_core::{Cube, Engine, Store, adapters, pricing, quota, update};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::ffi::{CStr, CString, c_char};
@@ -150,8 +150,11 @@ fn prices() -> Result<Value, String> {
     Ok(json!({ "rows": rows, "synced_at": synced_at }))
 }
 
+// No `power::worker` here: shells call us on *their* thread pool (Swift's
+// cooperative pool / GCD workqueues), where Darwin rejects QoS changes and a
+// thread name would mislabel a shared thread. The caller's task priority
+// (`.utility` in Core.swift) already sets the QoS.
 fn refresh_prices() -> Result<Value, String> {
-    power::worker("gtt-prices");
     let r = pricing::refresh(&open()?).map_err(|e| e.to_string())?;
     if r.rules_repass {
         // Every booked price moved: cached aggregates are stale.
@@ -166,7 +169,6 @@ fn refresh_prices() -> Result<Value, String> {
 }
 
 fn poll_quotas() -> Result<Value, String> {
-    power::worker("gtt-quota");
     let store = open()?;
     let (mut inserted, mut errors) = (0u64, Vec::new());
     for o in quota::poll_all() {
