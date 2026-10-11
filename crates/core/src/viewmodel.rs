@@ -441,6 +441,22 @@ pub fn app_display(app: &str) -> &str {
     }
 }
 
+/// Most pressing first: windows still running before expired ones, then by
+/// used percent (unknown last). Stable, so ties keep the store's app/window
+/// order. (The overview quota strip's ordering, shared by every shell.)
+pub fn rank_quotas(rows: &[QuotaRow], now_ms: i64) -> Vec<QuotaRow> {
+    let live = |q: &QuotaRow| q.resets_at.is_none_or(|t| t >= now_ms);
+    let mut ranked = rows.to_vec();
+    ranked.sort_by(|a, b| {
+        live(b).cmp(&live(a)).then_with(|| {
+            b.used_percent
+                .partial_cmp(&a.used_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+    ranked
+}
+
 /// Fold flat `latest_quotas` rows into per-app groups, ordered by app name.
 pub fn group_quotas(rows: Vec<QuotaRow>) -> Vec<QuotaGroupVm> {
     let mut map: std::collections::BTreeMap<String, Vec<QuotaRow>> =
@@ -775,6 +791,28 @@ mod tests {
         let fall = date(2026, 11, 1);
         assert_eq!(Range::custom_days_in(&ny, fall, fall).hour_span_in(&ny), Some((0, 23)));
         assert_eq!(Range::custom_hours_in(&ny, fall, 1, 3).hour_span_in(&ny), Some((1, 3)));
+    }
+
+    #[test]
+    fn quotas_rank_live_first_then_by_percent() {
+        let q = |app: &str, pct: Option<f64>, reset: Option<i64>| QuotaRow {
+            app: app.into(),
+            account: None,
+            captured_at: 0,
+            window_kind: "weekly".into(),
+            used: None,
+            limit_value: None,
+            used_percent: pct,
+            resets_at: reset,
+        };
+        let rows = [
+            q("expired-high", Some(99.0), Some(50)),
+            q("live-low", Some(10.0), Some(200)),
+            q("live-unknown", None, None),
+            q("live-high", Some(80.0), None),
+        ];
+        let order: Vec<String> = rank_quotas(&rows, 100).into_iter().map(|r| r.app).collect();
+        assert_eq!(order, ["live-high", "live-low", "live-unknown", "expired-high"]);
     }
 
     #[test]

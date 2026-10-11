@@ -168,11 +168,11 @@ struct GhAsset {
 }
 
 /// Release asset this platform installs from: the Windows setup exe, or the
-/// zipped universal `.app` bundle on macOS. Both are listed in SHA256SUMS.
+/// universal disk image on macOS. Both are listed in SHA256SUMS.
 #[must_use]
 pub fn asset_name(tag: &str) -> String {
     if cfg!(target_os = "macos") {
-        format!("GlobalTokenTracker-{tag}-macos-universal.zip")
+        format!("GlobalTokenTracker-{tag}-macos-universal.dmg")
     } else {
         format!("GlobalTokenTracker-Setup-{tag}-win-x64.exe")
     }

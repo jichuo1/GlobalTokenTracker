@@ -14,8 +14,11 @@
 #![allow(unsafe_code)]
 
 use globaltokentracker_core::store::default_db_path;
-use globaltokentracker_core::viewmodel::{QuickRange, Range};
-use globaltokentracker_core::{Cube, Engine, Store, adapters, pricing, quota, update};
+use globaltokentracker_core::store::{PriceRow, filter_prices};
+use globaltokentracker_core::viewmodel::{QuickRange, Range, rank_quotas};
+use globaltokentracker_core::{
+    Cube, Engine, Store, adapters, external_interface, pricing, quota, trend, update,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::ffi::{CStr, CString, c_char};
@@ -28,6 +31,23 @@ const DETAIL_PAGE_SIZE: i64 = 200;
 /// Aggregates from the previous load: range/filter changes and scans that
 /// touched a few days refresh it instead of rebuilding (see `Cube::refreshed`).
 static CUBE: Mutex<Option<Arc<Cube>>> = Mutex::new(None);
+
+/// Price table as last read (rows + live sync stamp): search keystrokes
+/// filter this in memory via core's `filter_prices` instead of re-querying.
+/// Dropped on every price refresh.
+static PRICES: Mutex<Option<PriceTable>> = Mutex::new(None);
+
+/// Rows + the live-source sync stamp they were read with.
+type PriceTable = (Arc<Vec<PriceRow>>, Option<i64>);
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PricesReq {
+    query: String,
+    disputed_only: bool,
+    /// Re-read the table from the ledger (page opened, after a refresh).
+    reload: bool,
+}
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -164,11 +184,16 @@ fn load(req: LoadReq) -> Result<Value, String> {
     let rows = store
         .events_page(DETAIL_PAGE_SIZE, 0, apps, models)
         .map_err(|e| e.to_string())?;
+    let (bars, avg) = trend::drawn(&vm.daily);
+    let trend = json!({ "buckets": bars, "avg": avg });
+    let quotas_ranked = rank_quotas(&vm.quotas, globaltokentracker_core::store::now_ms());
     Ok(json!({
         "fresh": true,
         "scan_ms": scan_ms,
         "price_due": price_due,
         "scan": scan,
+        "trend": trend,
+        "quotas_ranked": quotas_ranked,
         "vm": vm,
         "detail": { "rows": rows, "total": cube.event_count(apps, models), "page_size": DETAIL_PAGE_SIZE },
     }))
@@ -191,11 +216,30 @@ fn sources() -> Result<Value, String> {
     Ok(json!({ "health": health, "adapters": adapters }))
 }
 
-fn prices() -> Result<Value, String> {
-    let store = open()?;
-    let rows = store.price_rows(5000).map_err(|e| e.to_string())?;
-    let synced_at = pricing::last_live_sync(&store).unwrap_or(None);
-    Ok(json!({ "rows": rows, "synced_at": synced_at }))
+fn prices(req: PricesReq) -> Result<Value, String> {
+    let mut cache = PRICES.lock().map_err(|e| e.to_string())?;
+    if req.reload || cache.is_none() {
+        let store = open()?;
+        let rows = store.price_rows(5000).map_err(|e| e.to_string())?;
+        *cache = Some((Arc::new(rows), pricing::last_live_sync(&store).unwrap_or(None)));
+    }
+    let (all, synced_at) = cache.clone().ok_or("price table unavailable")?;
+    drop(cache);
+    let filtering = !req.query.trim().is_empty() || req.disputed_only;
+    let shown: Vec<PriceRow> = if filtering {
+        filter_prices(&all, &req.query, req.disputed_only)
+    } else {
+        all.as_ref().clone()
+    };
+    let rows: Vec<Value> = shown
+        .iter()
+        .map(|r| {
+            let mut v = json!(r);
+            v["disputed"] = json!(r.disputed());
+            v
+        })
+        .collect();
+    Ok(json!({ "rows": rows, "total": all.len(), "synced_at": synced_at }))
 }
 
 // No `power::worker` here: shells call us on *their* thread pool (Swift's
@@ -208,6 +252,7 @@ fn refresh_prices() -> Result<Value, String> {
         // Every booked price moved: cached aggregates are stale.
         *CUBE.lock().map_err(|e| e.to_string())? = None;
     }
+    *PRICES.lock().map_err(|e| e.to_string())? = None;
     Ok(json!({
         "sources": r.sources,
         "failed": r.failed,
@@ -256,6 +301,35 @@ fn check_update(channel: &str) -> Result<Value, String> {
             "asset_name": r.asset_name,
         })),
     }))
+}
+
+/// The shared external-coordination switch (`external-interface.json`).
+/// `enabled: null` reads; a bool writes, then reports the state on disk.
+fn external(enabled: Option<bool>) -> Result<Value, String> {
+    let path = external_interface::settings_path();
+    let mut error = None;
+    if let Some(on) = enabled
+        && let Err(e) = external_interface::write(&path, on)
+    {
+        error = Some(e.to_string());
+    }
+    let state = external_interface::read(&path);
+    Ok(json!({
+        "enabled": state.is_ok_and(|s| s.enabled),
+        "invalid": state.is_err_and(|e| e == external_interface::AccessError::InvalidSettings),
+        "error": error,
+        "path": path.to_string_lossy(),
+    }))
+}
+
+/// Check `channel`, then download + SHA-256-verify the platform asset.
+/// Never executes anything: the shell decides how to open it.
+fn download_update(channel: &str) -> Result<Value, String> {
+    let rel = update::check(update::Channel::from_key(channel))
+        .map_err(|e| e.to_string())?
+        .ok_or("already up to date")?;
+    let path = update::download(&rel).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "version": rel.version.to_string(), "path": path.to_string_lossy() }))
 }
 
 fn info() -> Value {
@@ -324,10 +398,36 @@ pub extern "C" fn gtt_sources() -> *mut c_char {
     guarded(sources)
 }
 
-/// Price table and the live-source sync stamp.
+/// Price table filtered by core's search (`{query, disputed_only, reload}`),
+/// plus the unfiltered total and the live-source sync stamp.
+///
+/// # Safety
+/// `req_json` is NULL or a valid NUL-terminated UTF-8 string that outlives the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn gtt_prices() -> *mut c_char {
-    guarded(prices)
+pub unsafe extern "C" fn gtt_prices(req_json: *const c_char) -> *mut c_char {
+    guarded(|| prices(arg(req_json)?))
+}
+
+/// Read (`-1`) or set (`0` / `1`) the external coordination interface switch.
+#[unsafe(no_mangle)]
+pub extern "C" fn gtt_external_interface(set: i32) -> *mut c_char {
+    guarded(|| external(if set < 0 { None } else { Some(set != 0) }))
+}
+
+/// Download + verify the update for `channel`; returns the local file path.
+///
+/// # Safety
+/// `channel` is NULL or a valid NUL-terminated UTF-8 string that outlives the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_download_update(channel: *const c_char) -> *mut c_char {
+    guarded(|| {
+        let ch = if channel.is_null() {
+            "stable".to_string()
+        } else {
+            unsafe { CStr::from_ptr(channel) }.to_string_lossy().into_owned()
+        };
+        download_update(&ch)
+    })
 }
 
 /// Network price refresh; may take seconds.
@@ -445,7 +545,19 @@ mod tests {
         let req = CString::new(r#"{"op":"hours","day":"2026-10-12","h1":24,"h2":1}"#).unwrap();
         assert_eq!(call(unsafe { gtt_range(req.as_ptr()) })["ok"], false);
 
-        for p in [gtt_sources(), gtt_prices(), gtt_watch_roots(), gtt_info()] {
+        let req = CString::new(r#"{"query":"","disputed_only":true,"reload":true}"#).unwrap();
+        let v = call(unsafe { gtt_prices(req.as_ptr()) });
+        assert_eq!(v["ok"], true, "{v}");
+        // A never-scanned ledger has no seed prices yet; only the shape matters.
+        assert!(v["data"]["total"].is_u64());
+        assert!(v["data"]["rows"].as_array().unwrap().iter().all(|r| r["disputed"] == true));
+        assert!(v["data"]["vm"].is_null());
+        let req = CString::new(r#"{"range":{"key":"week"},"rebuild":true}"#).unwrap();
+        let v = call(unsafe { gtt_load(req.as_ptr()) });
+        assert!(v["data"]["trend"]["avg"].is_array());
+        assert!(v["data"]["quotas_ranked"].is_array());
+
+        for p in [gtt_sources(), gtt_watch_roots(), gtt_info()] {
             assert_eq!(call(p)["ok"], true);
         }
         let _ = std::fs::remove_dir_all(&dir);

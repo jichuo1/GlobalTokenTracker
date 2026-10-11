@@ -18,7 +18,12 @@ char *gtt_load(const char *req_json);
 /* {offset, limit?, apps?, models?} */
 char *gtt_detail_page(const char *req_json);
 char *gtt_sources(void);
-char *gtt_prices(void);
+/* {query, disputed_only, reload} → {rows (with "disputed"), total, synced_at} */
+char *gtt_prices(const char *req_json);
+/* -1 = read, 0 / 1 = set → {enabled, invalid, error?, path} */
+char *gtt_external_interface(int set);
+/* Download + SHA-256-verify the update for "stable" | "alpha" → {version, path} */
+char *gtt_download_update(const char *channel);
 char *gtt_refresh_prices(void);
 char *gtt_poll_quotas(void);
 char *gtt_watch_roots(void);
