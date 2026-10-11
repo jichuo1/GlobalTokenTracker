@@ -16,9 +16,12 @@
 //! - [`worker`] — convenience: `SetThreadDescription` name + EcoQoS mark,
 //!   so background threads are also identifiable in Process Explorer/ETW.
 //!
-//! On non-Windows (macOS/Linux port) these are no-ops — the QoS concept is
-//! Windows-specific; Apple silicon cores are scheduled by the OS scheduler
-//! (GCD QoS classes would be the port-side equivalent). `GTT_NO_ECO=1`
+//! On macOS the per-thread hints map to the native equivalents: workers run at
+//! `QOS_CLASS_UTILITY` (Apple silicon schedules utility-and-below work onto
+//! the E-cores) and get a `pthread_setname_np` name visible in Instruments.
+//! Process-wide efficiency is the system's job there — App Nap throttles a
+//! hidden, menu-bar-resident app without our help — so `efficiency_process`
+//! stays a no-op. Linux keeps every hint a no-op. `GTT_NO_ECO=1`
 //! disables all marking for diagnostics. Calls fail silently on hosts
 //! without EcoQoS (pre-Win11, non-hybrid CPUs) — the hints degrade to no-ops.
 
@@ -36,6 +39,15 @@ pub fn name_thread(name: &str) {
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         unsafe {
             SetThreadDescription(GetCurrentThread(), wide.as_ptr());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if !disabled()
+        && let Ok(c) = std::ffi::CString::new(name)
+    {
+        // Names the *calling* thread on Darwin (no thread argument).
+        unsafe {
+            darwin::pthread_setname_np(c.as_ptr());
         }
     }
 }
@@ -71,6 +83,13 @@ pub fn efficiency_thread() {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    if !disabled() {
+        let rc = unsafe { darwin::pthread_set_qos_class_self_np(darwin::QOS_CLASS_UTILITY, 0) };
+        if rc != 0 {
+            eprintln!("[power] pthread_set_qos_class_self_np rejected, rc={rc}");
+        }
+    }
 }
 
 /// Process-wide Efficiency Mode switch — `true` when the window hides to the
@@ -87,6 +106,8 @@ pub fn efficiency_thread() {
 ///    unlike `EmptyWorkingSet` this faults nothing out eagerly, so restore
 ///    doesn't pay a page-in storm.
 pub fn efficiency_process(on: bool) {
+    #[cfg(not(windows))]
+    let _ = on;
     #[cfg(windows)]
     if !disabled() {
         use windows_sys::Win32::System::Threading::{
@@ -157,7 +178,24 @@ fn log_fail(api: &str) {
     }
 }
 
-#[cfg(windows)]
+/// Darwin pthread QoS + naming (libSystem; no extra crate needed).
+#[cfg(target_os = "macos")]
+mod darwin {
+    use std::ffi::c_char;
+    pub const QOS_CLASS_UTILITY: u32 = 0x11;
+    unsafe extern "C" {
+        pub fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+        pub fn pthread_setname_np(name: *const c_char) -> i32;
+        #[cfg(test)]
+        pub fn pthread_self() -> usize;
+        #[cfg(test)]
+        pub fn pthread_get_qos_class_np(thread: usize, qos: *mut u32, rel: *mut i32) -> i32;
+        #[cfg(test)]
+        pub fn pthread_getname_np(thread: usize, buf: *mut c_char, len: usize) -> i32;
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 fn disabled() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var_os("GTT_NO_ECO").is_some())
@@ -239,5 +277,38 @@ mod tests {
             };
             assert_eq!(s, "gtt-probe");
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    use super::*;
+
+    #[test]
+    fn worker_sets_utility_qos_and_name() {
+        // Fresh thread: QoS and names are per-thread, never leak into the runner.
+        std::thread::spawn(|| {
+            worker("gtt-probe");
+            unsafe {
+                let (mut qos, mut rel) = (0u32, 0i32);
+                assert_eq!(
+                    darwin::pthread_get_qos_class_np(darwin::pthread_self(), &mut qos, &mut rel),
+                    0
+                );
+                assert_eq!(qos, darwin::QOS_CLASS_UTILITY);
+                let mut buf = [0 as std::ffi::c_char; 64];
+                assert_eq!(
+                    darwin::pthread_getname_np(darwin::pthread_self(), buf.as_mut_ptr(), buf.len()),
+                    0
+                );
+                let name = std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy();
+                assert_eq!(name, "gtt-probe");
+            }
+        })
+        .join()
+        .unwrap();
+        // Process-wide switch is a documented no-op on macOS — must not panic.
+        efficiency_process(true);
+        efficiency_process(false);
     }
 }

@@ -1,0 +1,34 @@
+/* globaltokentracker-ffi — C ABI over the Rust core engine.
+ *
+ * Every function is synchronous and returns a heap UTF-8 JSON envelope:
+ *   {"ok":true,"data":...}  or  {"ok":false,"error":"..."}
+ * Release every returned pointer with gtt_free(). Call from a background
+ * queue: gtt_load with scan, gtt_refresh_prices and gtt_poll_quotas can
+ * take seconds. Requests are JSON; NULL means "defaults".
+ */
+#ifndef GTT_FFI_H
+#define GTT_FFI_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* {range:{key,start_ms?,end_ms?}, apps?, models?, scan, force_views, rebuild, force_prices} */
+char *gtt_load(const char *req_json);
+/* {offset, limit?, apps?, models?} */
+char *gtt_detail_page(const char *req_json);
+char *gtt_sources(void);
+char *gtt_prices(void);
+char *gtt_refresh_prices(void);
+char *gtt_poll_quotas(void);
+char *gtt_watch_roots(void);
+/* "stable" | "alpha"; NULL = stable */
+char *gtt_check_update(const char *channel);
+char *gtt_info(void);
+void gtt_free(char *s);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

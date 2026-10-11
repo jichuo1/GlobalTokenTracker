@@ -166,6 +166,18 @@ impl Range {
     }
 }
 
+/// Shells see `{key, start_ms, end_ms}` — the same shape `from_config` reads.
+impl serde::Serialize for Range {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("Range", 3)?;
+        st.serialize_field("key", self.key())?;
+        st.serialize_field("start_ms", &self.start_ms())?;
+        st.serialize_field("end_ms", &self.end_ms())?;
+        st.end()
+    }
+}
+
 /// Local start-of-day `days_ago` days back, epoch ms (0 = today).
 pub fn day_start_ms(days_ago: i64) -> i64 {
     let now = jiff::Zoned::now();
@@ -212,7 +224,7 @@ pub fn start_of_local_day(ms: i64) -> i64 {
 
 /// One trend bar's data: `date` is "YYYY-MM-DD" (or "HH:00" for the Today
 /// range); `top` = the day's top-3 models by tokens, for the hover popup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TrendBucket {
     pub date: String,
     pub events: u64,
@@ -223,7 +235,7 @@ pub struct TrendBucket {
 
 /// One day of the activity heatmap — all four metrics, so the tooltip and the
 /// metric switch need no second query. `date` is "YYYY-MM-DD" (local day).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct HeatDay {
     pub date: String,
     /// Headline tokens: input + output + cache_read.
@@ -234,7 +246,7 @@ pub struct HeatDay {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct OverviewVm {
     /// Always today — the tray tooltip and badges stay day-scoped regardless
     /// of the selected range.
@@ -270,7 +282,7 @@ pub struct OverviewVm {
 
 /// One collapsible section on the quota page: every window belonging to a
 /// single tool, newest-most-relevant first.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QuotaGroupVm {
     pub app: String,
     /// UI-facing tool name (`workbuddy` → `WorkBuddy`).
@@ -337,7 +349,7 @@ pub fn group_quotas(rows: Vec<QuotaRow>) -> Vec<QuotaGroupVm> {
         .collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DetailVm {
     pub rows: Vec<EventRow>,
     pub total_events: u64,

@@ -167,6 +167,17 @@ struct GhAsset {
     browser_download_url: String,
 }
 
+/// Release asset this platform installs from: the Windows setup exe, or the
+/// zipped universal `.app` bundle on macOS. Both are listed in SHA256SUMS.
+#[must_use]
+pub fn asset_name(tag: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("GlobalTokenTracker-{tag}-macos-universal.zip")
+    } else {
+        format!("GlobalTokenTracker-Setup-{tag}-win-x64.exe")
+    }
+}
+
 /// Newest release on `channel` that is strictly newer than `current`.
 pub fn select_update(
     releases_json: &str,
@@ -185,9 +196,9 @@ pub fn select_update(
         if channel == Channel::Stable && (version.alpha.is_some() || r.prerelease) {
             continue;
         }
-        let asset_name = format!("GlobalTokenTracker-Setup-{}-win-x64.exe", r.tag_name);
+        let asset_name = asset_name(&r.tag_name);
         let find = |name: &str| r.assets.iter().find(|a| a.name == name);
-        let (Some(exe), Some(sums)) = (find(&asset_name), find(SUMS_NAME)) else {
+        let (Some(asset), Some(sums)) = (find(&asset_name), find(SUMS_NAME)) else {
             continue;
         };
         if best.as_ref().is_some_and(|b| b.version >= version) {
@@ -198,7 +209,7 @@ pub fn select_update(
             version,
             html_url: r.html_url.clone(),
             asset_name,
-            asset_url: exe.browser_download_url.clone(),
+            asset_url: asset.browser_download_url.clone(),
             sums_url: sums.browser_download_url.clone(),
         });
     }
@@ -382,7 +393,8 @@ mod tests {
         let mut assets = Vec::new();
         if exe {
             assets.push(format!(
-                r#"{{"name":"GlobalTokenTracker-Setup-{tag}-win-x64.exe","browser_download_url":"https://x/{tag}/exe"}}"#
+                r#"{{"name":"{}","browser_download_url":"https://x/{tag}/exe"}}"#,
+                asset_name(tag)
             ));
         }
         if sums {
@@ -414,7 +426,7 @@ mod tests {
         assert_eq!(r.asset_url, "https://x/v0.3.1/exe");
         assert_eq!(r.sums_url, "https://x/v0.3.1/sums");
         assert_eq!(r.html_url, "https://x/v0.3.1");
-        assert_eq!(r.asset_name, "GlobalTokenTracker-Setup-v0.3.1-win-x64.exe");
+        assert_eq!(r.asset_name, asset_name("v0.3.1"));
     }
 
     #[test]

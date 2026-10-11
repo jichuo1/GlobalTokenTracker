@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rusqlite::params;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Totals {
     pub events: u64,
     pub input_tokens: u64,
@@ -18,7 +18,7 @@ pub struct Totals {
     pub active_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AppSummary {
     pub app: String,
     pub events: u64,
@@ -34,7 +34,7 @@ pub struct AppSummary {
 
 /// One share-dimension entry for the cost pie — name + the two metrics the
 /// legend shows.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ShareRow {
     pub name: String,
     pub events: u64,
@@ -43,7 +43,7 @@ pub struct ShareRow {
     pub cost_usd: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QuotaRow {
     pub app: String,
     pub account: Option<String>,
@@ -56,7 +56,7 @@ pub struct QuotaRow {
 }
 
 /// One source's say on a model, for the corroboration tooltip.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PriceQuote {
     pub source: String,
     /// The id this source uses for the model.
@@ -68,7 +68,7 @@ pub struct PriceQuote {
 }
 
 /// A model as the price book resolves it — the consensus of every source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PriceRow {
     /// Display id (the spelling most sources use).
     pub model: String,
@@ -85,6 +85,7 @@ pub struct PriceRow {
     /// What each source said, most trusted first.
     pub quotes: Vec<PriceQuote>,
     /// Search text: every spelling of the id, lowercase alphanumerics only.
+    #[serde(skip)]
     hay: String,
 }
 
@@ -162,7 +163,7 @@ pub fn filter_prices(rows: &[PriceRow], query: &str, disputed_only: bool) -> Vec
     head
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceHealth {
     pub source: String,
     pub enabled: bool,
@@ -173,7 +174,7 @@ pub struct SourceHealth {
     pub cursors: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EventRow {
     pub app: String,
     pub model: Option<String>,
