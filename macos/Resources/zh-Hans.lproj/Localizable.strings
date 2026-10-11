@@ -1,0 +1,136 @@
+/* Navigation */
+"Overview" = "总览";
+"Details" = "明细";
+"Quota" = "配额";
+"Sources" = "数据源";
+"Prices" = "价格";
+
+/* Toolbar & ranges */
+"Range" = "范围";
+"Today" = "今日";
+"7 Days" = "近 7 天";
+"30 Days" = "近 30 天";
+"All Time" = "全部";
+"Custom" = "自定义";
+"Statistics window" = "统计区间";
+"Tools" = "工具";
+"Models" = "模型";
+"Show All" = "全部显示";
+"Refresh" = "刷新";
+"Refresh Now" = "立即刷新";
+"Scan all sources now (⌘R)" = "立即扫描所有数据源（⌘R）";
+"Scanning…" = "正在扫描…";
+"Updated %@" = "%@ 更新";
+"Scan took %llu ms" = "扫描耗时 %llu 毫秒";
+
+/* Overview */
+"Loading ledger…" = "正在读取账本…";
+"Couldn't Load Data" = "无法加载数据";
+"Check the sidebar for details, then press ⌘R to retry." = "详情见侧边栏，按 ⌘R 重试。";
+"Tokens" = "Token";
+"Cost" = "费用";
+"Requests" = "请求";
+"Active Time" = "活跃时长";
+"Active" = "活跃";
+"Today %@" = "今日 %@";
+"Trend" = "趋势";
+"Metric" = "指标";
+"No activity in this range." = "该区间内没有活动。";
+"%@ tokens · %@" = "%@ Token · %@";
+"Cost Share" = "费用占比";
+"Dimension" = "维度";
+"No priced usage in this range." = "该区间内没有已计价的用量。";
+"Total" = "合计";
+"Other" = "其他";
+"By Tool" = "按工具";
+"No tools recorded in this range." = "该区间内没有工具记录。";
+"%@ requests · %@ tokens" = "%@ 次请求 · %@ Token";
+"Activity" = "活跃度";
+"%@ tokens · %@ · %@ requests" = "%@ Token · %@ · %@ 次请求";
+"Resets %@" = "%@ 重置";
+"Some models have no known price" = "部分模型没有已知价格";
+"Their usage is counted, but no cost is guessed." = "其用量照常统计，但不会猜测费用。";
+
+/* Quota windows */
+"5-hour window" = "5 小时窗口";
+"Weekly limit" = "每周限额";
+"Monthly limit" = "每月限额";
+"Credits left" = "剩余点数";
+"Billing period" = "计费周期";
+"Auto pool" = "Auto 用量池";
+"API pool" = "API 用量池";
+"Session context" = "会话上下文";
+
+/* Details */
+"Time" = "时间";
+"Tool" = "工具";
+"Model" = "模型";
+"Project" = "项目";
+"Input" = "输入";
+"Output" = "输出";
+"Cache Read" = "缓存读";
+"Cache Write" = "缓存写";
+"No Requests" = "没有请求";
+"Nothing matches the current tool and model filters." = "当前工具和模型筛选下没有匹配项。";
+"Showing %lld of %@" = "已显示 %lld / %@";
+
+/* Quota page */
+"No Quota Data" = "暂无配额数据";
+"Quota windows appear here once Codex or Cursor credentials are found on this Mac." = "在这台 Mac 上找到 Codex 或 Cursor 凭据后，配额窗口会显示在这里。";
+"Captured %@" = "采集于 %@";
+
+/* Sources */
+"Source" = "数据源";
+"Files" = "文件";
+"Rows Ingested" = "已导入行数";
+"Last Sync" = "上次同步";
+"Status" = "状态";
+"Not found on this Mac" = "本机未找到";
+"OK" = "正常";
+"Never" = "从未";
+
+/* Prices */
+"Input / M" = "输入 / 百万";
+"Output / M" = "输出 / 百万";
+"Cache Read / M" = "缓存读 / 百万";
+"Cache Write / M" = "缓存写 / 百万";
+"Agreement" = "一致度";
+"Filter models" = "筛选模型";
+"Update Prices" = "更新价格";
+"Download the latest prices from every source" = "从所有来源下载最新价格";
+"Updating prices…" = "正在更新价格…";
+"%lld models · live sources synced %@" = "%lld 个模型 · 在线来源 %@ 同步";
+
+/* Settings */
+"General" = "通用";
+"Data" = "数据";
+"Updates" = "更新";
+"Open at login" = "登录时打开";
+"Show in Dock" = "在程序坞中显示";
+"Show today's cost in the menu bar" = "在菜单栏显示今日费用";
+"GlobalTokenTracker keeps running in the menu bar after you close its window." = "关闭窗口后，GlobalTokenTracker 会继续在菜单栏中运行。";
+"Rescan sources" = "重新扫描数据源";
+"Only when files change" = "仅文件变更时";
+"Every minute" = "每分钟";
+"Every 5 minutes" = "每 5 分钟";
+"Every %lld seconds" = "每 %lld 秒";
+"Ledger" = "账本";
+"Location" = "位置";
+"Show in Finder" = "在访达中显示";
+"Requests recorded" = "已记录请求";
+"Tokens recorded" = "已记录 Token";
+"Total cost" = "总费用";
+"Usage is read locally from each tool's own logs. Nothing leaves this Mac except price and quota lookups." = "用量从各工具的本地日志读取。除价格和配额查询外，数据不会离开这台 Mac。";
+"Current version" = "当前版本";
+"Channel" = "通道";
+"Stable" = "稳定版";
+"Alpha" = "测试版";
+"Check for Updates" = "检查更新";
+"Available" = "可用更新";
+"Version %@" = "版本 %@";
+"You're up to date." = "已是最新版本。";
+
+/* Menu bar */
+"Open" = "打开";
+"Settings…" = "设置…";
+"Quit GlobalTokenTracker" = "退出 GlobalTokenTracker";

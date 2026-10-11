@@ -1,0 +1,5 @@
+module CGTT [system] {
+    header "../../../crates/ffi/include/gtt.h"
+    link "gtt_ffi"
+    export *
+}

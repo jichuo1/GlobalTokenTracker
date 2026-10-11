@@ -607,8 +607,11 @@ fn file_mtime_ms(path: &Path) -> i64 {
 
 /// `file:///C:/x` → `C:\x`; `file:///home/x` → `/home/x`; `file://host/s/x`
 /// → `\\host\s\x`. Percent escapes are decoded (CJK paths arrive encoded).
+/// `file://localhost/…` is the explicit-host spelling of a local path
+/// (RFC 8089; macOS APIs emit it) — never a UNC share.
 fn file_uri_to_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").filter(|r| r.starts_with('/')).unwrap_or(rest);
     let decoded = percent_decode(rest);
     let b = decoded.as_bytes();
     let path = if b.first() == Some(&b'/') {
@@ -1340,6 +1343,15 @@ mod tests {
             Some(r"\\srv\share\x")
         );
         assert_eq!(file_uri_to_path("https://example.com"), None);
+        // macOS: explicit localhost host and percent-encoded spaces.
+        assert_eq!(
+            file_uri_to_path("file://localhost/Users/me/My%20Project").as_deref(),
+            Some("/Users/me/My Project")
+        );
+        assert_eq!(
+            file_uri_to_path("file:///Users/me/%E9%A1%B9%E7%9B%AE").as_deref(),
+            Some("/Users/me/项目")
+        );
     }
 
     #[test]
