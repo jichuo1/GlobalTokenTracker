@@ -58,6 +58,8 @@ pub struct Theme {
     pub accent_cf: ColorF,
     pub subtle_cf: ColorF,
     pub divider_cf: ColorF,
+    /// Activity heatmap: empty, then four opaque tones from low to high.
+    pub heat_cf: [ColorF; 5],
     /// Card fill as drawn by the canvas: SwapChainPanel pixels composite
     /// straight onto the window surface, so transparency can't "see" the
     /// card's translucent ThemeBrush beneath — the canvas paints the same
@@ -118,6 +120,42 @@ fn colorf_of(s: Option<&str>, default: ColorF) -> ColorF {
             _ => default,
         })
         .unwrap_or(default)
+}
+
+/// Keep the accent's hue/saturation while spreading the four levels across
+/// lightness. Alpha-only steps blend into grey and compress the visible range.
+fn heat_palette(accent: ColorF, divider: ColorF, light: bool) -> [ColorF; 5] {
+    let min = accent.r.min(accent.g).min(accent.b);
+    let max = accent.r.max(accent.g).max(accent.b);
+    let chroma = max - min;
+    let lightness = (max + min) * 0.5;
+    let saturation = if chroma > 0.0 {
+        chroma / (1.0 - (2.0 * lightness - 1.0).abs())
+    } else {
+        0.0
+    };
+    let tones = if light {
+        [0.86, 0.66, 0.46, 0.26]
+    } else {
+        [0.32, 0.50, 0.70, 0.88]
+    };
+    let mut colors = [ColorF {
+        a: divider.a * 0.5,
+        ..divider
+    }; 5];
+    for (color, tone) in colors[1..].iter_mut().zip(tones) {
+        let span = (1.0 - (2.0 * tone - 1.0_f32).abs()) * saturation;
+        let channel = |c: f32| {
+            tone - span * 0.5
+                + if chroma > 0.0 {
+                    (c - min) / chroma * span
+                } else {
+                    0.0
+                }
+        };
+        *color = ColorF::rgb(channel(accent.r), channel(accent.g), channel(accent.b));
+    }
+    colors
 }
 
 fn parse_hex(s: &str) -> Option<Color> {
@@ -185,6 +223,19 @@ impl Theme {
     /// white card (grey chart boxes, a pale accent that disagreed with the
     /// legend swatches).
     pub fn resolve(cfg: &ThemeConfig, light: bool) -> Self {
+        // Win11 accent — dark #76B9ED, light #0067C0; hex overrides map exactly.
+        let accent_cf = colorf_of(
+            cfg.accent.as_deref(),
+            if light {
+                ColorF::from_rgb8(0x00, 0x67, 0xC0)
+            } else {
+                ColorF::from_rgb8(0x76, 0xB9, 0xED)
+            },
+        );
+        let divider_cf = colorf_of(
+            cfg.divider.as_deref(),
+            ColorF::from_rgba8(0x80, 0x80, 0x80, 0x44),
+        );
         Self {
             accent: brush_of(cfg.accent.as_deref(), Brush::Theme(ThemeBrush::Accent)),
             accent_soft: brush_of(
@@ -214,15 +265,7 @@ impl Theme {
                 .page_bg
                 .as_deref()
                 .map(|s| brush_of(Some(s), Brush::Theme(ThemeBrush::SolidBackground))),
-            // Win11 accent — dark #76B9ED, light #0067C0; hex overrides map exactly.
-            accent_cf: colorf_of(
-                cfg.accent.as_deref(),
-                if light {
-                    ColorF::from_rgb8(0x00, 0x67, 0xC0)
-                } else {
-                    ColorF::from_rgb8(0x76, 0xB9, 0xED)
-                },
-            ),
+            accent_cf,
             subtle_cf: colorf_of(
                 cfg.subtle.as_deref(),
                 if light {
@@ -231,10 +274,8 @@ impl Theme {
                     ColorF::from_rgba8(0x9E, 0x9E, 0x9E, 0xFF)
                 },
             ),
-            divider_cf: colorf_of(
-                cfg.divider.as_deref(),
-                ColorF::from_rgba8(0x80, 0x80, 0x80, 0x44),
-            ),
+            divider_cf,
+            heat_cf: heat_palette(accent_cf, divider_cf, light),
             // Fluent CardBackgroundFillColorDefault — white @ ~5% (dark) /
             // @ ~70% (light): the canvas paints this over the same page the
             // card brush blends onto, landing pixel-identical. Hex card_bg
@@ -263,6 +304,66 @@ impl Theme {
             Thickness::new(2.0, 1.0, 1.0, 1.0)
         } else {
             Thickness::uniform(1.0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(c: ColorF) -> f32 {
+        let linear = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+    }
+
+    #[test]
+    fn heat_levels_have_separated_luminance_in_both_modes() {
+        for light in [false, true] {
+            let theme = Theme::resolve(&ThemeConfig::default(), light);
+            assert_eq!(theme.heat_cf[0].a, theme.divider_cf.a * 0.5);
+            for pair in theme.heat_cf[1..].windows(2) {
+                let delta = luminance(pair[1]) - luminance(pair[0]);
+                assert!(if light { delta < -0.1 } else { delta > 0.1 });
+            }
+        }
+    }
+
+    #[test]
+    fn heat_palette_preserves_custom_hue_and_handles_greys_and_alpha() {
+        for accent in ["#4028B478", "#000000", "#FFFFFF", "#808080"] {
+            let cfg = ThemeConfig {
+                accent: Some(accent.into()),
+                ..Default::default()
+            };
+            for light in [false, true] {
+                let theme = Theme::resolve(&cfg, light);
+                let colors = &theme.heat_cf[1..];
+                for &c in colors {
+                    assert_eq!(c.a, 1.0);
+                    assert!(
+                        [c.r, c.g, c.b]
+                            .iter()
+                            .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                    );
+                    if accent == "#4028B478" {
+                        assert!(c.g > c.b && c.b > c.r);
+                    } else {
+                        assert_eq!(c.r, c.g);
+                        assert_eq!(c.g, c.b);
+                    }
+                }
+                for pair in colors.windows(2) {
+                    let delta = luminance(pair[1]) - luminance(pair[0]);
+                    assert!(if light { delta < 0.0 } else { delta > 0.0 });
+                }
+            }
         }
     }
 }

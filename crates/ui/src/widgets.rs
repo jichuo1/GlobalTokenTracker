@@ -812,8 +812,6 @@ impl Default for HeatHandle {
 
 const HEAT_CELL_MIN: f32 = 6.0;
 const HEAT_GAP: f32 = 3.0;
-/// Quartile-level alpha of the accent colour (level 0 is the divider colour).
-const HEAT_ALPHA: [f32; 4] = [0.30, 0.52, 0.76, 1.0];
 
 /// Strips above/below the grid, scaled with the label font like the trend's.
 fn heat_strips(label_pt: f32) -> (f32, f32) {
@@ -842,7 +840,7 @@ pub fn heat_height(label_pt: f64, cols: usize) -> f64 {
 }
 
 /// GitHub-style activity heatmap: 7 rows (Mon–Sun) × one column per week, one
-/// Direct2D canvas. Cell colour = accent alpha by quartile level of `metric`
+/// Direct2D canvas. Cell colour = theme tone by quartile level of `metric`
 /// over the window's non-zero days; hover outlines a cell and dwelling opens a
 /// tooltip with all four metrics. `defer`: see `defer_slot`.
 pub fn heatmap(
@@ -857,7 +855,7 @@ pub fn heatmap(
     let days: Vec<globaltokentracker_core::viewmodel::HeatDay> = days.to_vec();
     let accent = theme.accent_cf;
     let subtle = theme.subtle_cf;
-    let divider = theme.divider_cf;
+    let colors = theme.heat_cf;
     let card_bg = theme.card_cf;
     let family = theme.font_family.clone();
     let label_pt = theme.label_size as f32;
@@ -880,18 +878,7 @@ pub fn heatmap(
                 let tf = TextFormat::new(&family, label_pt)?;
                 let tf_r = tf.clone().with_alignment(TextAlignment::Trailing);
                 let ink = ctx.create_solid_brush(subtle)?;
-                let level_brush = |lv: u8| {
-                    if lv == 0 {
-                        ctx.create_solid_brush(divider)
-                    } else {
-                        ctx.create_solid_brush(ColorF::new(
-                            accent.r,
-                            accent.g,
-                            accent.b,
-                            accent.a * HEAT_ALPHA[usize::from(lv) - 1],
-                        ))
-                    }
-                };
+                let level_brush = |lv: u8| ctx.create_solid_brush(colors[usize::from(lv)]);
 
                 let cols = days.len().div_ceil(7);
                 let (top, bottom) = heat_strips(label_pt);

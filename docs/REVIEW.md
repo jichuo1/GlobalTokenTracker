@@ -1497,3 +1497,23 @@
 - Review 找到并修复 OpenCode 工具拒绝与模型不匹配路径丢失已返回用量；补上针对这些失败路径的断言。外部有界审查请求达到尝试上限后，按调度规则回退 Luna，主线独立核对。
 - 验证：Python 105 项通过；cargo test --workspace 为 237 项通过、3 项既有忽略；cargo clippy --workspace --all-targets 无告警；CLI/UI Release 构建通过。账本副本首次补入 19 条/150,056 tokens，重扫新增为 0；原生请求未重复入账，未分类 93,670 tokens 均未定价。
 - 没有新增生产依赖。真实数据库、运行配置、供应商标识、提示词、诊断日志均不进入提交；公开仓库仅提交消费端与通用契约，协调器实现保留在私密仓库。
+
+
+## S125 活跃热力图色阶区分度
+
+- **范围**：仅修改 UI 主题色阶与热力图用色。保留非零值四分位阈值、四指标语义、统计摘要、布局和提示逻辑；未新增依赖。
+- **实现与取舍**：原先四档强调色透明度 0.30/0.52/0.76/1.0 容易与灰色空格混合。改为保留强调色相/饱和度、调整 HSL 亮度的四档不透明色：深色 0.32/0.50/0.70/0.88，浅色 0.86/0.66/0.46/0.26。无活动格使用分隔线色的一半透明度，网格与图例共用 Theme.heat_cf。透明强调色仅对热力图活动格转为实色，其他控件仍按原主题配置绘制。
+- **回归证据**：新增 2 个主题测试，默认深浅色相邻档相对亮度差均超过 0.1；自定义绿色及黑/白/灰、透明强调色在两种模式均有限值、RGB 合法、活动档不透明且亮度严格有序。原有分位阈值、指标往返、连续活跃、布局等回归均通过。
+- **验证命令**：`cargo test -p globaltokentracker-ui --locked` 30 通过；`cargo clippy -p globaltokentracker-ui --all-targets --locked -- -D warnings` 通过；`rustfmt --check --edition 2024 crates/ui/src/theme.rs crates/ui/src/widgets.rs` 通过；`cargo build --release -p globaltokentracker-ui --locked` 通过。
+- **实际 UI**：Computer Use 在独立预览窗口逐项切换 Token/计费/调用/时长，核对深浅两种主题的网格、图例及时长脚注，共 8 张窗口截图，保存在 `target/e2e/heat-contrast/{tokens,cost,calls,duration}-{dark,light}.png`；展示用裁图为 `heatmap-dark.png` / `heatmap-light.png`。原程序的全局单实例锁阻止直接启动第二实例，因此仅在 ignored 临时源码副本中隔离互斥锁及资源路径，theme.rs/widgets.rs 与正式源码逐字节一致。数据用已有测试账本的 SQLite backup 副本，真实安装程序与账本未替换。
+- **工作区保护**：审查文件按字节追加并核对原有 285563 字节前缀 SHA-256 不变；保留已有未提交审查记录和未跟踪 MODEL_ROUTER.md/integrations。未提交或推送远端。
+
+
+## S126 热力图完整构建安装验收
+
+- **授权与范围**：按用户要求推送本次热力图修复并安装最新构建到当前 Windows 设备；提交仅含 theme.rs、widgets.rs 及 S125/S126，保留原有未提交文档和 integrations，不纳入其他历史审查节。
+- **发布前验证**：`cargo test --workspace --locked` 245 项通过、3 项既有外部数据测试跳过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo build --release -p globaltokentracker-ui -p globaltokentracker-cli --locked` 与 `installer/package.ps1 -SkipBuild` 通过。Cargo.lock、setup/build.rs 及本次 UI 源码内容哈希保持一致。
+- **完整包**：0.6.0 安装器 11372032 字节，SHA-256 `c52167610fb469cc3b2725eaca1998786ce421a9f62d93613ebc36ced2ca7613`；从实际 PE 唯一 ZIP 解出 UI/CLI，逐项与 Release 文件哈希匹配，排除空载荷及旧 UI。
+- **本机安装**：旧 UI/CLI/setup、设置及 SQLite 一致性账本已备份；完整安装器 --quiet 覆盖既有用户安装目录，退出码 0。安装后 UI SHA-256 `a6f88d11321f31948ffd9ef2f0b4aad3f328362f27712dc974728868f151cb6f`，CLI SHA-256 `00b484c2d2f29fea7b4a811e3d98eda6d05257fa1b8b14515609a9955edbb71a`，两者均与此次 Release/内嵌载荷完全一致，已安装 setup 与完整包一致。
+- **保留与实际运行**：安装期间 ui.json SHA-256 不变，账本 quick_check=ok、保留 80225 行使用事件；安装后 CLI --version 与 HKCU DisplayVersion 均为 0.6.0。新版 UI 已启动，Computer Use 在真实已安装窗口核对热力图四档及对应图例，滚动至完整卡片展示。版本号沿用 0.6.0，未创建或移动正式发布 tag。
+- **本机证据**：备份、安装器/载荷/已安装文件哈希 JSON 及 installed-ui.png 保留在 ignored `target/e2e/heat-deploy/`，不提交真实账本、配置、截图或诊断文件。
