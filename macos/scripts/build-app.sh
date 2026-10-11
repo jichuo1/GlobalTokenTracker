@@ -72,8 +72,13 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET"
 
-# Ad-hoc signature (runs locally; distribution needs a Developer ID + notarization).
-codesign --force --sign "${CODESIGN_IDENTITY:--}" --options runtime --timestamp=none "$APP"
+# Ad-hoc signature unless CODESIGN_IDENTITY names a Developer ID (then a secure
+# timestamp too, which notarization requires).
+if [[ -n "${CODESIGN_IDENTITY:-}" && "${CODESIGN_IDENTITY}" != "-" ]]; then
+  codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp "$APP"
+else
+  codesign --force --sign - --options runtime --timestamp=none "$APP"
+fi
 
 if [[ $ZIP == 1 ]]; then
   ZIPNAME="GlobalTokenTracker-v$VERSION-macos-universal.zip"

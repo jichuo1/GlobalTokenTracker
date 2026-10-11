@@ -18,6 +18,8 @@ def render_release(
     asset_filename: str,
     release_summary: str | None = None,
     changelog: str | None = None,
+    mac_asset_filename: str | None = None,
+    mac_sha256: str | None = None,
 ) -> str:
     replacements = {
         "{{VERSION}}": version,
@@ -26,6 +28,12 @@ def render_release(
         "{{ASSET_SHA256}}": sha256.lower(),
         "{{ASSET_FILENAME}}": asset_filename,
     }
+    # macOS disk image row: required as soon as the template mentions it.
+    if "{{MAC_ASSET_FILENAME}}" in content or "{{MAC_ASSET_SHA256}}" in content:
+        if not (mac_asset_filename or "").strip() or not (mac_sha256 or "").strip():
+            raise ValueError("Template requires the macOS asset filename and SHA-256")
+        replacements["{{MAC_ASSET_FILENAME}}"] = mac_asset_filename.strip()
+        replacements["{{MAC_ASSET_SHA256}}"] = mac_sha256.strip().lower()
     if "{{RELEASE_SUMMARY}}" in content:
         normalized_summary = (release_summary or "").strip()
         if not normalized_summary:
@@ -58,6 +66,14 @@ def main() -> None:
         help="Published asset filename; defaults to GlobalTokenTracker-Setup-<version>-win-x64.exe",
     )
     parser.add_argument(
+        "--mac-asset-filename",
+        help="macOS disk image filename, for templates with {{MAC_ASSET_FILENAME}}",
+    )
+    parser.add_argument(
+        "--mac-sha256",
+        help="macOS disk image SHA-256, for templates with {{MAC_ASSET_SHA256}}",
+    )
+    parser.add_argument(
         "--changelog-file",
         type=Path,
         help="Markdown changelog inserted when the template contains {{CHANGELOG}}",
@@ -85,6 +101,8 @@ def main() -> None:
             or f"GlobalTokenTracker-Setup-{args.version}-win-x64.exe",
             release_summary=args.release_summary,
             changelog=changelog,
+            mac_asset_filename=args.mac_asset_filename,
+            mac_sha256=args.mac_sha256,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error

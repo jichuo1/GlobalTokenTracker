@@ -9,16 +9,38 @@ Requires Rust (rustup) and Swift 6.2+. The Command Line Tools are enough; Xcode
 is not needed.
 
 ```bash
-macos/scripts/build-app.sh                     # host architecture
-macos/scripts/build-app.sh --universal --zip   # arm64 + x86_64, release zip
+macos/scripts/build-app.sh --universal     # target/macos/GlobalTokenTracker.app
+macos/scripts/build-dmg.sh v0.6.0          # the designed installer disk image
 ```
 
-Output: `target/macos/GlobalTokenTracker.app`. With `--zip` the archive is named
-`GlobalTokenTracker-v<version>-macos-universal.zip`, which is the asset the
-in-app updater looks for (`core::update::asset_name`).
+`build-dmg.sh` produces `target/macos/GlobalTokenTracker-<tag>-macos-universal.dmg`,
+the asset name the in-app updater looks for (`core::update::asset_name`). The
+image opens a fixed Finder window — background `macos/dmg/background.tiff` (1×/2×,
+regenerate with `make-background.swift`), the app and an Applications shortcut
+in the slots it draws, the app icon as the volume icon — laid out by
+[`dmgbuild`](https://github.com/dmgbuild/dmgbuild) from `macos/dmg/settings.py`,
+so the result is identical on CI and locally.
 
-The bundle is ad-hoc signed and runs on the build machine. Distribution needs a
-Developer ID: `CODESIGN_IDENTITY="Developer ID Application: …"` plus notarization.
+Without a signing identity both the app and the image are ad-hoc signed: they
+run on the build Mac, but Gatekeeper on other Macs rejects them.
+
+## Release (GitHub Actions)
+
+`stable-release.yml` and `alpha-release.yml` run a **macOS job** (`macos-26`
+runner) beside the Windows `verify` job: Rust tests + clippy for the portable
+crates on macOS, the universal app, the disk image, then a mount check
+(both architectures, strict code signature, layout files). `publish` waits for
+both and ships the `.dmg` next to the Windows installer — in `SHA256SUMS.txt`
+(which the updater verifies against), `BUILD_INFO.txt` and the release notes.
+
+Optional repository secrets for Developer ID signing + notarization:
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERT_P12` | Base64 of the "Developer ID Application" certificate + key (.p12) |
+| `MACOS_CERT_PASSWORD` | Password of that .p12 |
+| `MACOS_SIGN_IDENTITY` | e.g. `Developer ID Application: Name (TEAMID)` |
+| `MACOS_NOTARY_APPLE_ID` / `MACOS_NOTARY_TEAM_ID` / `MACOS_NOTARY_PASSWORD` | Apple ID, team ID, app-specific password for `notarytool` |
 
 ## Layout
 
@@ -28,6 +50,7 @@ Developer ID: `CODESIGN_IDENTITY="Developer ID Application: …"` plus notarizat
 | `macos/Sources/CGTT` | Module map exposing `crates/ffi/include/gtt.h` to Swift |
 | `macos/Sources/GlobalTokenTracker` | SwiftUI app |
 | `macos/Resources` | `Info.plist`, `en` / `zh-Hans` strings |
+| `macos/dmg` | Installer window: background renderer + image, `dmgbuild` layout |
 
 ## Platform behaviour
 

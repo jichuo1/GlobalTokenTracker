@@ -108,6 +108,8 @@ jobs:
             --commit "$GITHUB_SHA" \
             --release-date "$(TZ=Asia/Shanghai date +%F)" \
             --sha256 0000000000000000000000000000000000000000000000000000000000000000 \
+            --mac-asset-filename "GlobalTokenTracker-v0.0.0-alpha.0-macos-universal.dmg" \
+            --mac-sha256 1111111111111111111111111111111111111111111111111111111111111111 \
             --asset-filename GlobalTokenTracker-Setup-v0.0.0-alpha.0-win-x64.exe \
             --changelog-file "$test_dir/ALPHA_CHANGELOG.md"
           if grep -Eq '\{\{[A-Z0-9_]+\}\}' "$test_dir/RELEASE_NOTES.md"; then
@@ -190,9 +192,144 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  macos:
+    name: macOS app and disk image
+    runs-on: macos-26
+    permissions:
+      contents: read
+    env:
+      # 可选签名与公证：配齐 Secret 则产出 Developer ID 签名并经 Apple 公证的
+      # 磁盘映像；未配置时产出 ad-hoc 签名包（与 Windows 可选签名一致）。
+      HAS_MAC_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    outputs:
+      dmg_filename: ${{ steps.dmg.outputs.dmg_filename }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Resolve source-controlled build identity
+        id: identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
+        run: |
+          set -euo pipefail
+          python .github/release-templates/validate_build.py \
+            --cargo-toml Cargo.toml \
+            --channel alpha \
+            --release-tag "$RELEASE_TAG" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # Windows 的 verify 不会编译 cfg(target_os = "macos") 代码，这里补上。
+      - name: Test and lint portable crates on macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi
+          cargo clippy -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi \
+            --all-targets -- -D warnings
+
+      - name: Import Developer ID certificate
+        if: ${{ env.HAS_MAC_CERT == 'true' }}
+        shell: bash
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/gtt-signing.keychain-db"
+          keychain_pass="$(uuidgen)"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_pass" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Build universal app and disk image
+        id: dmg
+        shell: bash
+        env:
+          GTT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          VERSION_NAME: ${{ steps.identity.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          tag="${GTT_RELEASE_TAG:-v$VERSION_NAME}"
+          macos/scripts/build-app.sh --universal
+          macos/scripts/build-dmg.sh "$tag"
+          dmg="GlobalTokenTracker-${tag}-macos-universal.dmg"
+          test -s "target/macos/$dmg"
+          echo "dmg_filename=$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Verify disk image contents
+        shell: bash
+        env:
+          DMG: target/macos/${{ steps.dmg.outputs.dmg_filename }}
+        run: |
+          set -euo pipefail
+          size=$(stat -f%z "$DMG")
+          if (( size < 1048576 )); then echo "disk image suspiciously small: $size"; exit 1; fi
+          mount="$(hdiutil attach -readonly -nobrowse -noautoopen "$DMG" | awk -F'\t' '/\/Volumes\//{print $NF}')"
+          trap 'hdiutil detach -quiet "$mount" || true' EXIT
+          app="$mount/GlobalTokenTracker.app"
+          lipo "$app/Contents/MacOS/GlobalTokenTracker" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict --verbose=1 "$app"
+          test "$(readlink "$mount/Applications")" = /Applications
+          test -s "$mount/.background.tiff"
+          test -s "$mount/.DS_Store"
+          {
+            echo "### macOS disk image"
+            echo "- File: \`$(basename "$DMG")\`"
+            echo "- Size: $((size / 1024)) KiB"
+            echo "- SHA-256: \`$(shasum -a 256 "$DMG" | awk '{print $1}')\`"
+            echo "- Developer ID signed: \`$HAS_MAC_CERT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload disk image
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-dmg-${{ github.sha }}
+          path: target/macos/${{ steps.dmg.outputs.dmg_filename }}
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish Alpha pre-release
-    needs: verify
+    needs: [verify, macos]
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_alpha == true && needs.verify.outputs.release_tag == inputs.release_tag }}
     runs-on: windows-latest
     environment:
@@ -241,6 +378,12 @@ jobs:
         run: |
           installer\package.ps1
 
+      - name: Download verified macOS disk image
+        uses: actions/download-artifact@v6
+        with:
+          name: macos-dmg-${{ github.sha }}
+          path: mac-asset
+
       - name: Verify installer asset and generate provenance
         id: asset
         shell: bash
@@ -249,14 +392,23 @@ jobs:
           EXPECTED_VERSION: ${{ needs.verify.outputs.version_name }}
           GTT_SIGN_SHA1: ${{ secrets.GTT_SIGN_SHA1 }}
           GTT_SIGN_PFX: ${{ secrets.GTT_SIGN_PFX }}
+          MAC_DMG: ${{ needs.macos.outputs.dmg_filename }}
+          MAC_SIGNED: ${{ secrets.MACOS_CERT_P12 != '' }}
         run: |
           set -euo pipefail
+          mac_asset_filename="GlobalTokenTracker-${RELEASE_TAG}-macos-universal.dmg"
+          if [[ "$MAC_DMG" != "$mac_asset_filename" ]]; then
+            echo "macOS job built $MAC_DMG but this release needs $mac_asset_filename"
+            exit 1
+          fi
           setup="dist/GlobalTokenTracker-Setup-${EXPECTED_VERSION}-win-x64.exe"
           test -s "$setup"
           asset_filename="GlobalTokenTracker-Setup-${RELEASE_TAG}-win-x64.exe"
           mkdir -p release-asset
           cp "$setup" "release-asset/$asset_filename"
           asset_sha256="$(sha256sum "release-asset/$asset_filename" | awk '{print $1}')"
+          cp "mac-asset/$MAC_DMG" "release-asset/$mac_asset_filename"
+          mac_asset_sha256="$(sha256sum "release-asset/$mac_asset_filename" | awk '{print $1}')"
           asset_signed=false
           if [[ -n "${GTT_SIGN_SHA1:-}" || -n "${GTT_SIGN_PFX:-}" ]]; then
             asset_signed=true
@@ -270,19 +422,25 @@ jobs:
             printf 'asset_filename=%s\n' "$asset_filename"
             printf 'asset_sha256=%s\n' "$asset_sha256"
             printf 'asset_signed=%s\n' "$asset_signed"
+            printf 'mac_asset_filename=%s\n' "$mac_asset_filename"
+            printf 'mac_asset_sha256=%s\n' "$mac_asset_sha256"
+            printf 'mac_asset_signed=%s\n' "$MAC_SIGNED"
           } > release-asset/BUILD_INFO.txt
           (
             cd release-asset
-            sha256sum "$asset_filename" BUILD_INFO.txt > SHA256SUMS.txt
+            sha256sum "$asset_filename" "$mac_asset_filename" BUILD_INFO.txt > SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt
           )
           echo "asset_filename=$asset_filename" >> "$GITHUB_OUTPUT"
           echo "asset_sha256=$asset_sha256" >> "$GITHUB_OUTPUT"
+          echo "mac_asset_filename=$mac_asset_filename" >> "$GITHUB_OUTPUT"
+          echo "mac_asset_sha256=$mac_asset_sha256" >> "$GITHUB_OUTPUT"
           {
             echo "### Verified installer asset"
             echo "- File: \`$asset_filename\`"
             echo "- version: \`$EXPECTED_VERSION\`"
             echo "- SHA-256: \`$asset_sha256\`"
+            echo "- macOS: \`$mac_asset_filename\` · SHA-256 \`$mac_asset_sha256\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload verified Alpha asset
@@ -299,6 +457,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ASSET_FILENAME: ${{ steps.asset.outputs.asset_filename }}
           ASSET_SHA256: ${{ steps.asset.outputs.asset_sha256 }}
+          MAC_ASSET_FILENAME: ${{ steps.asset.outputs.mac_asset_filename }}
+          MAC_ASSET_SHA256: ${{ steps.asset.outputs.mac_asset_sha256 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_NOTES_LLM_1_API_KEY: ${{ secrets.RELEASE_NOTES_LLM_1_API_KEY }}
           RELEASE_NOTES_LLM_1_PROTOCOL: ${{ vars.RELEASE_NOTES_LLM_1_PROTOCOL }}
@@ -331,6 +491,8 @@ jobs:
             --release-date "$(TZ=Asia/Shanghai date +%F)" \
             --sha256 "$ASSET_SHA256" \
             --asset-filename "$ASSET_FILENAME" \
+            --mac-asset-filename "$MAC_ASSET_FILENAME" \
+            --mac-sha256 "$MAC_ASSET_SHA256" \
             --changelog-file "$changelog_file"
 
           if grep -Eq '\{\{[A-Z0-9_]+\}\}' release-asset/RELEASE_NOTES.md; then
@@ -344,9 +506,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           ASSET_FILENAME: ${{ steps.asset.outputs.asset_filename }}
+          MAC_ASSET_FILENAME: ${{ steps.asset.outputs.mac_asset_filename }}
         run: |
           gh release create "$RELEASE_TAG" \
             "release-asset/$ASSET_FILENAME" \
+            "release-asset/$MAC_ASSET_FILENAME" \
             release-asset/BUILD_INFO.txt \
             release-asset/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \

@@ -17,14 +17,18 @@ _Alpha 测试版说明_
 
 | 文件 | 说明 |
 | --- | --- |
-| `{{ASSET_FILENAME}}` | Alpha 测试安装包 · SHA-256 `{{ASSET_SHA256}}` |
+| `{{ASSET_FILENAME}}` | Windows Alpha 测试安装包 · SHA-256 `{{ASSET_SHA256}}` |
+| `{{MAC_ASSET_FILENAME}}` | macOS 磁盘映像（Apple 芯片 + Intel 通用，macOS 26+）· SHA-256 `{{MAC_ASSET_SHA256}}` |
 
 > [!TIP]
-> 直接运行安装程序即可原位升级（保留全部统计数据与安装目录设置）；如遇严重问题，覆盖安装最新 Stable 即可回滚。构建溯源见附件 `BUILD_INFO.txt` 与 `SHA256SUMS.txt`。
+> **Windows**：直接运行安装程序即可原位升级（保留全部统计数据与安装目录设置）；如遇严重问题，覆盖安装最新 Stable 即可回滚。构建溯源见附件 `BUILD_INFO.txt` 与 `SHA256SUMS.txt`。
+
+> [!TIP]
+> **macOS**：打开 `.dmg`，将 GlobalTokenTracker 拖入“应用程序”即可；升级时直接替换旧版本，统计数据保留在 `~/.globaltokentracker`。
 
 ### 📮 反馈
 
-遇到问题请前往 [Issues](https://github.com/jichuo1/GlobalTokenTracker/issues) 反馈，注明测试版本 {{VERSION}}，并附上 Windows 版本、复现步骤和已脱敏日志。
+遇到问题请前往 [Issues](https://github.com/jichuo1/GlobalTokenTracker/issues) 反馈，注明测试版本 {{VERSION}}，并附上 Windows / macOS 版本、复现步骤和已脱敏日志。
 
 <div align="center">
 
