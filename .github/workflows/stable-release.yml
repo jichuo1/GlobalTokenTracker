@@ -350,11 +350,25 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ASSET_FILENAME: ${{ steps.asset.outputs.asset_filename }}
         run: |
+          set -euo pipefail
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")"
+          if [[ -n "$remote_tag" ]]; then
+            git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "Refusing mismatched tag: $RELEASE_TAG points to $tag_commit but verified source is $GITHUB_SHA"
+              exit 1
+            fi
+          else
+            git tag "$RELEASE_TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
           gh release create "$RELEASE_TAG" \
             "release-asset/$ASSET_FILENAME" \
             release-asset/BUILD_INFO.txt \
             release-asset/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
+            --verify-tag \
             --title "$RELEASE_TAG" \
             --notes-file release-asset/RELEASE_NOTES.md
