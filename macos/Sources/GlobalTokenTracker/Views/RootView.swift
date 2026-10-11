@@ -65,6 +65,10 @@ struct MainToolbar: ToolbarContent {
                 .disabled(model.page == .detail)
                 .help("Statistics window")
             }
+            ToolbarItem(placement: .navigation) {
+                CustomRangeButton()
+                    .disabled(model.page == .detail)
+            }
             ToolbarItemGroup(placement: .primaryAction) {
                 FilterMenu(
                     title: "Tools", symbol: "hammer",

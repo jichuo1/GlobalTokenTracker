@@ -178,6 +178,115 @@ impl serde::Serialize for Range {
     }
 }
 
+/// Custom-window introspection the calendar / hour-dial chrome renders —
+/// kept here so every shell reads a window back the same way.
+impl Range {
+    /// Inclusive local civil days `(first, last)` a custom window covers.
+    pub fn custom_day_span(self) -> Option<(jiff::civil::Date, jiff::civil::Date)> {
+        self.custom_day_span_in(&jiff::tz::TimeZone::system())
+    }
+
+    fn custom_day_span_in(
+        self,
+        tz: &jiff::tz::TimeZone,
+    ) -> Option<(jiff::civil::Date, jiff::civil::Date)> {
+        match self {
+            // end_ms is exclusive — the last INCLUDED day is the one before it.
+            Self::Custom { start_ms, end_ms } => {
+                Some((local_date_in(tz, start_ms), local_date_in(tz, end_ms - 1)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Inclusive hour slots `(first, last)` of a custom window inside one
+    /// local day; a window reaching the next local midnight ends at slot 23.
+    /// `None` for presets and multi-day windows (the hour dial is inert).
+    pub fn hour_span(self) -> Option<(i8, i8)> {
+        self.hour_span_in(&jiff::tz::TimeZone::system())
+    }
+
+    fn hour_span_in(self, tz: &jiff::tz::TimeZone) -> Option<(i8, i8)> {
+        let Self::Custom { start_ms, end_ms } = self else {
+            return None;
+        };
+        let (first, last) = self.custom_day_span_in(tz)?;
+        if first != last {
+            return None;
+        }
+        let hour = |ms: i64| {
+            jiff::Timestamp::from_millisecond(ms)
+                .map(|t| t.to_zoned(tz.clone()).hour())
+                .unwrap_or(0)
+        };
+        let midnight = first
+            .tomorrow()
+            .map_or(i64::MAX, |d| local_day_start_in(tz, d));
+        let end = if end_ms >= midnight { 23 } else { hour(end_ms - 1) };
+        Some((hour(start_ms), end))
+    }
+}
+
+/// One-tap custom windows offered next to the calendar (the presets bar
+/// already covers today / 7 / 30 days / all). Weeks start on Monday, matching
+/// the calendar grid on every shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickRange {
+    Yesterday,
+    ThisWeek,
+    ThisMonth,
+    LastMonth,
+    Last90Days,
+}
+
+impl QuickRange {
+    pub const ALL: [Self; 5] = [
+        Self::Yesterday,
+        Self::ThisWeek,
+        Self::ThisMonth,
+        Self::LastMonth,
+        Self::Last90Days,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Yesterday => "yesterday",
+            Self::ThisWeek => "this_week",
+            Self::ThisMonth => "this_month",
+            Self::LastMonth => "last_month",
+            Self::Last90Days => "last_90_days",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.key() == key)
+    }
+
+    /// Inclusive civil days relative to `today`.
+    pub fn days_on(self, today: jiff::civil::Date) -> (jiff::civil::Date, jiff::civil::Date) {
+        let back = |n: i64| today.saturating_sub(jiff::Span::new().days(n));
+        match self {
+            Self::Yesterday => (back(1), back(1)),
+            Self::ThisWeek => (
+                back(i64::from(today.weekday().to_monday_zero_offset())),
+                today,
+            ),
+            Self::ThisMonth => (today.first_of_month(), today),
+            Self::LastMonth => {
+                let last = today.first_of_month().saturating_sub(jiff::Span::new().days(1));
+                (last.first_of_month(), last)
+            }
+            Self::Last90Days => (back(89), today),
+        }
+    }
+
+    /// The window for the current local day.
+    pub fn range(self) -> Range {
+        let (first, last) = self.days_on(jiff::Zoned::now().date());
+        Range::custom_days(first, last)
+    }
+}
+
 /// Local start-of-day `days_ago` days back, epoch ms (0 = today).
 pub fn day_start_ms(days_ago: i64) -> i64 {
     let now = jiff::Zoned::now();
@@ -644,6 +753,51 @@ mod tests {
     use super::*;
     use jiff::civil::date;
     use jiff::tz::TimeZone;
+
+    #[test]
+    fn custom_spans_read_back_days_and_hours() {
+        let utc = TimeZone::UTC;
+        let d = date(2026, 10, 12);
+        let r = Range::custom_days_in(&utc, date(2026, 10, 3), date(2026, 10, 9));
+        assert_eq!(r.custom_day_span_in(&utc), Some((date(2026, 10, 3), date(2026, 10, 9))));
+        assert_eq!(r.hour_span_in(&utc), None, "multi-day windows have no hour span");
+
+        let r = Range::custom_hours_in(&utc, d, 18, 9);
+        assert_eq!(r.custom_day_span_in(&utc), Some((d, d)));
+        assert_eq!(r.hour_span_in(&utc), Some((9, 18)));
+        assert_eq!(Range::custom_days_in(&utc, d, d).hour_span_in(&utc), Some((0, 23)));
+        assert_eq!(Range::custom_hours_in(&utc, d, 23, 23).hour_span_in(&utc), Some((23, 23)));
+        assert_eq!(Range::Week.custom_day_span_in(&utc), None);
+        assert_eq!(Range::Today.hour_span_in(&utc), None);
+
+        // DST fall-back day in New York: the 25-hour day still reads 0..=23.
+        let ny = TimeZone::get("America/New_York").unwrap();
+        let fall = date(2026, 11, 1);
+        assert_eq!(Range::custom_days_in(&ny, fall, fall).hour_span_in(&ny), Some((0, 23)));
+        assert_eq!(Range::custom_hours_in(&ny, fall, 1, 3).hour_span_in(&ny), Some((1, 3)));
+    }
+
+    #[test]
+    fn quick_ranges_are_monday_first_and_inclusive() {
+        let thu = date(2026, 10, 15);
+        let days = |q: QuickRange| q.days_on(thu);
+        assert_eq!(days(QuickRange::Yesterday), (date(2026, 10, 14), date(2026, 10, 14)));
+        assert_eq!(days(QuickRange::ThisWeek), (date(2026, 10, 12), thu));
+        assert_eq!(days(QuickRange::ThisMonth), (date(2026, 10, 1), thu));
+        assert_eq!(days(QuickRange::LastMonth), (date(2026, 9, 1), date(2026, 9, 30)));
+        assert_eq!(days(QuickRange::Last90Days), (date(2026, 7, 18), thu));
+        // Monday itself starts the week; January's "last month" crosses the year.
+        let mon = date(2026, 10, 12);
+        assert_eq!(QuickRange::ThisWeek.days_on(mon), (mon, mon));
+        assert_eq!(
+            QuickRange::LastMonth.days_on(date(2026, 1, 10)),
+            (date(2025, 12, 1), date(2025, 12, 31))
+        );
+        for q in QuickRange::ALL {
+            assert_eq!(QuickRange::from_key(q.key()), Some(q));
+        }
+        assert_eq!(QuickRange::from_key("nope"), None);
+    }
 
     #[test]
     fn custom_days_are_inclusive_ordered_and_dst_safe() {

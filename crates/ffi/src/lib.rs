@@ -14,7 +14,7 @@
 #![allow(unsafe_code)]
 
 use globaltokentracker_core::store::default_db_path;
-use globaltokentracker_core::viewmodel::Range;
+use globaltokentracker_core::viewmodel::{QuickRange, Range};
 use globaltokentracker_core::{Cube, Engine, Store, adapters, pricing, quota, update};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -60,6 +60,54 @@ struct PageReq {
     limit: Option<i64>,
     apps: Option<Vec<String>>,
     models: Option<Vec<String>>,
+}
+
+/// Custom-window construction for the calendar / hour dial. Pure time math —
+/// no ledger access — so shells may call it synchronously.
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum WindowOp {
+    /// Inclusive civil days ("YYYY-MM-DD"), either order.
+    Days { first: String, last: String },
+    /// Inclusive hour slots 0..=23 of one civil day, either order.
+    Hours { day: String, h1: i8, h2: i8 },
+    /// One of `QuickRange::key()`.
+    Quick { key: String },
+    /// Read an existing window back.
+    Describe { range: RangeReq },
+}
+
+fn civil(s: &str) -> Result<jiff::civil::Date, String> {
+    s.parse().map_err(|e| format!("bad date {s:?}: {e}"))
+}
+
+fn range_op(req: WindowOp) -> Result<Value, String> {
+    let r = match req {
+        WindowOp::Days { first, last } => Range::custom_days(civil(&first)?, civil(&last)?),
+        WindowOp::Hours { day, h1, h2 } => {
+            if !(0..=23).contains(&h1) || !(0..=23).contains(&h2) {
+                return Err("hours must be 0..=23".into());
+            }
+            Range::custom_hours(civil(&day)?, h1, h2)
+        }
+        WindowOp::Quick { key } => QuickRange::from_key(&key)
+            .ok_or_else(|| format!("unknown quick range {key:?}"))?
+            .range(),
+        WindowOp::Describe { range } => Range::from_config(&range.key, range.start_ms, range.end_ms),
+    };
+    let now = jiff::Zoned::now();
+    let span = r.custom_day_span();
+    Ok(json!({
+        "range": r,
+        "first_day": span.map(|s| s.0.to_string()),
+        "last_day": span.map(|s| s.1.to_string()),
+        "days": span.map(|(a, b)| a.until(b).map_or(1, |d| d.get_days() + 1)),
+        "hour_span": r.hour_span(),
+        "hourly": r.hourly(),
+        // The shell's clock for disabling future days / hours.
+        "today": now.date().to_string(),
+        "now_hour": now.hour(),
+    }))
 }
 
 fn open() -> Result<Store, String> {
@@ -316,6 +364,21 @@ pub unsafe extern "C" fn gtt_check_update(channel: *const c_char) -> *mut c_char
     })
 }
 
+/// Build or describe a custom statistics window (see `WindowOp`).
+///
+/// # Safety
+/// `req_json` is NULL or a valid NUL-terminated UTF-8 string that outlives the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_range(req_json: *const c_char) -> *mut c_char {
+    guarded(|| {
+        if req_json.is_null() {
+            return Err("gtt_range needs a request".into());
+        }
+        let s = unsafe { CStr::from_ptr(req_json) }.to_str().map_err(|e| e.to_string())?;
+        range_op(serde_json::from_str(s).map_err(|e| format!("bad request: {e}"))?)
+    })
+}
+
 /// Version, ledger path and local UTC offset.
 #[unsafe(no_mangle)]
 pub extern "C" fn gtt_info() -> *mut c_char {
@@ -365,6 +428,22 @@ mod tests {
         let v = call(unsafe { gtt_load(bad.as_ptr()) });
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().starts_with("bad request"));
+
+        let req = CString::new(r#"{"op":"hours","day":"2026-10-12","h1":18,"h2":9}"#).unwrap();
+        let v = call(unsafe { gtt_range(req.as_ptr()) });
+        assert_eq!(v["data"]["range"]["key"], "custom", "{v}");
+        assert_eq!(v["data"]["hour_span"], json!([9, 18]));
+        assert_eq!(v["data"]["days"], 1);
+        assert_eq!(v["data"]["hourly"], true);
+        let req = CString::new(r#"{"op":"days","first":"2026-10-09","last":"2026-10-03"}"#).unwrap();
+        let v = call(unsafe { gtt_range(req.as_ptr()) });
+        assert_eq!(v["data"]["first_day"], "2026-10-03");
+        assert_eq!(v["data"]["days"], 7);
+        assert!(v["data"]["hour_span"].is_null());
+        let req = CString::new(r#"{"op":"quick","key":"last_month"}"#).unwrap();
+        assert_eq!(call(unsafe { gtt_range(req.as_ptr()) })["ok"], true);
+        let req = CString::new(r#"{"op":"hours","day":"2026-10-12","h1":24,"h2":1}"#).unwrap();
+        assert_eq!(call(unsafe { gtt_range(req.as_ptr()) })["ok"], false);
 
         for p in [gtt_sources(), gtt_prices(), gtt_watch_roots(), gtt_info()] {
             assert_eq!(call(p)["ok"], true);

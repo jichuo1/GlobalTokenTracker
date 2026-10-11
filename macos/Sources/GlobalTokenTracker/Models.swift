@@ -258,3 +258,17 @@ struct CoreInfo: Decodable, Sendable {
     var dbPath: String
     var tzOffset: String
 }
+
+/// core's read-back of a statistics window (`gtt_range`): the inclusive day
+/// span, the hour span of a single-day window, and core's notion of "now"
+/// for disabling future days / hours.
+struct RangeInfo: Decodable, Sendable, Equatable {
+    var range: RangeSpec
+    var firstDay: String?
+    var lastDay: String?
+    var days: Int?
+    var hourSpan: [Int]?
+    var hourly: Bool
+    var today: String
+    var nowHour: Int
+}

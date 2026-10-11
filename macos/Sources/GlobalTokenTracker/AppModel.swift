@@ -68,8 +68,16 @@ final class AppModel {
     // MARK: Selection (persisted)
     var page: Page = .overview
     var range: RangeSpec {
-        didSet { persist(); requestLoad(forceViews: true) }
+        didSet {
+            guard range != oldValue else { return }
+            rangeInfo = try? Core.window(.describe(range))
+            persist()
+            requestLoad(forceViews: true)
+        }
     }
+    /// core's read-back of `range` (day span, hour span, "now") for the
+    /// calendar and hour dial.
+    private(set) var rangeInfo: RangeInfo?
     var appFilter: Set<String>? {
         didSet { persist(); requestLoad(forceViews: true, resetDetail: true) }
     }
@@ -106,6 +114,14 @@ final class AppModel {
         modelFilter = (d.array(forKey: "modelFilter") as? [String]).map(Set.init)
         refreshSeconds = d.object(forKey: "refreshSeconds") as? Int ?? 30
         updateChannel = d.string(forKey: "updateChannel") ?? "stable"
+        rangeInfo = try? Core.window(.describe(range))
+    }
+
+    /// Apply a calendar / hour-dial / quick-range choice. core builds the
+    /// window (inclusive, DST-safe, local-day/hour aligned); we only store it.
+    func applyWindow(_ op: Core.WindowOp) {
+        guard let info = try? Core.window(op) else { return }
+        range = info.range
     }
 
     private func persist() {

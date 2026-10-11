@@ -101,6 +101,34 @@ enum Core {
         }
     }
 
+    /// Custom-window ops (`days` / `hours` / `quick` / `describe`). Pure time
+    /// math in core — no ledger I/O — so this one is synchronous.
+    enum WindowOp {
+        case days(first: String, last: String)
+        case hours(day: String, h1: Int, h2: Int)
+        case quick(String)
+        case describe(RangeSpec)
+    }
+
+    static func window(_ op: WindowOp) throws -> RangeInfo {
+        let req: [String: Any] = switch op {
+        case let .days(first, last): ["op": "days", "first": first, "last": last]
+        case let .hours(day, h1, h2): ["op": "hours", "day": day, "h1": h1, "h2": h2]
+        case let .quick(key): ["op": "quick", "key": key]
+        case let .describe(r): ["op": "describe", "range": rangeObject(r)]
+        }
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: req), as: UTF8.self)
+        return try call { json.withCString { gtt_range($0) } }
+    }
+
+    /// JSONSerialization can't encode Optionals: include only present bounds.
+    private static func rangeObject(_ r: RangeSpec) -> [String: Any] {
+        var o: [String: Any] = ["key": r.key]
+        if let s = r.startMs { o["start_ms"] = s }
+        if let e = r.endMs { o["end_ms"] = e }
+        return o
+    }
+
     nonisolated static func info() async throws -> CoreInfo {
         try await detached { try call { gtt_info() } }
     }

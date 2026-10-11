@@ -134,3 +134,24 @@
 "Open" = "打开";
 "Settings…" = "设置…";
 "Quit GlobalTokenTracker" = "退出 GlobalTokenTracker";
+
+/* Custom range: calendar + hour dial (wording follows the WinUI shell) */
+"Pick a custom date or hour range" = "按日历或时段自定义统计区间";
+"Selected Range" = "已选区间";
+"%lld days" = "共 %lld 天";
+"%lld hours" = "共 %lld 小时";
+"Click a start day, then an end day." = "点击起始日，再点击结束日";
+"Now click the other end." = "再点一个作为另一端";
+"Quick Ranges" = "快捷选择";
+"Yesterday" = "昨天";
+"This Week" = "本周";
+"This Month" = "本月";
+"Last Month" = "上月";
+"Last 90 Days" = "近 90 天";
+"By Hour" = "按时段";
+"All Day" = "全天";
+"Select a single day to narrow it to hours." = "选择单日后可按时段统计";
+"Click a start hour, then an end hour." = "点击起始整点，再点击结束整点";
+"Previous month" = "上个月";
+"Next month" = "下个月";
+"Hour range" = "时段";

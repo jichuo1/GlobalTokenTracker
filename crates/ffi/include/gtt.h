@@ -22,6 +22,13 @@ char *gtt_prices(void);
 char *gtt_refresh_prices(void);
 char *gtt_poll_quotas(void);
 char *gtt_watch_roots(void);
+/* Custom statistics window (pure time math, safe on the main thread):
+ *   {"op":"days","first":"YYYY-MM-DD","last":"YYYY-MM-DD"}
+ *   {"op":"hours","day":"YYYY-MM-DD","h1":0..23,"h2":0..23}
+ *   {"op":"quick","key":"yesterday|this_week|this_month|last_month|last_90_days"}
+ *   {"op":"describe","range":{key,start_ms?,end_ms?}}
+ * → {range, first_day?, last_day?, days?, hour_span?:[a,b], hourly, today, now_hour} */
+char *gtt_range(const char *req_json);
 /* "stable" | "alpha"; NULL = stable */
 char *gtt_check_update(const char *channel);
 char *gtt_info(void);
