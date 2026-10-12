@@ -3,6 +3,7 @@
 // whole-hour slots. Same interaction model as the WinUI shell's custom-range
 // chrome; every window is built by core (`gtt_range`) — this view only turns
 // clicks into civil days / hours and renders core's read-back.
+import AppKit
 import SwiftUI
 
 /// A local calendar day with no time or zone attached ("YYYY-MM-DD" to core).
@@ -56,12 +57,10 @@ struct CustomRangeButton: View {
                 // Fixed width: the label used to resize with every pick
                 // ("Oct 3 – 9" vs "Sep 28 – Oct 12"), which moved the button
                 // and re-anchored the popover, so the panel slid sideways.
-                ZStack(alignment: .leading) {
-                    ForEach(Self.widest, id: \.self) { Text($0).hidden() }
-                    Text(Self.summary(model.range, model.rangeInfo))
-                        .rollingText(down: model.rangeRollsDown)
-                }
-                .monospacedDigit()
+                Text(Self.summary(model.range, model.rangeInfo))
+                    .monospacedDigit()
+                    .rollingText(down: model.rangeRollsDown)
+                    .frame(width: Self.captionWidth, alignment: .leading)
             } icon: {
                 Image(systemName: "calendar")
             }
@@ -100,9 +99,16 @@ struct CustomRangeButton: View {
         return (a.date..<b.date.addingTimeInterval(1)).formatted(.interval.month(.abbreviated).day())
     }
 
+    /// Width of the longest caption, measured once with the toolbar's font
+    /// and tabular digits (was 26 hidden Text views re-laid out per pick).
+    private static let captionWidth: CGFloat = {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        let w = widest.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 80
+        return ceil(w) + 2
+    }()
+
     /// Longest captions this locale can produce — every month's abbreviation,
-    /// two-digit days, cross-month spans and the hour form. Laid out hidden
-    /// under the real caption, so the button keeps one width for any pick.
+    /// two-digit days, cross-month spans and the hour form.
     private static let widest: [String] = {
         var out = [String(localized: "Custom")]
         for m in 1...12 {

@@ -63,6 +63,25 @@ enum Fmt {
         return f
     }()
 
+    /// "YYYY-MM-DD" → days since 1970-01-01 (proleptic Gregorian), pure
+    /// integer math — no DateFormatter on hot paths (heatmap layout/hover).
+    static func epochDay(_ key: String) -> Int? {
+        let u = Array(key.utf8)
+        guard u.count == 10, u[4] == 45, u[7] == 45 else { return nil }  // '-'
+        func num(_ r: Range<Int>) -> Int? {
+            var v = 0
+            for i in r { let d = Int(u[i]) - 48; guard (0...9).contains(d) else { return nil }; v = v * 10 + d }
+            return v
+        }
+        guard let y0 = num(0..<4), let m = num(5..<7), let d = num(8..<10) else { return nil }
+        let y = m <= 2 ? y0 - 1 : y0
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146_097 + doe - 719_468
+    }
+
     /// Bucket keys from core: "YYYY-MM-DD" (daily) or "HH:00" (hourly).
     static func bucketDate(_ key: String) -> Date? {
         dayParser.date(from: key)
