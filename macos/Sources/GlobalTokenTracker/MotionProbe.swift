@@ -106,3 +106,57 @@ final class MotionProbe: NSObject {
         }
     }
 }
+
+/// Developer snapshot — inert unless GTT_SNAPSHOT=<png path> is set. Shows
+/// GTT_SNAPSHOT_PAGE (default overview) once startup work has settled, then
+/// renders the window's own layer tree to a PNG and quits. In-process
+/// rendering needs no screen-recording permission, so layout can be checked
+/// without a human looking at the screen.
+@MainActor
+enum Snapshot {
+    /// Geometry of every visible table: frames, insets, column widths.
+    static func dumpTables(_ v: NSView) {
+        if let t = v as? NSTableView, !t.isHiddenOrHasHiddenAncestor, let s = t.enclosingScrollView,
+           s.window != nil, s.visibleRect.width > 0 {
+            let cols = t.tableColumns.map { "\($0.title)=\(Int($0.width))" }.joined(separator: " ")
+            let line = "[tables] scroll \(s.frame.integral) clip \(s.contentView.bounds.integral) insets \(s.contentInsets) "
+                + "table \(t.frame.integral) autoresize \(t.columnAutoresizingStyle.rawValue) sum \(Int(t.tableColumns.reduce(0) { $0 + $1.width })) | \(cols)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+        for sub in v.subviews { dumpTables(sub) }
+    }
+
+    static func start(model: AppModel) {
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["GTT_SNAPSHOT"] else { return }
+        let page = env["GTT_SNAPSHOT_PAGE"].flatMap(Page.init(rawValue:)) ?? .overview
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            while model.isLoading || model.isRefreshingPrices {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            model.page = page
+            try? await Task.sleep(for: .seconds(3.5))
+            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
+                  let view = window.contentView?.superview ?? window.contentView else { return }
+            if env["GTT_SNAPSHOT_TABLES"] != nil { dumpTables(view) }
+            let bounds = view.bounds
+            let scale = window.backingScaleFactor
+            let width = Int(bounds.width * scale), height = Int(bounds.height * scale)
+            guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            ctx.scaleBy(x: scale, y: scale)
+            if view.isFlipped {
+                ctx.translateBy(x: 0, y: bounds.height)
+                ctx.scaleBy(x: 1, y: -1)
+            }
+            view.layer?.render(in: ctx)
+            if let image = ctx.makeImage() {
+                let rep = NSBitmapImageRep(cgImage: image)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
+            NSApp.terminate(nil)
+        }
+    }
+}

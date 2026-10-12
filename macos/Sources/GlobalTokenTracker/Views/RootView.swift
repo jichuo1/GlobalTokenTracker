@@ -180,6 +180,7 @@ struct PageDeck: View {
             guard target == new else { return }
             settled = new
             if !ProbeFlags.noChrome { model.chromePage = new }
+            ScrollerStyle.apply()
             if let w = NSApp.keyWindow, let v = w.contentView {
                 w.enableCursorRects()
                 w.invalidateCursorRects(for: v)
@@ -204,10 +205,12 @@ struct PageDeck: View {
     /// first visit turns smoothly. Each mounts parked (≈0 opacity).
     private func prebuild() async {
         try? await Task.sleep(for: .seconds(2.5))
+        ScrollerStyle.apply()
         for p in Page.allCases where !built.contains(p) {
             guard !Task.isCancelled else { return }
             built.insert(p)
             try? await Task.sleep(for: .milliseconds(350))
+            ScrollerStyle.apply()
         }
     }
 

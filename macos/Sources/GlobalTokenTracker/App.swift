@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             AppModel.shared.start()
             MotionProbe.shared.start(model: AppModel.shared)
+            Snapshot.start(model: AppModel.shared)
         }
     }
 

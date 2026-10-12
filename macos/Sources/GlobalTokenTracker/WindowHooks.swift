@@ -101,3 +101,74 @@ private struct ChartFont: ViewModifier {
         }
     }
 }
+
+/// Scrollers that blend in: every scroll view in the window uses thin
+/// overlay scrollers that appear while scrolling and fade out, instead of
+/// the legacy always-on tracks ("Show scroll bars: Always", or a mouse
+/// attached) whose opaque lanes sat on top of table cells. Tables size their
+/// columns to fit, so horizontal scrollers are switched off where the
+/// content is designed to fit. Re-applied when AppKit resets the style
+/// (system preference changes) and whenever pages are built or settle.
+@MainActor
+enum ScrollerStyle {
+    /// Room the overlay knob needs at a table's trailing edge.
+    static let lane: CGFloat = 10
+
+    private static var observing = false
+
+    static func apply() {
+        if !observing {
+            observing = true
+            NotificationCenter.default.addObserver(
+                forName: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { apply() }
+            }
+        }
+        for window in NSApp.windows {
+            guard let root = window.contentView else { continue }
+            visit(root)
+        }
+    }
+
+    /// Shrink columns proportionally (never below their minimum) until the
+    /// table fits its clip view. SwiftUI applies the columns' ideal widths
+    /// but AppKit adds intercell spacing and edge padding on top, so a
+    /// 9-column table overflowed by ~84 pt. Once it fits, the table's own
+    /// uniform autoresizing keeps it fitting as the window resizes.
+    private static func fit(_ table: NSTableView, into width: CGFloat) {
+        guard width > 0 else { return }
+        let cols = table.tableColumns.filter { !$0.isHidden }
+        // Measured, not assumed: intercell spacing plus the table style's
+        // own edge padding (≈18.5 pt per column here).
+        let columns = cols.reduce(0) { $0 + $1.width }
+        let spacing = max(table.intercellSpacing.width * CGFloat(cols.count), table.frame.width - columns)
+        var excess = columns + spacing - width
+        guard excess > 0.5 else { return }
+        for _ in 0..<4 where excess > 0.5 {
+            let room = cols.reduce(0) { $0 + max(0, $1.width - $1.minWidth) }
+            guard room > 0 else { break }
+            for c in cols {
+                let give = max(0, c.width - c.minWidth) / room * excess
+                c.width = max(c.minWidth, c.width - give)
+            }
+            excess = cols.reduce(0) { $0 + $1.width } + spacing - width
+        }
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+    }
+
+    private static func visit(_ view: NSView) {
+        if let scroll = view as? NSScrollView {
+            if scroll.scrollerStyle != .overlay { scroll.scrollerStyle = .overlay }
+            scroll.autohidesScrollers = true
+            scroll.scrollerKnobStyle = .default
+            // Tables are laid out to fit their width; never show a
+            // horizontal scroller (or the corner square it brings).
+            if let table = scroll.documentView as? NSTableView {
+                scroll.hasHorizontalScroller = false
+                fit(table, into: scroll.contentView.bounds.width)
+            }
+        }
+        for sub in view.subviews { visit(sub) }
+    }
+}

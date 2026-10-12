@@ -14,7 +14,8 @@ struct DetailView: View {
     var body: some View {
         Table(model.detailRows, selection: $selection) {
             TableColumn("Time") { r in
-                Text(Fmt.timestamp(r.tsStart)).monospacedDigit()
+                Text(Fmt.shortTimestamp(r.tsStart)).monospacedDigit()
+                    .help(Fmt.timestamp(r.tsStart))
                     // Infinite scroll: the last visible row asks for the next page.
                     // Deferred a run-loop turn — mutating the rows while
                     // NSTableView is laying out cells is a reentrant delegate
@@ -24,36 +25,43 @@ struct DetailView: View {
                         Task { @MainActor in model.loadMoreDetail() }
                     }
             }
-            .width(min: 120, ideal: 150)
+            // Widths sum to fit a normal window, so the table never needs a
+            // horizontal scroller (it covered the last rows and the Cost /
+            // Duration columns ended up off-screen).
+            .width(min: 84, ideal: 104)
             TableColumn("Tool") { r in Text(Fmt.app(r.app)) }
-                .width(min: 70, ideal: 100)
+                .width(min: 56, ideal: 76)
             TableColumn("Model") { r in
                 // Windows: the raw model, else the pricing model, else "—".
                 Text(r.model ?? r.pricingModel ?? "—")
                     .foregroundStyle(.secondary)
                     .help(r.pricingModel.map { String(localized: "Priced as \($0)") } ?? "")
             }
-            .width(min: 120, ideal: 200)
+            .width(min: 100, ideal: 170)
             TableColumn("Project") { r in
                 Text(r.project.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                     .help(r.project ?? "")
             }
-            .width(min: 80, ideal: 130)
-            TableColumn("Input") { r in num(r.inputTokens) }.width(min: 60, ideal: 80)
-            TableColumn("Output") { r in num(r.outputTokens) }.width(min: 60, ideal: 80)
+            .width(min: 76, ideal: 140)
+            TableColumn("Input") { r in num(r.inputTokens) }.width(min: 44, ideal: 64)
+            TableColumn("Output") { r in num(r.outputTokens) }.width(min: 52, ideal: 72)
             TableColumn("Cache") { r in
                 num(r.cacheReadTokens + r.cacheWriteTokens, secondary: true)
                     .help(String(localized: "Read \(Fmt.tokensExact(r.cacheReadTokens)) · Write \(Fmt.tokensExact(r.cacheWriteTokens))"))
             }
-            .width(min: 60, ideal: 90)
+            .width(min: 70, ideal: 92)
             TableColumn("Cost") { r in CostCell(row: r) }
-                .width(min: 80, ideal: 130)
+                .width(min: 72, ideal: 104)
             TableColumn("Duration") { r in
                 Text(r.durationMs.map { Fmt.duration(ms: UInt64(max(0, $0))) } ?? "—")
                     .monospacedDigit()
                     .frame(maxWidth: .infinity, alignment: .trailing)
+                    // Keep clear of the overlay scroller's lane.
+                    .padding(.trailing, ScrollerStyle.lane)
             }
-            .width(min: 60, ideal: 80)
+            .width(min: 58, ideal: 74)
         }
         // Provenance (raw_ref: source file + offset) — the Windows row tooltip,
         // here as a context menu so it can be copied for reconciliation.
@@ -272,6 +280,7 @@ struct PricesView: View {
             TableColumn("Agreement") { p in
                 Pill(text: "\(p.agree)/\(p.total)", tint: p.disputed ? .orange : .secondary)
                     .help(tooltip(p))
+                    .padding(.trailing, ScrollerStyle.lane)
             }
             .width(min: 70, ideal: 90)
         }

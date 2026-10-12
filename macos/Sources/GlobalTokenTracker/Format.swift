@@ -38,6 +38,15 @@ enum Fmt {
         return date(ms: ms).formatted(date: .abbreviated, time: .shortened)
     }
 
+    /// Compact table timestamp — "10/12 14:00" (locale-ordered, 24 h); the
+    /// full form goes in the tooltip.
+    static func shortTimestamp(_ ms: Int64?) -> String {
+        guard let ms else { return "—" }
+        return date(ms: ms).formatted(
+            .dateTime.month(.twoDigits).day(.twoDigits).hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
+        )
+    }
+
     static func relative(_ ms: Int64?) -> String {
         guard let ms else { return String(localized: "Never") }
         return date(ms: ms).formatted(.relative(presentation: .named))
