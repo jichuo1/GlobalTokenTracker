@@ -4,7 +4,7 @@
 
 # GlobalTokenTracker
 
-**聚合本机 AI 编码工具用量的 WinUI 3 桌面应用**
+**聚合本机 AI 编码工具用量的桌面应用 · Windows（WinUI 3）与 macOS（SwiftUI）**
 
 **简体中文** · [English](README_EN.md)
 
@@ -13,11 +13,12 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-00AEEC?style=flat-square&labelColor=2d3a55)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.90-DEA584?style=flat-square&logo=rust&logoColor=white&labelColor=2d3a55)](https://www.rust-lang.org)
 [![Windows](https://img.shields.io/badge/Windows-10%201809%2B-0078D4?style=flat-square&logo=windows&logoColor=white&labelColor=2d3a55)](#环境要求)
-[![UI](https://img.shields.io/badge/UI-WinUI%203-00AEEC?style=flat-square&labelColor=2d3a55)](#环境要求)
+[![macOS](https://img.shields.io/badge/macOS-26%2B-000000?style=flat-square&logo=apple&logoColor=white&labelColor=2d3a55)](#环境要求)
+[![UI](https://img.shields.io/badge/UI-WinUI%203%20%C2%B7%20SwiftUI-00AEEC?style=flat-square&labelColor=2d3a55)](#环境要求)
 [![Release](https://img.shields.io/github/v/release/jichuo1/GlobalTokenTracker?include_prereleases&style=flat-square&label=release&labelColor=2d3a55)](https://github.com/jichuo1/GlobalTokenTracker/releases)
 [![Issues](https://img.shields.io/github/issues/jichuo1/GlobalTokenTracker?style=flat-square&labelColor=2d3a55)](https://github.com/jichuo1/GlobalTokenTracker/issues)
 
-[功能](#功能) · [支持的源](#支持的源) · [环境要求](#环境要求) · [安装与更新](#安装与更新) · [使用](#使用) · [构建](#构建项目) · [隐私](#隐私说明)
+[功能](#功能) · [支持的源](#支持的源) · [环境要求](#环境要求) · [安装与更新](#安装与更新) · [使用](#使用) · [局域网多设备](#局域网多设备查看预览) · [构建](#构建项目) · [隐私](#隐私说明)
 
 </div>
 
@@ -32,6 +33,7 @@
 - [环境要求](#环境要求)
 - [安装与更新](#安装与更新)
 - [使用](#使用)
+- [局域网多设备查看（预览）](#局域网多设备查看预览)
 - [构建项目](#构建项目)
 - [隐私说明](#隐私说明)
 - [许可证](#许可证)
@@ -43,9 +45,9 @@
 
 ## 项目简介
 
-GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 AI 编码工具的用量：token 计数、按价目表估算的美元成本、订阅配额/额度余量、延迟与模型分布。它只读取各工具写在磁盘上的本地日志与状态文件做增量统计，数据全部存放在本机 SQLite 账本中，过程不产生网络上报。
+GlobalTokenTracker 是一个桌面程序（当前版本 0.7.0，支持 Windows 与 macOS），用来统一统计本机各 AI 编码工具的用量：token 计数、按价目表估算的美元成本、订阅配额/额度余量、延迟与模型分布。它只读取各工具写在磁盘上的本地日志与状态文件做增量统计，数据全部存放在本机 SQLite 账本中，过程不产生网络上报。
 
-界面采用 WinUI 3 原生实现（Rust + windows-reactor），目标是小体积、冷启动快、长期常驻托盘稳定。核心统计引擎与 UI 分离，设计上保留了未来跨平台（macOS）的可能。
+Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS 版是原生 SwiftUI 应用；两者共用同一套 Rust 核心（适配器、计价、账本），同一份日志在两个平台上得出相同的数字。目标是小体积、冷启动快、长期常驻托盘/菜单栏稳定。
 
 ---
 
@@ -98,6 +100,30 @@ GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 
 
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+
+#### macOS 原生应用
+
+- SwiftUI 窗口 + 菜单栏常驻（可在菜单栏显示今日成本、隐藏 Dock 图标、登录时启动）
+- 页面切换为“滚筒翻页”动画，可连续翻过中间页、随时打断
+- 自定义统计区间：日历 + 24 小时表盘选择起止时间
+- 设置页：界面字号、主题与强调色、图表字体、刷新频率、更新通道与自动检查更新
+- 图表经 Metal 一次光栅化（GPU 绘制），翻页与滚动更顺滑
+- 应用内更新：下载新版 DMG 并打开，拖入“应用程序”即可
+
+</td>
+<td width="50%" valign="top">
+
+#### 局域网多设备查看（预览）
+
+- 同一局域网内的设备互相只读查看用量聚合，**默认关闭**
+- 一次性 6 位配对码 + TLS 1.3 证书固定，随时撤销
+- Bonjour/mDNS 自动发现，也可直接按 IP 添加
+- 目前通过 CLI 使用，图形界面即将推出——见[下文](#局域网多设备查看预览)
+
+</td>
+</tr>
 </table>
 
 ---
@@ -108,9 +134,10 @@ GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 
 |---|---|---|
 | Claude Code | 本地 JSONL 会话日志 | ✅ token 精确 + 配额（凭据可用时） |
 | Codex | 本地会话日志 | ✅ 精确 + 配额 |
-| Devin | OTLP 遥测接收 | ✅ 精确 |
+| Devin CLI | 本地会话库 `devin/cli/sessions.db` | ✅ 精确（含 TTFT） |
 | OpenCode / ZCode / Grok / WorkBuddy | 本地日志 | ✅ 精确 |
 | MiniMax Code / Kimi Code | 本地日志 | ✅ 精确 |
+| DeepSeek Harness（CLI / DSH Desktop） | 本地会话 `~/.dsh/sessions/…` | ✅ 精确 |
 | Cline | `ui_messages.json` + 编辑器 globalStorage | ✅ 精确（含工具自报成本） |
 | Command Code | 本地 JSONL | ✅ 精确（含工具自报成本） |
 | Antigravity（应用 / IDE / `agy` CLI） | 本地会话库 `~/.gemini/antigravity*/…/*.db` | ✅ 精确（含思考 token；无缓存写数据） |
@@ -124,6 +151,8 @@ GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 
 
 ## 环境要求
 
+**Windows**
+
 | 项 | 要求 |
 |---|---|
 | 系统 | Windows 10 **1809+**（build 17763），x64 |
@@ -131,9 +160,20 @@ GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 
 | 权限 | 不需要管理员，装到 `%LOCALAPPDATA%\Programs\GlobalTokenTracker` |
 | 磁盘 | 约 20 MB |
 
+**macOS**
+
+| 项 | 要求 |
+|---|---|
+| 系统 | macOS **26** 及以上 |
+| 架构 | 通用二进制，Apple 芯片与 Intel 均可 |
+| 权限 | 不需要管理员，拖入“应用程序”即可 |
+| 磁盘 | 约 10 MB |
+
 ---
 
 ## 安装与更新
+
+### Windows
 
 从 [Releases](https://github.com/jichuo1/GlobalTokenTracker/releases) 下载 `GlobalTokenTracker-Setup-<版本>-win-x64.exe`：
 
@@ -149,11 +189,20 @@ GlobalTokenTracker 是一个 Windows 桌面程序，用来统一统计本机各 
 > [!WARNING]
 > 安装包当前未签名，SmartScreen 会提示"Windows 已保护你的电脑"——点"更多信息 → 仍要运行"即可。下载后可在 Release 页核对 SHA-256。
 
+### macOS
+
+从 [Releases](https://github.com/jichuo1/GlobalTokenTracker/releases) 下载 `GlobalTokenTracker-<版本>-macos-universal.dmg`，打开后把 GlobalTokenTracker 拖到“应用程序”。账本位于 `~/.globaltokentracker`，与 CLI 共用。
+
+**升级**：应用内检查到新版本后下载新的 DMG 并打开，拖入“应用程序”覆盖即可；账本与设置不受影响。
+
+> [!WARNING]
+> 未使用 Developer ID 签名与公证的版本，首次打开会被 Gatekeeper 拦截——在“系统设置 › 隐私与安全性”中选择“仍要打开”即可。可在 Release 页核对 SHA-256。
+
 ---
 
 ## 使用
 
-GUI 开箱即用（开始菜单 → GlobalTokenTracker）。同时附带 CLI（安装时勾选"加入用户 PATH"后可直接调用）：
+GUI 开箱即用（Windows：开始菜单 → GlobalTokenTracker；macOS：“应用程序”或菜单栏图标）。Windows 安装包同时附带 CLI（安装时勾选"加入用户 PATH"后可直接调用）；macOS 的 DMG 只含应用，CLI 需从源码构建（见[构建项目](#构建项目)）：
 
 「设置 → 外部协同 → 外部协同接口」可同时关闭协同观察与新模型调度。已经发出的请求允许完成并正常计量，排队、重试与后台恢复探测不再发出新请求。若使用配套模型调度器，请同时更新调度器与 Skill；新版调度器要求调用方先启动真实 Luna 监工并登记同一 workflow 的有效租约。完整安装包包含 GUI、CLI 和安装器，模型调度器单独部署。
 
@@ -161,11 +210,40 @@ GUI 开箱即用（开始菜单 → GlobalTokenTracker）。同时附带 CLI（�
 globaltokentracker-cli scan             # 手动全量扫描
 globaltokentracker-cli prices --update  # 强制刷新价目表
 globaltokentracker-cli quota            # 立即轮询配额通道
-globaltokentracker-cli prune --days 90  # 裁剪历史事件
-globaltokentracker-cli export out.csv   # 导出明细 CSV
+globaltokentracker-cli prune --keep-days 90      # 重建汇总后裁剪 90 天前的明细
+globaltokentracker-cli export all --out out.csv  # 导出明细 CSV（all/today/week/month）
 ```
 
 刷新频率与刷新模式（定时 / 仅文件变更）在界面"设置"里调整。
+
+---
+
+## 局域网多设备查看（预览）
+
+让同一局域网内的几台电脑互相**只读**查看用量，在一处并列看到所有设备。被查看的设备只提供按小时汇总的聚合（token、成本、额度、数据源状态），从不发送原始事件、会话、项目名或路径；额度按账号计，不会跨设备相加。
+
+- **默认关闭**：应用不会自行开启，只有手动运行 `peer serve` 才会共享；默认只监听本机回环 `127.0.0.1:4319`，绑定局域网地址时强制 TLS 1.3。
+- **配对**：服务端打印一次性 6 位配对码（120 秒有效、只能用一次、错误后退避，5 次失败作废）。配对码逐位承诺验证，截获流量也无法离线穷举；配对后查看方固定对方证书指纹，服务端只保存令牌的哈希。
+- **撤销**：服务端 `peer revoke` 立即生效；查看方 `peer forget` 删除本地凭据。
+- **发现**：共享时在 Bonjour/mDNS 上通告 `_gtt._tcp`（只含名称、设备 id、指纹前缀，不含用量），退出时撤回。访客 Wi-Fi、VLAN 或客户端隔离拦截 mDNS 时，直接按 IP 添加（IPv4/IPv6，链路本地地址带 `%网卡`）。已配对设备换了 IP 会先按设备 id 重新发现。
+
+```bash
+# 被查看的设备
+globaltokentracker-cli peer serve --bind 0.0.0.0:4319 --name "书房 Mac"   # 打印配对码，回车换新码
+globaltokentracker-cli peer list                                          # 已配对的查看方
+globaltokentracker-cli peer revoke 笔记本
+
+# 查看方
+globaltokentracker-cli peer discover                                      # 列出网络中的设备
+globaltokentracker-cli peer pair 192.168.1.20:4319 408036 --name 笔记本
+globaltokentracker-cli peer pull "书房 Mac" --endpoint summary
+globaltokentracker-cli peer forget "书房 Mac"
+```
+
+目前通过 CLI 使用（输出 JSON），图形界面中的多设备视图即将推出。协议与安全模型详见 [docs/PEER_API.md](docs/PEER_API.md)。
+
+> [!NOTE]
+> macOS 需要“本地网络”权限，Windows 只应在“专用”网络放行 TCP 4319 与 UDP 5353。
 
 ---
 
@@ -184,6 +262,16 @@ cargo clippy --all-targets -- -D warnings
 powershell -ExecutionPolicy Bypass -File installer\package.ps1
 ```
 
+macOS（需要 Rust 与 Swift 6.2+，Command Line Tools 即可，无需 Xcode）：
+
+```bash
+macos/scripts/build-app.sh --universal                  # target/macos/GlobalTokenTracker.app
+macos/scripts/build-dmg.sh v0.7.0                       # 安装用磁盘映像
+cargo build --release -p globaltokentracker-cli         # CLI：target/release/globaltokentracker-cli
+```
+
+详见 [macos/README.md](macos/README.md)。
+
 签名属可选增强：`installer/sign.ps1` 支持证书指纹 / PFX（测试）/ 云签 dlib 三种模式，经环境变量驱动，详见 [docs/SIGNING.md](docs/SIGNING.md)。
 
 ---
@@ -191,10 +279,11 @@ powershell -ExecutionPolicy Bypass -File installer\package.ps1
 ## 隐私说明
 
 - 价目表同步只向上述 9 个公开来源发 **GET**，不携带任何用量、路径或账号信息（每 12 小时一次 + 每次启动一次）；断网时回落内置离线种子，功能不受影响。另有版本更新检查（GitHub Releases）与可选的官方配额查询，均只读取、不上传日志内容。
-- **OTLP 接收器仅监听 `127.0.0.1:4318`**，只收本机回环，不接受局域网连接。
-- **局域网共享默认关闭**（实验性，仅 CLI `peer serve`）：应用不会自行开启；手动启动时默认只监听 `127.0.0.1:4319`。显式 `--bind` 到局域网地址时强制 TLS 1.3，只有用一次性 6 位配对码配对过的设备才能读取只读用量聚合（不含会话、项目、路径）；查看方固定对方证书指纹，服务端只存令牌哈希，可随时 `peer revoke` 撤销。详见 [docs/PEER_API.md](docs/PEER_API.md)。
+- **监听端口**：默认只有 OTLP 接收器，**仅监听 `127.0.0.1:4318`**，只收本机回环，不接受局域网连接。
+- **局域网共享默认关闭**：只有手动运行 `peer serve` 才会打开对等服务（默认 `127.0.0.1:4319`）；绑定局域网地址时强制 TLS 1.3，只有用一次性配对码配对过的设备才能读取只读用量聚合（不含会话、项目、路径）；查看方固定对方证书指纹，服务端只存令牌哈希，可随时 `peer revoke` 撤销。
+- **mDNS 通告只在共享期间存在**：内容仅为名称、设备 id 与证书指纹前缀，退出时撤回；`peer discover` 只在你运行时监听。详见 [docs/PEER_API.md](docs/PEER_API.md)。
 - 所有源日志**只读**，应用不会修改、删除或上传任何工具的数据文件。
-- 账本与配置存于 `%USERPROFILE%\.globaltokentracker`，卸载和升级均保留；程序目录内不存任何用户数据。
+- 账本与配置存于 `%USERPROFILE%\.globaltokentracker`（macOS：`~/.globaltokentracker`），卸载和升级均保留；程序目录内不存任何用户数据。
 
 ---
 
