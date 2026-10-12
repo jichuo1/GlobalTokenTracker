@@ -153,10 +153,35 @@ final class AppModel {
         range = info.range
     }
 
+    /// The calendar popover, owned here so the toolbar's "Custom" segment can
+    /// open it as well as the date button.
+    var rangePopoverShown = false
+
+    /// "Custom" segment picked — adopt the last custom window, else the last
+    /// 7 days (Windows: Msg::PickCustomRange), and show the calendar.
+    func pickCustomRange() {
+        if range.key != "custom" {
+            if let s = defaults.object(forKey: "lastCustomStart") as? Int64,
+               let e = defaults.object(forKey: "lastCustomEnd") as? Int64 {
+                range = RangeSpec(key: "custom", startMs: s, endMs: e)
+            } else if let today = CivilDay(rangeInfo?.today ?? (try? Core.window(.describe(.week)))?.today),
+                      let first = CivilDay.gregorian.date(byAdding: .day, value: -6, to: today.date) {
+                let c = CivilDay.gregorian.dateComponents([.year, .month, .day], from: first)
+                let from = CivilDay(year: c.year ?? today.year, month: c.month ?? today.month, day: c.day ?? today.day)
+                applyWindow(.days(first: from.key, last: today.key))
+            }
+        }
+        rangePopoverShown = true
+    }
+
     private func persist() {
         defaults.set(range.key, forKey: "range")
         defaults.set(range.startMs, forKey: "rangeStart")
         defaults.set(range.endMs, forKey: "rangeEnd")
+        if range.key == "custom" {
+            defaults.set(range.startMs, forKey: "lastCustomStart")
+            defaults.set(range.endMs, forKey: "lastCustomEnd")
+        }
         defaults.set(appFilter.map { Array($0).sorted() }, forKey: "appFilter")
         defaults.set(modelFilter.map { Array($0).sorted() }, forKey: "modelFilter")
         defaults.set(refreshSeconds, forKey: "refreshSeconds")

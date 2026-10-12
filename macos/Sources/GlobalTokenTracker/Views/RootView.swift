@@ -52,13 +52,23 @@ struct MainToolbar: ToolbarContent {
         @Bindable var model = model
         if model.page == .overview || model.page == .detail {
             ToolbarItem(placement: .navigation) {
-                Picker("Range", selection: $model.range) {
-                    ForEach(RangeSpec.presets, id: \.self) { r in
-                        Text(r.title).tag(r)
+                // Always five segments: adding a "Custom" segment only while a
+                // custom window is active resized the picker and shoved the
+                // date button (and its popover) sideways on the first pick.
+                Picker("Range", selection: Binding(
+                    get: { model.range.key },
+                    set: { key in
+                        if key == "custom" {
+                            model.pickCustomRange()
+                        } else if let preset = RangeSpec.presets.first(where: { $0.key == key }) {
+                            model.range = preset
+                        }
                     }
-                    if model.range.key == "custom" {
-                        Text("Custom").tag(model.range)
+                )) {
+                    ForEach(RangeSpec.presets, id: \.key) { r in
+                        Text(r.title).tag(r.key)
                     }
+                    Text("Custom").tag("custom")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()

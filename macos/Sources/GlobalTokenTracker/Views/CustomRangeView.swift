@@ -45,38 +45,73 @@ struct CivilDay: Hashable, Comparable {
 
 struct CustomRangeButton: View {
     @Environment(AppModel.self) private var model
-    @ViewState private var open = false
 
     var body: some View {
+        @Bindable var model = model
         Button {
-            open.toggle()
+            model.rangePopoverShown.toggle()
         } label: {
             Label {
-                Text(summary)
+                // Fixed width: the label used to resize with every pick
+                // ("Oct 3 – 9" vs "Sep 28 – Oct 12"), which moved the button
+                // and re-anchored the popover, so the panel slid sideways.
+                ZStack(alignment: .leading) {
+                    ForEach(Self.widest, id: \.self) { Text($0).hidden() }
+                    Text(Self.summary(model.range, model.rangeInfo))
+                }
+                .monospacedDigit()
             } icon: {
                 Image(systemName: "calendar")
             }
             .labelStyle(.titleAndIcon)
         }
         .help("Pick a custom date or hour range")
-        .popover(isPresented: $open, arrowEdge: .bottom) {
+        .popover(isPresented: $model.rangePopoverShown, arrowEdge: .bottom) {
             CustomRangePanel()
                 .environment(model)
         }
     }
 
     /// Toolbar caption: the custom window, compact ("Oct 3 – 9", "Oct 12, 09:00–19:00").
-    private var summary: String {
-        guard model.range.key == "custom", let info = model.rangeInfo,
+    static func summary(_ range: RangeSpec, _ info: RangeInfo?) -> String {
+        guard range.key == "custom", let info,
               let a = CivilDay(info.firstDay), let b = CivilDay(info.lastDay)
         else { return String(localized: "Custom") }
         if let h = info.hourSpan, a == b, h != [0, 23] {
-            let day = a.date.formatted(.dateTime.month(.abbreviated).day())
-            return "\(day), \(Self.hh(h[0]))–\(Self.hh(h[1] + 1))"
+            return hourly(a, h[0], h[1])
         }
-        return (a.date..<b.date.addingTimeInterval(1))
-            .formatted(.interval.month(.abbreviated).day())
+        return daily(a, b)
     }
+
+    private static func hourly(_ d: CivilDay, _ h1: Int, _ h2: Int) -> String {
+        "\(d.date.formatted(.dateTime.month(.abbreviated).day())), \(hh(h1))–\(hh(h2 + 1))"
+    }
+
+    private static func daily(_ a: CivilDay, _ b: CivilDay) -> String {
+        // Across New Year the interval style adds both years ("Dec 28, 2026 –
+        // Jan 30, 2027"), twice the usual width; the toolbar keeps it compact
+        // (the panel headline shows the years).
+        if a.year != b.year {
+            let md = Date.FormatStyle.dateTime.month(.abbreviated).day()
+            return "\(a.date.formatted(md)) – \(b.date.formatted(md))"
+        }
+        return (a.date..<b.date.addingTimeInterval(1)).formatted(.interval.month(.abbreviated).day())
+    }
+
+    /// Longest captions this locale can produce — every month's abbreviation,
+    /// two-digit days, cross-month spans and the hour form. Laid out hidden
+    /// under the real caption, so the button keeps one width for any pick.
+    private static let widest: [String] = {
+        var out = [String(localized: "Custom")]
+        for m in 1...12 {
+            let d = CivilDay(year: 2026, month: m, day: 28)
+            let next = CivilDay(year: 2026, month: m % 12 + 1, day: 28)
+            out.append(hourly(d, 22, 23))
+            out.append(daily(d, m == 12 ? CivilDay(year: 2026, month: 12, day: 30) : next))
+        }
+        out.append(daily(CivilDay(year: 2026, month: 12, day: 28), CivilDay(year: 2027, month: 1, day: 30)))
+        return out
+    }()
 
     static func hh(_ h: Int) -> String { String(format: "%02d:00", h) }
 }
@@ -132,11 +167,17 @@ struct CustomRangePanel: View {
                 }
             } else {
                 Text(model.range.title).font(.headline)
+                // Same line count as a picked window, so the first pick
+                // doesn't push the blocks below down by a line.
+                Text(verbatim: " ")
             }
             Text(anchorDay == nil ? "Click a start day, then an end day." : "Now click the other end.")
                 .font(.caption)
                 .foregroundStyle(anchorDay == nil ? Color.secondary : Color.accentColor)
+                .lineLimit(2, reservesSpace: true)
         }
+        .monospacedDigit()
+        .lineLimit(1)
     }
 
     private var quickBlock: some View {
@@ -181,7 +222,7 @@ struct CustomRangePanel: View {
                          : anchorHour == nil ? "Click a start hour, then an end hour." : "Now click the other end.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(3, reservesSpace: true)
                     Button("All Day") {
                         anchorHour = nil
                         if let d = single { model.applyWindow(.days(first: d.key, last: d.key)) }
@@ -268,13 +309,16 @@ private struct MonthGrid: View {
 
     private var cal: Calendar { CivilDay.gregorian }
 
-    /// Leading blanks + the month's days, Monday-first.
+    /// Leading blanks + the month's days + trailing blanks: always six week
+    /// rows (as on Windows), so stepping between 5- and 6-week months never
+    /// changes the panel's height.
     private var cells: [CivilDay?] {
         let first = month.date
         let lead = (cal.component(.weekday, from: first) - cal.firstWeekday + 7) % 7
         let count = cal.range(of: .day, in: .month, for: first)?.count ?? 30
-        return Array(repeating: nil, count: lead)
+        let days: [CivilDay?] = Array(repeating: nil, count: lead)
             + (1...count).map { CivilDay(year: month.year, month: month.month, day: $0) }
+        return days + Array(repeating: nil, count: 42 - days.count)
     }
 
     private var weekdaySymbols: [String] {
