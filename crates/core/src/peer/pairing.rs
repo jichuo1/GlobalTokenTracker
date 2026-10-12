@@ -25,15 +25,28 @@
 //! relay through another certificate fails. The server burns the code after
 //! one success or five failures and backs off between failures; the viewer
 //! refuses to retry a code that failed (a failure may mean interception).
+//!
+//! Pairing is mutual. A server that supports it says so in the grant
+//! (`"reciprocal": true`); the viewer then offers access to itself in the
+//! same TLS session — its device id, name, certificate fingerprint, sharing
+//! port and a fresh bearer token for its own server — and the server saves it
+//! as a paired device (pinned to that fingerprint, at the connection's source
+//! address) and asks for a sync. The offer is as trustworthy as the pairing:
+//! only the side that proved the code reaches this step, and every later
+//! connection is still pin-checked. Older peers skip the step (an old server
+//! never sets the flag; an old viewer just closes), so pairing stays one-way
+//! with them.
 
 use super::devices::{PeerDevice, Registry};
-use super::keys::hex;
+use super::keys::{DeviceKey, hex, peer_dir};
 use super::net::{Wire, WireError};
 use anyhow::Result;
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub const CODE_DIGITS: usize = 6;
@@ -43,6 +56,8 @@ pub const MAX_FAILURES: u32 = 5;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Whole exchange, after the TLS handshake.
 pub(crate) const PAIR_DEADLINE: Duration = Duration::from_secs(30);
+/// The reciprocal step after the grant.
+const RECIPROCAL_DEADLINE: Duration = Duration::from_secs(10);
 pub(crate) const UPGRADE: &str = "gtt-pair/1";
 const LABEL: &[u8] = b"gtt.peer/pair/v1";
 
@@ -295,18 +310,71 @@ pub(crate) fn run_viewer(
 /// Result of [`pair`]: the saved device, or a fixed error code.
 pub type PairOutcome = std::result::Result<PeerDevice, &'static str>;
 
+/// A successful [`pair_mutual`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Paired {
+    pub device: PeerDevice,
+    /// The other device can read this one too (it accepted the reciprocal
+    /// offer). The caller should be sharing, or start now, so it can.
+    pub mutual: bool,
+}
+
+/// What this device offers back: who it is and where its server listens.
+#[derive(Clone, Debug)]
+struct Offer {
+    device_id: String,
+    device_name: String,
+    fingerprint: String,
+    port: u16,
+}
+
+impl Offer {
+    /// This device's sharing identity. Creates the device key on first use,
+    /// so the offer is valid before sharing has ever run.
+    fn local(store: &crate::store::Store) -> Result<Self> {
+        let identity = super::ensure_identity(store, None)?;
+        let path = store
+            .path()
+            .ok_or_else(|| anyhow::anyhow!("peer: an in-memory ledger cannot share"))?;
+        let key = DeviceKey::load_or_create(&peer_dir(path))?;
+        Ok(Self {
+            device_id: identity.device_id,
+            device_name: identity.device_name,
+            fingerprint: key.fingerprint,
+            port: super::share::LAN_PORT,
+        })
+    }
+}
+
 /// Viewer: pair with the device at `addr` using `code`; on success register
 /// it in the ledger's `peers` (pinned fingerprint) and keep the bearer token
-/// in `<data dir>/peer/peer.db`.
+/// in `<data dir>/peer/peer.db`. One-way (see [`pair_mutual`]).
 pub fn pair(
     store: &crate::store::Store,
     addr: &str,
     code: &str,
     viewer_name: &str,
 ) -> Result<PairOutcome> {
+    Ok(pair_mutual(store, addr, code, viewer_name, false)?.map(|p| p.device))
+}
+
+/// [`pair`], and with `mutual` also offer the other device access to this
+/// one (see the module docs).
+pub fn pair_mutual(
+    store: &crate::store::Store,
+    addr: &str,
+    code: &str,
+    viewer_name: &str,
+    mutual: bool,
+) -> Result<std::result::Result<Paired, &'static str>> {
     if !valid_code(code) {
         return Ok(Err("invalid_code"));
     }
+    let offer = if mutual {
+        Some(Offer::local(store)?)
+    } else {
+        None
+    };
     let registry = Registry::open(store)?;
     let trust = &registry.trust;
     let now = crate::store::now_ms();
@@ -352,11 +420,10 @@ pub fn pair(
             .unwrap_or("pairing_refused");
         return Ok(Err(code));
     }
-    let outcome = run_viewer(&mut wire, code, &fingerprint, &name);
-    wire.stream.close(0);
-    let grant = match outcome {
+    let grant = match run_viewer(&mut wire, code, &fingerprint, &name) {
         Ok(grant) => grant,
         Err(error) => {
+            wire.stream.close(0);
             trust.note_failed_code(code, now)?;
             return Ok(Err(match error {
                 RunError::Mismatch => "pairing_failed",
@@ -372,10 +439,12 @@ pub fn pair(
             .filter(|id| super::valid_device_id(id)),
         grant["device_name"].as_str(),
     ) else {
+        wire.stream.close(0);
         trust.note_failed_code(code, now)?;
         return Ok(Err("pairing_aborted"));
     };
     if device_id == super::ensure_device_id(store)? {
+        wire.stream.close(0);
         return Ok(Err("pairing_self"));
     }
     let device = PeerDevice {
@@ -392,7 +461,105 @@ pub fn pair(
         enabled: true,
     };
     registry.save_paired(&device, token)?;
-    Ok(Ok(device))
+    // The pairing stands either way; the reciprocal step only adds the
+    // other direction.
+    let mutual = if grant["reciprocal"].as_bool() == Some(true) {
+        match &offer {
+            Some(offer) => {
+                offer_reciprocal(&mut wire, &registry, offer, &device.name, now).unwrap_or(false)
+            }
+            None => {
+                let _ = wire.send_json(&json!({"reciprocal": null}));
+                false
+            }
+        }
+    } else {
+        false
+    };
+    wire.stream.close(0);
+    Ok(Ok(Paired { device, mutual }))
+}
+
+/// Viewer side of the reciprocal step: register a token for the other
+/// device on this device's server, offer it, and keep it only if accepted.
+fn offer_reciprocal(
+    wire: &mut super::net::Wire,
+    registry: &Registry<'_>,
+    offer: &Offer,
+    server_name: &str,
+    now: i64,
+) -> Result<bool> {
+    let token = new_token()?;
+    let viewer = registry.trust.add_viewer(server_name, &token, now)?;
+    let sent = wire.send_json(&json!({"reciprocal": {
+        "device_id": offer.device_id,
+        "device_name": offer.device_name,
+        "fingerprint": offer.fingerprint,
+        "port": offer.port,
+        "token": token,
+    }}));
+    let accepted = sent.is_ok()
+        && wire
+            .recv_json(Instant::now() + RECIPROCAL_DEADLINE)
+            .is_ok_and(|ack| ack["reciprocal"] == "accepted");
+    if !accepted {
+        registry.trust.revoke(&viewer.id, now)?;
+    }
+    Ok(accepted)
+}
+
+/// Server side of the reciprocal step, after the grant: read the viewer's
+/// offer (an old viewer just closes) and save it as a paired device reached
+/// at `peer_ip` on the offered port, then ask for a sync. `Ok(true)` when
+/// the viewer is now paired in this direction too.
+pub(crate) fn accept_reciprocal(
+    wire: &mut super::net::Wire,
+    db: &Path,
+    own_device_id: &str,
+    peer_ip: IpAddr,
+) -> Result<bool> {
+    let Ok(msg) = wire.recv_json(Instant::now() + RECIPROCAL_DEADLINE) else {
+        return Ok(false);
+    };
+    let Some(offer) = msg.get("reciprocal").filter(|o| o.is_object()) else {
+        return Ok(false);
+    };
+    let field = |k: &str| offer.get(k).and_then(Value::as_str);
+    let (Some(device_id), Some(name), Some(fingerprint), Some(token), Some(port)) = (
+        field("device_id").filter(|id| super::valid_device_id(id) && *id != own_device_id),
+        field("device_name").and_then(super::clean_name),
+        field("fingerprint").filter(|fp| {
+            fp.len() == 64 && fp.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        }),
+        field("token").filter(|t| t.len() == 64),
+        offer
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|p| u16::try_from(p).ok())
+            .filter(|p| *p != 0),
+    ) else {
+        let _ = wire.send_json(&json!({"error": "pairing_aborted"}));
+        return Ok(false);
+    };
+    let store = crate::store::Store::open(db)?;
+    let now = crate::store::now_ms();
+    let device = PeerDevice {
+        device_id: device_id.into(),
+        name,
+        fingerprint: fingerprint.into(),
+        last_address: SocketAddr::new(peer_ip, port).to_string(),
+        paired_at: now,
+        last_seen_at: Some(now),
+        last_pull_at: None,
+        last_error_code: None,
+        gtt_version: None,
+        protocol_version: Some(super::PROTOCOL_VERSION),
+        enabled: true,
+    };
+    Registry::open(&store)?.save_paired(&device, token)?;
+    super::sync::request_sync(&store)?;
+    wire.send_json(&json!({"reciprocal": "accepted"}))?;
+    Ok(true)
 }
 
 #[cfg(test)]

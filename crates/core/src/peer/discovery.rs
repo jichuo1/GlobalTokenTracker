@@ -5,8 +5,14 @@
 //! Discovery is a hint, never trust: TXT records carry only the protocol
 //! version, device id, display name and a fingerprint *prefix* — nothing
 //! usage-related — and pairing/pulling still verifies the full pinned
-//! certificate fingerprint over TLS. When mDNS is blocked (guest Wi-Fi,
-//! VLANs, client isolation) devices are added by IP instead.
+//! certificate fingerprint over TLS.
+//!
+//! mDNS is often lost on real networks — Wi-Fi access points that drop
+//! multicast between clients, a Windows firewall that drops unsolicited
+//! UDP on networks marked Public — so [`discover`] also sweeps this
+//! machine's own private /24 for the sharing port and asks each answer for
+//! its public `hello` (identity only). When both fail (other subnets, client
+//! isolation) devices are added by IP.
 //!
 //! Uses `mdns-sd`: pure Rust, runs its own daemon thread (no async runtime).
 
@@ -130,8 +136,9 @@ pub struct Found {
     pub device_id: String,
     pub name: String,
     pub protocol_version: u32,
-    /// Socket addresses (IPv4 first, then global IPv6, then link-local
-    /// IPv6 with scope id) — usable as `peer pair <address> <code>`.
+    /// Socket addresses (private LAN IPv4 first, then other IPv4, global
+    /// IPv6, link-local IPv6 with scope id) — usable as
+    /// `peer pair <address> <code>`.
     pub addresses: Vec<String>,
     pub port: u16,
     pub fingerprint_prefix: String,
@@ -143,11 +150,16 @@ pub struct Found {
     pub warnings: Vec<String>,
 }
 
+/// Order to try a device's addresses: private LAN IPv4 (home ranges
+/// first), then other IPv4 — e.g. a VPN or proxy tunnel's 198.18.x, which
+/// another device usually can't reach — then global IPv6, then link-local.
 fn address_rank(a: &SocketAddr) -> (u8, String) {
     let rank = match a.ip() {
-        IpAddr::V4(_) => 0,
-        IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80 => 2,
-        IpAddr::V6(_) => 1,
+        IpAddr::V4(v4) if v4.octets()[..2] == [192, 168] => 0,
+        IpAddr::V4(v4) if v4.is_private() => 1,
+        IpAddr::V4(_) => 2,
+        IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80 => 4,
+        IpAddr::V6(_) => 3,
     };
     (rank, a.to_string())
 }
@@ -238,33 +250,176 @@ pub fn browse(timeout: Duration, done: impl Fn(&Sighting) -> bool) -> Result<Vec
     Ok(sightings)
 }
 
-/// `peer discover`: devices on the network, merged and checked against the
+/// `peer discover`: devices on the network — mDNS answers and a sweep of
+/// the local subnet, run side by side — merged and checked against the
 /// ledger's paired devices.
 pub fn discover(store: &crate::store::Store, timeout: Duration) -> Result<(Vec<Found>, usize)> {
     let peers = super::devices::list(store)?;
-    let sightings = browse(timeout, |_| false)?;
+    let swept = std::thread::spawn(move || sweep(super::share::LAN_PORT, timeout));
+    let mut sightings = browse(timeout, |_| false).unwrap_or_default();
+    sightings.extend(swept.join().unwrap_or_default());
     Ok(merge(&sightings, &peers))
+}
+
+/// Hosts a sweep tries: the /24 around each private IPv4 address of this
+/// machine (never its own addresses, never public or link-local ranges).
+pub fn sweep_hosts(own: &[std::net::Ipv4Addr]) -> Vec<std::net::Ipv4Addr> {
+    let mut hosts = Vec::new();
+    for ip in own {
+        if !ip.is_private() {
+            continue;
+        }
+        let [a, b, c, _] = ip.octets();
+        for d in 1..=254u8 {
+            let host = std::net::Ipv4Addr::new(a, b, c, d);
+            if !own.contains(&host) && !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+    }
+    hosts
+}
+
+/// Connect timeout per host: LAN hosts answer in a few ms; absent ones
+/// would otherwise hold a worker for the OS default.
+const SWEEP_CONNECT: Duration = Duration::from_millis(300);
+const SWEEP_WORKERS: usize = 48;
+
+/// Probe the local private subnets for `port` and ask every host that
+/// accepts for `hello` over TLS (unpinned: identity only, nothing sent).
+/// Returns what answered within `timeout`; slower hosts are left behind.
+pub fn sweep(port: u16, timeout: Duration) -> Vec<Sighting> {
+    let own: Vec<std::net::Ipv4Addr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| !i.is_loopback())
+        .filter_map(|i| match i.ip() {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    let hosts = sweep_hosts(&own);
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + timeout;
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(hosts));
+    let (tx, rx) = std::sync::mpsc::channel();
+    for _ in 0..SWEEP_WORKERS {
+        let (queue, tx) = (std::sync::Arc::clone(&queue), tx.clone());
+        std::thread::spawn(move || {
+            loop {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let Some(host) = queue.lock().ok().and_then(|mut q| q.pop()) else {
+                    break;
+                };
+                let addr = SocketAddr::new(IpAddr::V4(host), port);
+                if std::net::TcpStream::connect_timeout(&addr, SWEEP_CONNECT).is_err() {
+                    continue;
+                }
+                if let Some(s) = hello_sighting(addr) {
+                    let _ = tx.send(s);
+                }
+            }
+        });
+    }
+    drop(tx);
+    let mut out = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(s) => out.push(s),
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// A host's public `hello`, as a sighting (the fingerprint is the TLS
+/// certificate the host presented — `fetch` checks the claim matches it).
+fn hello_sighting(addr: SocketAddr) -> Option<Sighting> {
+    sweep_target(addr)
+}
+
+/// [`hello_sighting`] for one known address (tests, and a shell that wants
+/// to check a typed address before pairing).
+pub fn sweep_target(addr: SocketAddr) -> Option<Sighting> {
+    let target = super::client::Target {
+        candidates: vec![addr],
+        pin: None,
+        token: None,
+        plaintext: false,
+    };
+    let fetched = super::client::fetch(&target, PROTOCOL_VERSION, "hello", "").ok()?;
+    if fetched.status != 200 {
+        return None;
+    }
+    let body = &fetched.body;
+    let txt = Txt::decode(|k| match k {
+        "v" => body["protocol_version"].as_u64().map(|v| v.to_string()),
+        "id" => body["device_id"].as_str().map(str::to_string),
+        "name" => body["device_name"].as_str().map(str::to_string),
+        "fp" => body["fingerprint"]
+            .as_str()
+            .and_then(|fp| fp.get(..FP_PREFIX_LEN))
+            .map(str::to_string),
+        _ => None,
+    });
+    Some(Sighting {
+        addresses: vec![addr],
+        txt,
+    })
 }
 
 /// Current addresses of the device with `device_id` whose advertised
 /// fingerprint prefix matches `fingerprint` (the pin), as advertised.
 pub fn locate(device_id: &str, fingerprint: &str, timeout: Duration) -> Vec<SocketAddr> {
-    let wanted = |s: &Sighting| {
-        s.txt.as_ref().is_ok_and(|t| {
-            t.device_id == device_id && fingerprint.starts_with(&t.fingerprint_prefix)
-        })
+    locate_many(&[(device_id.to_string(), fingerprint.to_string())], timeout)
+        .remove(device_id)
+        .unwrap_or_default()
+}
+
+/// [`locate`] for several devices in one browse (one mDNS daemon, one
+/// timeout), ending early once every device has answered. Keyed by device
+/// id; devices that didn't answer are absent.
+pub fn locate_many(
+    wanted: &[(String, String)],
+    timeout: Duration,
+) -> BTreeMap<String, Vec<SocketAddr>> {
+    let matches = |s: &Sighting| -> Option<String> {
+        let t = s.txt.as_ref().ok()?;
+        wanted
+            .iter()
+            .find(|(id, fp)| *id == t.device_id && fp.starts_with(&t.fingerprint_prefix))
+            .map(|(id, _)| id.clone())
     };
-    let Ok(sightings) = browse(timeout, wanted) else {
-        return Vec::new();
+    let seen = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let all_found = |s: &Sighting| {
+        let Some(id) = matches(s) else { return false };
+        let Ok(mut seen) = seen.lock() else {
+            return false;
+        };
+        seen.insert(id);
+        seen.len() == wanted.len()
     };
-    let mut addrs: Vec<SocketAddr> = sightings
-        .iter()
-        .filter(|s| wanted(s))
-        .flat_map(|s| s.addresses.iter().copied())
-        .collect();
-    addrs.sort_by_key(address_rank);
-    addrs.dedup();
-    addrs
+    let Ok(sightings) = browse(timeout, all_found) else {
+        return BTreeMap::new();
+    };
+    let mut out: BTreeMap<String, Vec<SocketAddr>> = BTreeMap::new();
+    for s in &sightings {
+        if let Some(id) = matches(s) {
+            out.entry(id)
+                .or_default()
+                .extend(s.addresses.iter().copied());
+        }
+    }
+    for addrs in out.values_mut() {
+        addrs.sort_by_key(address_rank);
+        addrs.dedup();
+    }
+    out
 }
 
 /// Where to try a paired device: freshly advertised addresses first, then

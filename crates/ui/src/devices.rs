@@ -82,6 +82,8 @@ pub struct ShareState {
     pub viewers: Vec<Viewer>,
     /// Starting / stopping in the background.
     pub busy: bool,
+    /// Generation of the status follow-up timer (a restart supersedes it).
+    pub tick: u64,
     pub error: Option<String>,
 }
 
@@ -135,14 +137,16 @@ pub fn discover(db: &Path) -> Result<Vec<Found>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Pair; `Err` carries a fixed code (or an engine error text).
-pub fn pair(db: &Path, addr: &str, code: &str) -> Result<PeerDevice, String> {
+/// Pair, mutually: the other device also gets access to this PC (the caller
+/// starts sharing when it isn't). `Err` carries a fixed code (or an engine
+/// error text).
+pub fn pair(db: &Path, addr: &str, code: &str) -> Result<pairing::Paired, String> {
     let store = store(db)?;
     let name = peer::local_device(&store)
         .map(|(_, n)| local_label(&n))
         .unwrap_or_else(|_| "Windows".into());
-    match pairing::pair(&store, addr.trim(), code, &name) {
-        Ok(Ok(device)) => Ok(device),
+    match pairing::pair_mutual(&store, addr.trim(), code, &name, true) {
+        Ok(Ok(paired)) => Ok(paired),
         Ok(Err(code)) => Err(code.to_string()),
         Err(e) => Err(e.to_string()),
     }

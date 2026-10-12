@@ -192,6 +192,40 @@ enum Core {
         return try await peer(op)
     }
 
+    struct NameResult: Decodable, Sendable { var name: String }
+
+    /// How other devices see this Mac.
+    nonisolated static func setDeviceName(_ name: String) async throws -> NameResult {
+        try await peer(["op": "set_name", "name": name])
+    }
+
+    // Sharing this Mac (core::peer::share): server + Bonjour + pairing code.
+
+    nonisolated static func shareStart() async throws -> ShareInfo {
+        try await peer(["op": "share_start"])
+    }
+
+    nonisolated static func shareStop() async throws -> ShareInfo {
+        try await peer(["op": "share_stop"])
+    }
+
+    /// Synchronous stop for app termination (no time for a task hop).
+    nonisolated static func shareStopNow() {
+        let _: ShareInfo? = try? call { #"{"op":"share_stop"}"#.withCString { gtt_peer($0) } }
+    }
+
+    nonisolated static func shareStatus() async throws -> ShareInfo {
+        try await peer(["op": "share_status"])
+    }
+
+    nonisolated static func shareNewCode() async throws -> ShareInfo {
+        try await peer(["op": "share_new_code"])
+    }
+
+    nonisolated static func revokeViewer(_ id: String) async throws -> ShareInfo {
+        try await peer(["op": "revoke", "viewer": id])
+    }
+
     nonisolated static func discover(seconds: Int = 3) async throws -> DiscoverResult {
         try await peer(["op": "discover", "timeout_secs": seconds])
     }

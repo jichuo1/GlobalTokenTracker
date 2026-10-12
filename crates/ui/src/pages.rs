@@ -2821,7 +2821,7 @@ pub fn devices_page(
     let mut form: Vec<View> = vec![
         subtle_text(
             theme,
-            t!("在另一台设备上开始共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。")
+            t!("在另一台设备上开始共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。配对是双向的：完成后两台设备都能看到彼此的用量，本机也会开始共享。")
                 .into(),
         ),
         StackPanel::new()
@@ -3425,7 +3425,7 @@ fn share_rows(
         theme,
         "共享本机用量",
         Some(
-            "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）",
+            "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）。配对是双向的，在任一端完成配对后两台设备即可互相查看。",
         ),
         switch(theme, config.share_lan, ctx.callback(Msg::SetShareLan)),
     )];

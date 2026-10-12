@@ -84,7 +84,17 @@ final class AppModel {
     // MARK: LAN devices
     /// This Mac + paired devices, as the ledger registry holds them.
     private(set) var peers: PeerList?
+    /// A sync the user asked for is running (the background knock is silent).
     private(set) var isSyncingPeers = false
+    private var peerSyncRunning = false
+    // MARK: Sharing this Mac
+    /// The LAN share (core::peer::share): server, pairing code, viewers.
+    private(set) var share: ShareInfo?
+    private(set) var isSwitchingShare = false
+    private(set) var shareError: String?
+    /// When the pairing code on offer expires, for the countdown.
+    private(set) var codeExpiry: Date?
+    var isSharing: Bool { share?.sharing ?? false }
     /// Last sync failure that was not per-device (per-device codes live on
     /// each device's `lastErrorCode`).
     private(set) var peerError: String?
@@ -306,7 +316,28 @@ final class AppModel {
             armQuota()
             armUpdates()
             await loadPeers()
+            await nameThisMac()
+            if defaults.bool(forKey: "lanSharing") {
+                setSharing(true)
+            } else {
+                await refreshShare()
+            }
             armPeerSync()
+            // Developer probe: one full sync at launch, timing logged.
+            if ProcessInfo.processInfo.environment["GTT_PROBE_SYNC"] != nil {
+                let t0 = Date.now
+                let r = try? await Core.peerSync(ifDue: false)
+                let devices: [DeviceSync] = r?.report?.devices ?? []
+                let lines: [String] = devices.map { d in
+                    "[sync] \(d.name) ok=\(d.ok) err=\(d.errorCode ?? "-") changed=\(d.daysChanged)"
+                }
+                FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n[sync] done \(Date.now.timeIntervalSince(t0))s\n").utf8))
+            }
+            // Developer probe: one scan at launch, results logged.
+            if ProcessInfo.processInfo.environment["GTT_PROBE_DISCOVER"] != nil {
+                try? await Task.sleep(for: .seconds(4))
+                discover()
+            }
         }
     }
 
@@ -582,10 +613,14 @@ final class AppModel {
 
     /// Pull every enabled paired device now (`ifDue`: the timer's throttle).
     func syncPeers(ifDue: Bool = false) {
-        guard !isSyncingPeers else { return }
-        isSyncingPeers = true
+        guard !peerSyncRunning else { return }
+        peerSyncRunning = true
+        if !ifDue { isSyncingPeers = true }
         Task {
-            defer { isSyncingPeers = false }
+            defer {
+                peerSyncRunning = false
+                isSyncingPeers = false
+            }
             do {
                 let r = try await Core.peerSync(ifDue: ifDue)
                 peerError = nil
@@ -597,19 +632,87 @@ final class AppModel {
         }
     }
 
-    /// Background cadence: core's `sync_if_due` decides (5 min), we only
-    /// knock — every 2 min while devices are paired, relaxed when hidden.
+    /// Background cadence: core's `sync_if_due` decides (every 5 minutes,
+    /// or at once after a device paired with this Mac — so its usage shows
+    /// up within seconds); we only knock. The knock doesn't wait for a known
+    /// peer: the device that just paired isn't in our list until it syncs.
     private func armPeerSync() {
         peerSyncTask?.cancel()
         peerSyncTask = Task { [weak self] in
             while !Task.isCancelled {
-                if let self, !(self.peers?.peers.isEmpty ?? true) {
-                    self.syncPeers(ifDue: true)
-                }
+                self?.syncPeers(ifDue: true)
+                if self?.isSharing == true { await self?.refreshShare() }
                 let hidden = self.map { !$0.windowVisible } ?? false
-                try? await Task.sleep(for: .seconds(hidden ? 600 : 120), tolerance: .seconds(30))
+                try? await Task.sleep(for: .seconds(hidden ? 120 : 15), tolerance: .seconds(hidden ? 30 : 3))
             }
         }
+    }
+
+    // MARK: Sharing
+
+    /// Other devices list this Mac by name. core falls back to environment
+    /// variables a GUI app on macOS doesn't have, so give it the computer
+    /// name (System Settings › General › Sharing) once, when none is set.
+    private func nameThisMac() async {
+        guard let device = peers?.device, device.name == "This device" || device.name.hasPrefix("GTT-"),
+              let name = Host.current().localizedName, !name.isEmpty
+        else { return }
+        if (try? await Core.setDeviceName(name)) != nil { await loadPeers() }
+    }
+
+    /// Turn LAN sharing on or off; remembered across launches.
+    func setSharing(_ on: Bool) {
+        guard !isSwitchingShare else { return }
+        isSwitchingShare = true
+        shareError = nil
+        defaults.set(on, forKey: "lanSharing")
+        Task {
+            defer { isSwitchingShare = false }
+            do {
+                applyShare(try await on ? Core.shareStart() : Core.shareStop())
+            } catch {
+                shareError = Self.peerMessage(error)
+                if on { defaults.set(false, forKey: "lanSharing") }
+                await refreshShare()
+            }
+        }
+    }
+
+    func refreshShare() async {
+        if let s = try? await Core.shareStatus() { applyShare(s) }
+    }
+
+    /// Replace the code on offer (the old one stops working).
+    func newPairingCode() {
+        Task {
+            do {
+                applyShare(try await Core.shareNewCode())
+                shareError = nil
+            } catch {
+                shareError = Self.peerMessage(error)
+            }
+        }
+    }
+
+    /// The viewer's next request fails; it must pair again.
+    func revokeViewer(_ id: String) {
+        Task {
+            do {
+                applyShare(try await Core.revokeViewer(id))
+                shareError = nil
+            } catch {
+                shareError = Self.peerMessage(error)
+            }
+        }
+    }
+
+    private func applyShare(_ s: ShareInfo) {
+        if s != share { share = s }
+        let expiry = s.status?.codeExpiresIn.map { Date.now.addingTimeInterval(Double($0)) }
+        // Keep the countdown steady: only move it when the code changed or
+        // the clock drifted by more than a second.
+        if let expiry, let old = codeExpiry, abs(expiry.timeIntervalSince(old)) < 1.5 { return }
+        codeExpiry = expiry
     }
 
     func isDeviceSelected(_ id: String) -> Bool { deviceFilter?.contains(id) ?? true }
@@ -662,10 +765,16 @@ final class AppModel {
     /// Pair, then pull the new device at once. Returns a user-facing error.
     func pair(address: String, code: String) async -> String? {
         do {
-            _ = try await Core.pair(address: address, code: code, name: peers?.device.name)
+            let r = try await Core.pair(
+                address: address, code: code,
+                name: peers.map(\.device.name).flatMap { $0 == "This device" ? nil : $0 })
+            // Mutual pairing started sharing so the other device can read
+            // this Mac; keep it on across launches.
+            if r.sharingStarted { defaults.set(true, forKey: "lanSharing") }
         } catch {
             return Self.peerMessage(error)
         }
+        await refreshShare()
         await loadPeers()
         nearby.removeAll { n in peers?.peers.contains { $0.deviceId == n.deviceId } ?? false }
         syncPeers()
@@ -674,6 +783,14 @@ final class AppModel {
 
     func discover() {
         guard !isDiscovering else { return }
+        if ProcessInfo.processInfo.environment["GTT_PROBE_DISCOVER"] != nil {
+            Task {
+                let t0 = Date.now
+                let r = try? await Core.discover()
+                let lines = (r?.devices ?? []).map { "[discover] \($0.name) \($0.addresses) paired=\($0.paired)" }
+                FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n[discover] done \(Date.now.timeIntervalSince(t0))s\n").utf8))
+            }
+        }
         isDiscovering = true
         Task {
             defer { isDiscovering = false }
@@ -715,6 +832,7 @@ final class AppModel {
         case "plaintext_not_allowed": String(localized: "Only secure connections are allowed on the network.")
         case "sync_timeout": String(localized: "The device took too long to answer.")
         case "unknown_peer": String(localized: "That device isn't paired.")
+        case "unknown_viewer": String(localized: "That device no longer has access.")
         case "ambiguous_peer": String(localized: "More than one device matches.")
         case "external_interface_disabled": String(localized: "The external interface is turned off on that device.")
         case "ledger_busy", "ledger_unavailable": String(localized: "The device's ledger is busy. Try again shortly.")

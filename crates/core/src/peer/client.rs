@@ -3,7 +3,7 @@
 
 use super::devices::Registry;
 use super::keys::PinVerifier;
-use super::net::{IO_TIMEOUT, Stream, Wire};
+use super::net::{CONNECT_TIMEOUT, IO_TIMEOUT, Stream, Wire};
 use super::server::DEFAULT_PORT;
 use crate::store::Store;
 use rustls::pki_types::ServerName;
@@ -62,7 +62,7 @@ pub(crate) fn connect(
     if tls.is_none() && !target.ip().is_loopback() {
         return Err("plaintext_not_allowed");
     }
-    let tcp = TcpStream::connect_timeout(&target, IO_TIMEOUT).map_err(|_| "connect_failed")?;
+    let tcp = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT).map_err(|_| "connect_failed")?;
     let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
     let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
     let Some(verifier) = tls else {

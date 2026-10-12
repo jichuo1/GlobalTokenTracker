@@ -385,6 +385,10 @@ enum PeerOp {
         interval_secs: Option<u64>,
         rediscover: Option<bool>,
     },
+    /// Name this device as other devices see it (sanitized and saved).
+    SetName {
+        name: String,
+    },
     /// Save the device filter used by `gtt_load` (`null` = all devices).
     SetFilter {
         devices: Option<Vec<String>>,
@@ -485,6 +489,10 @@ fn peer_op(op: PeerOp) -> Result<Value, Coded> {
             }
             Ok(json!({ "ran": report.is_some(), "report": report }))
         }
+        PeerOp::SetName { name } => {
+            let identity = peer::ensure_identity(&store, Some(&name)).map_err(err)?;
+            Ok(json!({ "device_id": identity.device_id, "name": identity.device_name }))
+        }
         PeerOp::SetFilter { devices } => {
             let value = serde_json::to_string(&devices).map_err(|e| e.to_string())?;
             store.set_state(DEVICE_FILTER_KEY, &value).map_err(err)?;
@@ -516,9 +524,32 @@ fn peer_op(op: PeerOp) -> Result<Value, Coded> {
             let name = name.unwrap_or_else(|| {
                 peer::local_device(&store).map_or_else(|_| "viewer".into(), |(_, n)| n)
             });
-            let device =
-                coded(peer::pairing::pair(&store, &addr, code.trim(), &name).map_err(err)?)?;
-            Ok(json!({ "device": device }))
+            // Pairing is mutual: the other device gets access to this one,
+            // which needs this device to be sharing — start it if it isn't.
+            let paired = coded(
+                peer::pairing::pair_mutual(&store, &addr, code.trim(), &name, true).map_err(err)?,
+            )?;
+            let mut started = false;
+            if paired.mutual {
+                let mut guard = SHARING.lock().map_err(|e| e.to_string())?;
+                if guard.is_none() {
+                    *guard = Some(
+                        peer::share::Sharing::start(
+                            &default_db_path(),
+                            peer::share::LAN_BIND,
+                            None,
+                            true,
+                        )
+                        .map_err(err)?,
+                    );
+                    started = true;
+                }
+            }
+            Ok(json!({
+                "device": paired.device,
+                "mutual": paired.mutual,
+                "sharing_started": started,
+            }))
         }
         PeerOp::ShareStart { name } => {
             let mut guard = SHARING.lock().map_err(|e| e.to_string())?;
@@ -563,6 +594,9 @@ fn peer_op(op: PeerOp) -> Result<Value, Coded> {
         PeerOp::Discover { timeout_secs } => {
             let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(3).clamp(1, 30));
             let (devices, invalid) = peer::discovery::discover(&store, timeout).map_err(err)?;
+            // This device answers too while it shares; never list it.
+            let own = peer::local_device(&store).map_err(err)?.0;
+            let devices: Vec<_> = devices.into_iter().filter(|d| d.device_id != own).collect();
             Ok(json!({ "devices": devices, "invalid_answers": invalid }))
         }
     }

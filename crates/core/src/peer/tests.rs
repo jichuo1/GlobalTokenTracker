@@ -880,6 +880,127 @@ fn unknown_unresolvable_target_is_not_paired() {
 }
 
 #[test]
+fn mutual_pairing_lets_both_sides_pull() {
+    let server_f = fixture();
+    let viewer = fixture();
+    let (addr, state) = start(&server_f, true);
+    let code = state.issue_code().unwrap();
+    let paired = pairing::pair_mutual(&viewer.store, &addr.to_string(), &code, "Laptop", true)
+        .unwrap()
+        .unwrap();
+    assert!(paired.mutual);
+    assert_eq!(paired.device.device_id, server_f.identity.device_id);
+
+    // The server now has the viewer as a paired device, pinned to the
+    // viewer's own certificate, at the connection's address on the offered
+    // port, and a sync is requested.
+    let server_peers = super::devices::list(&server_f.store).unwrap();
+    assert_eq!(server_peers.len(), 1);
+    let back = &server_peers[0];
+    assert_eq!(back.device_id, viewer.identity.device_id);
+    let viewer_key = DeviceKey::load_or_create(&peer_dir(&viewer.path)).unwrap();
+    assert_eq!(back.fingerprint, viewer_key.fingerprint);
+    assert_eq!(
+        back.last_address,
+        format!("127.0.0.1:{}", super::share::LAN_PORT)
+    );
+    let opts = super::sync::SyncOptions::default();
+    let due = super::sync::sync_if_due(&server_f.store, Duration::from_secs(3600), &opts).unwrap();
+    assert!(
+        due.is_some(),
+        "a requested sync runs regardless of the interval"
+    );
+    let again =
+        super::sync::sync_if_due(&server_f.store, Duration::from_secs(3600), &opts).unwrap();
+    assert!(again.is_none(), "and only once");
+
+    // The token the server holds authorizes against the viewer's server.
+    let token = super::devices::Registry::open(&server_f.store)
+        .unwrap()
+        .token(&back.device_id)
+        .unwrap()
+        .unwrap();
+    let viewer_state = ServerState::new(
+        viewer.path.clone(),
+        viewer.identity.clone(),
+        Some(&viewer_key),
+    )
+    .unwrap();
+    let viewers = TrustStore::open(&viewer_state.peer_dir).unwrap();
+    assert!(
+        viewers
+            .authorize(&token, crate::store::now_ms())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(viewers.viewers().unwrap()[0].name, "test-mac");
+
+    // The viewer's own pull still works as before.
+    let (status, _) = client::pull(&viewer.store, "test-mac", false, false, 1, "sources", "")
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn one_way_pairing_leaves_the_server_unpaired() {
+    let server_f = fixture();
+    let viewer = fixture();
+    let (addr, state) = start(&server_f, true);
+    let code = state.issue_code().unwrap();
+    let paired = pairing::pair_mutual(&viewer.store, &addr.to_string(), &code, "Laptop", false)
+        .unwrap()
+        .unwrap();
+    assert!(!paired.mutual);
+    assert!(super::devices::list(&server_f.store).unwrap().is_empty());
+    let viewers = TrustStore::open(&peer_dir(&viewer.path)).unwrap();
+    assert!(viewers.viewers().unwrap().is_empty());
+}
+
+#[test]
+fn lan_addresses_skip_tunnels_and_rank_home_ranges_first() {
+    use std::net::Ipv4Addr;
+    let ips = [
+        Ipv4Addr::new(198, 18, 0, 1), // proxy tunnel
+        Ipv4Addr::new(172, 17, 0, 1), // container bridge
+        Ipv4Addr::new(10, 8, 0, 2),   // VPN
+        Ipv4Addr::new(192, 168, 31, 7),
+        Ipv4Addr::new(169, 254, 1, 1),
+        Ipv4Addr::new(192, 168, 31, 7),
+    ];
+    assert_eq!(
+        super::share::rank_lan(&ips),
+        vec![
+            Ipv4Addr::new(192, 168, 31, 7),
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(172, 17, 0, 1),
+        ]
+    );
+}
+
+#[test]
+fn sweep_hosts_cover_private_slash_24_only() {
+    use std::net::Ipv4Addr;
+    let own = [Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(8, 8, 8, 8)];
+    let hosts = super::discovery::sweep_hosts(&own);
+    assert_eq!(hosts.len(), 253, "254 hosts minus our own");
+    assert!(hosts.iter().all(|h| h.octets()[..3] == [192, 168, 1]));
+    assert!(!hosts.contains(&Ipv4Addr::new(192, 168, 1, 20)));
+    assert!(super::discovery::sweep_hosts(&[Ipv4Addr::new(169, 254, 3, 4)]).is_empty());
+}
+
+#[test]
+fn sweep_finds_a_sharing_device_by_hello() {
+    let server_f = fixture();
+    let (addr, _state) = start(&server_f, true);
+    let found = super::discovery::sweep_target(addr).unwrap();
+    assert_eq!(found.addresses, vec![addr]);
+    let txt = found.txt.unwrap();
+    assert_eq!(txt.device_id, server_f.identity.device_id);
+    assert_eq!(txt.name, "test-mac");
+}
+
+#[test]
 fn revoked_tokens_fail_immediately() {
     let server_f = fixture();
     let viewer = fixture();
@@ -1394,7 +1515,7 @@ use super::devices::Registry;
 use super::sync::{SyncOptions, sync_all_via, sync_if_due};
 
 fn no_locate() -> super::sync::Locate {
-    Arc::new(|_: &str, _: &str| Vec::new())
+    Arc::new(|_: &[(String, String)]| BTreeMap::new())
 }
 
 fn quick() -> SyncOptions {
@@ -1431,6 +1552,126 @@ fn pair_and_sync(server_f: &Fixture, viewer: &Fixture) -> (Arc<ServerState>, Str
     let report = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
     assert!(report.devices[0].ok, "{report:?}");
     (state, peer.device_id)
+}
+
+/// Pair `viewer` with a fresh TLS server; returns (server, its address).
+fn pair_only(viewer: &Fixture) -> (Fixture, std::net::SocketAddr) {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let (addr, state) = start(&server_f, true);
+    let code = state.issue_code().unwrap();
+    pairing::pair(&viewer.store, &addr.to_string(), &code, "Viewer")
+        .unwrap()
+        .unwrap();
+    (server_f, addr)
+}
+
+#[test]
+fn many_devices_sync_together_and_offline_ones_fail_fast() {
+    let viewer = fixture();
+    let (a, _) = pair_only(&viewer);
+    let (b, _) = pair_only(&viewer);
+    // A third device that has gone away: its server is down.
+    let (c, c_addr) = pair_only(&viewer);
+    let gone = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    viewer
+        .store
+        .conn()
+        .execute(
+            "UPDATE peers SET last_address=?1 WHERE device_id=?2",
+            params![gone.to_string(), c.identity.device_id],
+        )
+        .unwrap();
+    let _ = c_addr;
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let seen = Arc::clone(&asked);
+    let locate: super::sync::Locate = Arc::new(move |wanted: &[(String, String)]| {
+        seen.lock()
+            .unwrap()
+            .push(wanted.iter().map(|(id, _)| id.clone()).collect());
+        BTreeMap::new()
+    });
+    let t0 = Instant::now();
+    let report = sync_all_via(&viewer.store, &quick(), &locate).unwrap();
+    assert!(
+        t0.elapsed() < Duration::from_secs(8),
+        "took {:?}",
+        t0.elapsed()
+    );
+    let by_id = |id: &str| report.devices.iter().find(|d| d.device_id == id).unwrap();
+    assert!(by_id(&a.identity.device_id).ok);
+    assert!(by_id(&b.identity.device_id).ok);
+    let offline = by_id(&c.identity.device_id);
+    assert!(!offline.ok);
+    assert_eq!(offline.error_code.as_deref(), Some("connect_failed"));
+    // One lookup, for the unreachable device only.
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![vec![c.identity.device_id.clone()]]
+    );
+}
+
+#[test]
+fn moved_devices_are_found_in_one_lookup_and_saved() {
+    let viewer = fixture();
+    let (a, a_addr) = pair_only(&viewer);
+    let stale = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    viewer
+        .store
+        .conn()
+        .execute(
+            "UPDATE peers SET last_address=?1 WHERE device_id=?2",
+            params![stale.to_string(), a.identity.device_id],
+        )
+        .unwrap();
+    let id = a.identity.device_id.clone();
+    let locate: super::sync::Locate = Arc::new(move |wanted: &[(String, String)]| {
+        wanted
+            .iter()
+            .filter(|(w, _)| *w == id)
+            .map(|(w, _)| (w.clone(), vec![a_addr]))
+            .collect()
+    });
+    let report = sync_all_via(&viewer.store, &quick(), &locate).unwrap();
+    assert!(report.devices[0].ok, "{report:?}");
+    let saved = super::devices::list(&viewer.store).unwrap();
+    assert_eq!(saved[0].last_address, a_addr.to_string());
+}
+
+#[test]
+fn sharing_issues_a_fresh_code_after_each_pairing() {
+    let server_f = fixture();
+    let (addr, state) = start(&server_f, true);
+    state.renew_code_after_pairing(true);
+    let first = state.issue_code().unwrap();
+    for (n, viewer) in [fixture(), fixture(), fixture()].iter().enumerate() {
+        let code = state
+            .pairing
+            .lock()
+            .unwrap()
+            .current(Instant::now())
+            .map(|(c, _)| c)
+            .expect("a code is always on offer");
+        if n == 0 {
+            assert_eq!(code, first);
+        }
+        pairing::pair(&viewer.store, &addr.to_string(), &code, "Viewer")
+            .unwrap()
+            .unwrap();
+        let next = state
+            .pairing
+            .lock()
+            .unwrap()
+            .current(Instant::now())
+            .map(|(c, _)| c);
+        assert!(next.is_some_and(|c| c != code), "the used code is replaced");
+    }
 }
 
 fn dump(store: &Store, device: &str) -> Vec<String> {
@@ -2091,8 +2332,14 @@ fn an_in_process_share_pairs_serves_revokes_and_stops() {
         .unwrap()
         .unwrap();
     assert_eq!(peer.fingerprint, st.fingerprint);
-    // The code is single use and gone from the status.
-    assert!(share.status().code.is_none());
+    // The code is single use: a different one is already on offer for the
+    // next device, and the used one fails.
+    let renewed = share.status().code.unwrap();
+    assert_ne!(renewed, code);
+    assert_eq!(
+        pairing::pair(&fixture().store, &addr, &code, "Other").unwrap(),
+        Err("pairing_failed")
+    );
     let fresh = share.new_code().unwrap();
     assert_eq!(share.status().code.as_deref(), Some(fresh.as_str()));
     let r = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();

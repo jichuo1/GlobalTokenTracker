@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// The standard sharing port (also what a mutual pairing offers).
+pub const LAN_PORT: u16 = 4319;
 /// Where the shells share: every IPv4 interface on the standard port.
 pub const LAN_BIND: &str = "0.0.0.0:4319";
 
@@ -73,6 +75,7 @@ impl Sharing {
         let dir = peer_dir(db);
         let device = DeviceKey::load_or_create(&dir)?;
         let state = Arc::new(ServerState::new(db.to_path_buf(), identity, Some(&device))?);
+        state.renew_code_after_pairing(true);
         let local = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -188,20 +191,45 @@ pub fn revoke(db: &Path, viewer: &str) -> Result<Option<Viewer>> {
     TrustStore::open(&peer_dir(db))?.revoke(viewer, now_ms())
 }
 
-/// The address to give other devices: the bound IP, or for a wildcard bind
-/// the primary interface's (found by "connecting" a UDP socket — no packet
-/// is sent).
+/// The addresses to give other devices: the bound IP, or for a wildcard
+/// bind this machine's private LAN addresses — 192.168/16 first, then
+/// 10/8 and 172.16/12. Not the default route's interface: with a VPN or a
+/// proxy's tunnel up (e.g. 198.18.0.0/15) that is a virtual address no
+/// other device can reach.
 pub fn lan_addresses(local: SocketAddr) -> Vec<String> {
-    let ip = if local.ip().is_unspecified() {
-        std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))
-            .and_then(|s| s.connect(("192.0.2.1", 9)).map(|()| s))
-            .and_then(|s| s.local_addr())
-            .map(|a| a.ip())
-            .ok()
-    } else {
-        Some(local.ip())
-    };
-    ip.filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
-        .map(|ip| vec![SocketAddr::new(ip, local.port()).to_string()])
+    if !local.ip().is_unspecified() {
+        return if local.ip().is_loopback() {
+            Vec::new()
+        } else {
+            vec![local.to_string()]
+        };
+    }
+    let ips: Vec<std::net::Ipv4Addr> = if_addrs::get_if_addrs()
         .unwrap_or_default()
+        .into_iter()
+        .filter(|i| !i.is_loopback())
+        .filter_map(|i| match i.ip() {
+            std::net::IpAddr::V4(v4) => Some(v4),
+            std::net::IpAddr::V6(_) => None,
+        })
+        .collect();
+    rank_lan(&ips)
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip.into(), local.port()).to_string())
+        .collect()
+}
+
+/// Private IPv4 addresses in the order to offer them (home ranges first),
+/// without duplicates.
+pub fn rank_lan(ips: &[std::net::Ipv4Addr]) -> Vec<std::net::Ipv4Addr> {
+    let rank = |ip: &std::net::Ipv4Addr| match ip.octets() {
+        [192, 168, ..] => 0,
+        [10, ..] => 1,
+        _ => 2,
+    };
+    let mut out: Vec<std::net::Ipv4Addr> =
+        ips.iter().copied().filter(|ip| ip.is_private()).collect();
+    out.sort_by_key(|ip| (rank(ip), *ip));
+    out.dedup();
+    out
 }

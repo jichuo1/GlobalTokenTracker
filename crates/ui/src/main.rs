@@ -242,6 +242,8 @@ pub struct Shell {
     /// Devices found over Bonjour (`Find devices`).
     nearby: Vec<globaltokentracker_core::peer::discovery::Found>,
     peer_syncing: bool,
+    /// The running sync was asked for (button / pairing), so it shows.
+    peer_sync_shown: bool,
     discovering: bool,
     /// Last device-level failure (sync / discover / forget), as a code or text.
     peer_error: Option<String>,
@@ -418,7 +420,7 @@ pub enum Msg {
     /// "Use this address" on a nearby device.
     PairUse(String),
     PairSubmit,
-    Paired(Result<globaltokentracker_core::peer::devices::PeerDevice, String>),
+    Paired(Result<globaltokentracker_core::peer::pairing::Paired, String>),
     /// Forget… clicked (device id, name) — opens the confirmation.
     ForgetAsk(String, String),
     ForgetResult(ContentDialogResult),
@@ -431,6 +433,9 @@ pub enum Msg {
     SetDevices(Option<Vec<String>>),
     /// Settings: share this PC on the LAN.
     SetShareLan(bool),
+    /// While sharing: follow the code on offer (renewed after each pairing)
+    /// and the devices that can see this PC.
+    ShareTick(u64),
     ShareStarted(Result<Box<globaltokentracker_core::peer::share::Sharing>, String>),
     ShareStopped,
     ShareNewCode,
@@ -741,9 +746,10 @@ fn arm_update(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
 }
 
 /// First peer sync after launch, then every `PEER_SYNC_SECS` the timer asks
-/// core whether one is due (core throttles to one per 5 minutes).
+/// core whether one is due (every 5 minutes, or at once after a device has
+/// paired with this PC — so its usage shows up within seconds).
 const PEER_FIRST_SYNC_SECS: u64 = 20;
-const PEER_SYNC_SECS: u64 = 120;
+const PEER_SYNC_SECS: u64 = 15;
 
 /// Arms one peer-sync timer of chain `gen_id`.
 fn arm_peer_sync(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
@@ -751,6 +757,15 @@ fn arm_peer_sync(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
         power::worker("gtt-peer-timer");
         std::thread::sleep(std::time::Duration::from_secs(secs));
         Msg::PeerTick(gen_id)
+    });
+}
+
+/// Share status follow-up while sharing (see `Msg::ShareTick`).
+fn arm_share_tick(context: &ComponentContext<Shell>, tick: u64) {
+    context.spawn_background(move |_| {
+        power::worker("gtt-share-tick");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        Msg::ShareTick(tick)
     });
 }
 
@@ -929,6 +944,7 @@ impl Component for Shell {
             devices: None,
             nearby: Vec::new(),
             peer_syncing: false,
+            peer_sync_shown: false,
             discovering: false,
             peer_error: None,
             pair: devices::PairForm::default(),
@@ -1621,13 +1637,19 @@ impl Component for Shell {
                 self.pair.busy = false;
                 self.pair.code.clear();
                 match res {
-                    Ok(device) => {
+                    Ok(paired) => {
+                        let device = paired.device;
                         self.pair.paired = Some(device.name);
                         self.pair.addr.clear();
                         self.nearby.retain(|n| n.device_id != device.device_id);
                         self.load_devices(context);
                         // Pull the new device at once.
                         self.sync_peers(false, context);
+                        // Mutual: the other device reads this PC from now on,
+                        // which needs this PC to be sharing.
+                        if paired.mutual && !self.config.share_lan {
+                            self.set_share_lan(true, context);
+                        }
                     }
                     Err(code) => self.pair.error = Some(code),
                 }
@@ -1683,26 +1705,7 @@ impl Component for Shell {
                 self.set_device_filter(next, context);
             }
             Msg::SetDevices(f) => self.set_device_filter(f, context),
-            Msg::SetShareLan(on) => {
-                self.config.share_lan = on;
-                self.config.save();
-                self.share.error = None;
-                if on && self.share.running.is_none() && !self.share.busy {
-                    self.share.busy = true;
-                    context.spawn_background(|_| {
-                        power::worker("gtt-share");
-                        Msg::ShareStarted(devices::start_sharing(&db_path()).map(Box::new))
-                    });
-                } else if !on && let Some(running) = self.share.running.take() {
-                    self.share.busy = true;
-                    self.share.refresh_status();
-                    context.spawn_background(move |_| {
-                        power::worker("gtt-share-stop");
-                        running.stop();
-                        Msg::ShareStopped
-                    });
-                }
-            }
+            Msg::SetShareLan(on) => self.set_share_lan(on, context),
             Msg::ShareStarted(res) => {
                 self.share.busy = false;
                 match res {
@@ -1717,8 +1720,23 @@ impl Component for Shell {
                         self.share.running = Some(*running);
                         self.share.refresh_status();
                         self.load_viewers(context);
+                        self.share.tick += 1;
+                        arm_share_tick(context, self.share.tick);
                     }
                     Err(e) => self.share.error = Some(e),
+                }
+            }
+            Msg::ShareTick(tick) => {
+                if tick == self.share.tick && self.share.running.is_some() {
+                    let before = self.share.status.as_ref().and_then(|s| s.code.clone());
+                    self.share.refresh_status();
+                    let after = self.share.status.as_ref().and_then(|s| s.code.clone());
+                    // A new code means a device just paired with this PC.
+                    if before != after {
+                        self.load_viewers(context);
+                        self.load_devices(context);
+                    }
+                    arm_share_tick(context, tick);
                 }
             }
             Msg::ShareStopped => {
@@ -2411,7 +2429,7 @@ impl Shell {
                 &DevicesArgs {
                     info: self.devices.as_ref(),
                     nearby: &self.nearby,
-                    syncing: self.peer_syncing,
+                    syncing: self.peer_syncing && self.peer_sync_shown,
                     discovering: self.discovering,
                     error: self.peer_error.as_deref(),
                     pair: &self.pair,
@@ -2899,12 +2917,38 @@ impl Shell {
 
     /// Pull paired devices in the background (one at a time; nothing to do
     /// without paired devices).
+    /// Turn LAN sharing on or off (Settings switch, or after a mutual pairing).
+    fn set_share_lan(&mut self, on: bool, context: &ComponentContext<Self>) {
+        self.config.share_lan = on;
+        self.config.save();
+        self.share.error = None;
+        if on && self.share.running.is_none() && !self.share.busy {
+            self.share.busy = true;
+            context.spawn_background(|_| {
+                power::worker("gtt-share");
+                Msg::ShareStarted(devices::start_sharing(&db_path()).map(Box::new))
+            });
+        } else if !on && let Some(running) = self.share.running.take() {
+            self.share.busy = true;
+            self.share.refresh_status();
+            context.spawn_background(move |_| {
+                power::worker("gtt-share-stop");
+                running.stop();
+                Msg::ShareStopped
+            });
+        }
+    }
+
+    /// `if_due`: the background knock — core decides whether anything runs
+    /// (interval elapsed, or a device just paired with this one), so it does
+    /// not wait for a known peer and shows no progress.
     fn sync_peers(&mut self, if_due: bool, context: &ComponentContext<Self>) {
         let has_peers = self.devices.as_ref().is_some_and(|d| !d.peers.is_empty());
-        if self.peer_syncing || !has_peers {
+        if self.peer_syncing || (!if_due && !has_peers) {
             return;
         }
         self.peer_syncing = true;
+        self.peer_sync_shown = !if_due;
         context.spawn_background(move |_| {
             power::worker("gtt-peer-sync");
             Msg::PeersSynced(devices::sync(&db_path(), if_due))

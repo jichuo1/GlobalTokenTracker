@@ -42,6 +42,10 @@ pub struct ServerState {
     pub peer_dir: PathBuf,
     tls: Option<Arc<ServerConfig>>,
     pub pairing: Mutex<Pairing>,
+    /// Offer a fresh code as soon as one is used, so several devices can
+    /// pair in a row (each code still works once). The app shells set it;
+    /// `peer serve` prints codes on demand instead.
+    renew_code: std::sync::atomic::AtomicBool,
 }
 
 impl ServerState {
@@ -57,7 +61,13 @@ impl ServerState {
             identity,
             tls,
             pairing: Mutex::new(Pairing::default()),
+            renew_code: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// See the `renew_code` field.
+    pub fn renew_code_after_pairing(&self, on: bool) {
+        self.renew_code.store(on, Ordering::SeqCst);
     }
 
     pub fn tls(&self) -> bool {
@@ -139,6 +149,7 @@ fn busy(mut stream: TcpStream, state: &ServerState) {
 }
 
 fn handle(tcp: TcpStream, state: &ServerState) -> Result<()> {
+    let peer_ip = tcp.peer_addr()?.ip();
     tcp.set_read_timeout(Some(IO_TIMEOUT))?;
     tcp.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let stream = match &state.tls {
@@ -155,7 +166,7 @@ fn handle(tcp: TcpStream, state: &ServerState) -> Result<()> {
             Ok(head) => match route(&head, state) {
                 Route::Respond(status, body, extra) => (status, body, extra),
                 Route::Pair(name) => {
-                    pair(&mut wire, state, &name);
+                    pair(&mut wire, state, &name, peer_ip);
                     wire.stream.close(0);
                     return Ok(());
                 }
@@ -294,8 +305,9 @@ fn pair_route(state: &ServerState, query: &str, upgrade: Option<&str>) -> Route 
     }
 }
 
-/// Run the pairing exchange on an upgraded connection.
-fn pair(wire: &mut Wire, state: &ServerState, viewer: &str) {
+/// Run the pairing exchange on an upgraded connection, then the reciprocal
+/// step (the viewer at `peer_ip` offering access back).
+fn pair(wire: &mut Wire, state: &ServerState, viewer: &str, peer_ip: IpAddr) {
     let fingerprint = state.identity.fingerprint.clone().unwrap_or_default();
     let begun = match state.pairing.lock() {
         Ok(mut p) => p.begin(Instant::now()),
@@ -330,11 +342,23 @@ fn pair(wire: &mut Wire, state: &ServerState, viewer: &str) {
             Ok(json!({"token": token, "viewer_id": added.id,
                 "device_id": state.identity.device_id,
                 "device_name": state.identity.device_name,
-                "fingerprint": fingerprint}))
+                "fingerprint": fingerprint,
+                "reciprocal": true}))
         })
     });
     if let Ok(mut p) = state.pairing.lock() {
-        p.finish(outcome.is_ok(), Instant::now());
+        let now = Instant::now();
+        p.finish(outcome.is_ok(), now);
+        // The next device can pair right away.
+        if outcome.is_ok() && state.renew_code.load(Ordering::SeqCst) {
+            let _ = p.issue(now);
+        }
+    }
+    if outcome.is_ok()
+        && let Err(e) =
+            pairing::accept_reciprocal(wire, &state.db, &state.identity.device_id, peer_ip)
+    {
+        tracing::warn!("peer: reciprocal pairing failed: {e:#}");
     }
 }
 

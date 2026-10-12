@@ -8,6 +8,10 @@ use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// TCP connect on the LAN: a reachable host answers in milliseconds, so a
+/// device that is off (or moved) is given up on quickly and looked up
+/// again instead of holding a sync for the full I/O timeout.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) enum Stream {
     Plain(TcpStream),

@@ -380,8 +380,27 @@
 "Rescan Sources" = "重新扫描数据源";
 "Last scan %@ ago" = "上次扫描于 %@前";
 "Not scanned yet" = "尚未扫描";
-"Scanning…" = "正在扫描…";
 "New usage is picked up automatically." = "新的用量会自动计入。";
 "Scan Now" = "立即扫描";
 "No matches" = "无匹配项";
 "Refresh cadence" = "刷新频率";
+
+/* Sharing this Mac / mutual pairing */
+"Share This Mac" = "共享本机";
+"Paired devices on this network can read this Mac's hourly usage totals." = "同一局域网中已配对的设备可只读查看本机按小时汇总的用量。";
+"Valid for %lld:%@ · works once" = "%1$lld:%2$@ 内有效 · 仅可使用一次";
+"Expired" = "已过期";
+"No code on offer — it was used or has expired." = "当前没有配对码——已被使用或已过期。";
+"Create Code" = "生成配对码";
+"New Code" = "新配对码";
+"No network" = "未联网";
+"Pairing is mutual: when the other device enters this Mac's code — or this Mac enters the other's — both see each other's usage. Only hourly totals are shared, over an encrypted connection." = "配对是双向的：另一台设备输入本机的配对码，或本机输入对方的配对码，完成后两台设备都能看到彼此的用量。仅共享按小时汇总的数据，且通过加密连接传输。";
+"Devices That Can See This Mac" = "可查看本机的设备";
+"Last read %@" = "最近读取：%@";
+"Paired %@, not read yet" = "%@配对，尚未读取";
+"Revoke" = "撤销";
+"Its next request is refused; it has to pair again" = "它的下一次请求将被拒绝，需要重新配对";
+"That device no longer has access." = "该设备已无访问权限。";
+"No paired devices yet. Turn on sharing on either device to get a pairing code, then enter it on the other one — pairing works both ways." = "尚未配对任何设备。在任一设备上开启共享以获得配对码，再在另一台设备上输入——配对是双向的。";
+"Finds devices that are sharing, over Bonjour and by checking this Mac's own network. Not listed? Guest Wi-Fi, VLANs and client isolation block it — add the device by its address instead, e.g. 192.168.1.20:4319." = "通过 Bonjour 并检查本机所在网段来查找正在共享的设备。没有列出？访客 Wi-Fi、VLAN 和客户端隔离会阻止查找——请改用地址添加设备，例如 192.168.1.20:4319。";
+"On the other device, turn on sharing. It shows a six-digit code that is valid for two minutes and works once. Pairing is mutual: afterwards both devices see each other's usage, and this Mac starts sharing too." = "在另一台设备上开启共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。配对是双向的：完成后两台设备都能看到彼此的用量，本机也会开始共享。";

@@ -67,6 +67,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateNow
     }
 
+    /// Stop sharing on the way out: the server closes and Bonjour gets its
+    /// goodbye, so other devices don't keep listing this Mac until the
+    /// record times out. The setting itself stays on for the next launch.
+    func applicationWillTerminate(_ notification: Notification) {
+        Core.shareStopNow()
+    }
+
     /// Menu-bar resident: closing the last window must not quit.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false

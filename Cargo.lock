@@ -893,6 +893,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs",
  "flate2",
+ "if-addrs",
  "jiff",
  "mdns-sd",
  "notify",

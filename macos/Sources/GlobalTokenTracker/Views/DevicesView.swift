@@ -1,6 +1,8 @@
-// Devices — LAN multi-device viewing (core::peer). This Mac, the devices it
-// has paired with (status, last sync, enable / forget), possible double
-// counting, and devices found nearby over Bonjour. Pairing and discovery run
+// Devices — LAN multi-device viewing (core::peer). This Mac and its share
+// (on/off, pairing code, who can see it), the devices it has paired with
+// (status, last sync, enable / forget), possible double counting, and
+// devices found nearby (Bonjour plus a sweep of this subnet). Pairing is
+// mutual: either side entering the other's code pairs both directions. Pairing and discovery run
 // in core off the main actor; every failure arrives as a fixed code that
 // AppModel.peerMessage puts into words.
 import SwiftUI
@@ -13,6 +15,9 @@ struct DevicesView: View {
     var body: some View {
         Form {
             thisMacSection.cascade(0)
+            if !activeViewers.isEmpty {
+                viewersSection.cascade(1)
+            }
             pairedSection.cascade(1)
             if let warnings = model.peers?.warnings, !warnings.isEmpty {
                 warningsSection(warnings).cascade(2)
@@ -21,6 +26,15 @@ struct DevicesView: View {
         }
         .formStyle(.grouped)
         .task { await model.loadPeers() }
+        // While this page is in front and sharing, follow the code (used by
+        // a pairing, expired) and newly paired viewers closely.
+        .task(id: model.page == .devices && model.isSharing) {
+            guard model.page == .devices, model.isSharing else { return }
+            while !Task.isCancelled {
+                await model.refreshShare()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
         .sheet(item: Binding(get: { pairing }, set: { pairing = $0 })) { target in
             AddDeviceSheet(initialAddress: target.address)
         }
@@ -38,14 +52,80 @@ struct DevicesView: View {
     // MARK: Sections
 
     private var thisMacSection: some View {
-        Section("This Mac") {
+        Section {
             LabeledContent("Name", value: model.peers?.device.displayName ?? "—")
             LabeledContent("Device ID") {
                 Text(model.peers.map { String($0.device.deviceId.prefix(8)) } ?? "—")
                     .monospaced().textSelection(.enabled)
             }
-            Text("Other devices can see this Mac's usage while it shares with `globaltokentracker-cli peer serve`. Sharing from the app is coming soon.")
+            Toggle(isOn: Binding(get: { model.isSharing }, set: { model.setSharing($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Share This Mac")
+                    Text("Paired devices on this network can read this Mac's hourly usage totals.")
+                        .scaledFont(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(model.isSwitchingShare)
+            if let status = model.share?.status {
+                PairingCodeRow(status: status, expiry: model.codeExpiry) { model.newPairingCode() }
+                    .transition(.opacity)
+                LabeledContent("Address") {
+                    // Every LAN address, home network first (VPN / proxy
+                    // tunnels are left out by core).
+                    VStack(alignment: .trailing, spacing: 2) {
+                        if status.addresses.isEmpty {
+                            Text("No network")
+                        }
+                        ForEach(status.addresses, id: \.self) { a in
+                            Text(verbatim: a)
+                        }
+                    }
+                    .monospaced().textSelection(.enabled)
+                }
+                .transition(.opacity)
+            }
+            if let err = model.shareError {
+                Label(err, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange).scaledFont(.callout)
+            }
+        } header: {
+            Text("This Mac")
+        } footer: {
+            Text("Pairing is mutual: when the other device enters this Mac's code — or this Mac enters the other's — both see each other's usage. Only hourly totals are shared, over an encrypted connection.")
                 .scaledFont(.caption).foregroundStyle(.secondary)
+        }
+        .animation(Motion.resolved(Motion.select), value: model.isSharing)
+    }
+
+    private var activeViewers: [ShareViewer] {
+        (model.share?.viewers ?? []).filter { $0.revokedAt == nil }
+    }
+
+    private var viewersSection: some View {
+        Section {
+            ForEach(activeViewers) { v in
+                HStack(spacing: 10) {
+                    Image(systemName: "eye").foregroundStyle(.secondary).frame(width: 18)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(v.name).fontWeight(.semibold)
+                        Group {
+                            if let seen = v.lastSeenAt {
+                                Text("Last read \(Fmt.relative(seen))")
+                            } else {
+                                Text("Paired \(Fmt.relative(v.createdAt)), not read yet")
+                            }
+                        }
+                        .scaledFont(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Revoke", role: .destructive) { model.revokeViewer(v.id) }
+                        .help("Its next request is refused; it has to pair again")
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Devices That Can See This Mac")
         }
     }
 
@@ -53,7 +133,7 @@ struct DevicesView: View {
         Section {
             let peers = model.peers?.peers ?? []
             if peers.isEmpty {
-                Text("No paired devices yet. On the other device, start sharing to get a pairing code, then choose Add Device.")
+                Text("No paired devices yet. Turn on sharing on either device to get a pairing code, then enter it on the other one — pairing works both ways.")
                     .foregroundStyle(.secondary)
             }
             ForEach(peers) { p in
@@ -108,7 +188,7 @@ struct DevicesView: View {
                 Button("Find Devices") { model.discover() }.disabled(model.isDiscovering)
             }
         } footer: {
-            Text("Not listed? Guest Wi-Fi, VLANs and client isolation block discovery — add the device by its address instead, e.g. 192.168.1.20:4319.")
+            Text("Finds devices that are sharing, over Bonjour and by checking this Mac's own network. Not listed? Guest Wi-Fi, VLANs and client isolation block it — add the device by its address instead, e.g. 192.168.1.20:4319.")
                 .scaledFont(.caption).foregroundStyle(.secondary)
         }
     }
@@ -122,6 +202,48 @@ struct DevicesView: View {
     private func name(_ id: String) -> String {
         if id == model.peers?.device.deviceId { return model.peers?.device.displayName ?? String(localized: "This Mac") }
         return model.peers?.peers.first { $0.deviceId == id }?.name ?? String(id.prefix(8))
+    }
+}
+
+/// The code on offer, large and grouped (482 913), with its countdown.
+private struct PairingCodeRow: View {
+    let status: ShareStatus
+    let expiry: Date?
+    let newCode: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Pairing Code").scaledFont(.subheadline).foregroundStyle(.secondary)
+                if let code = status.code {
+                    Text(verbatim: Self.grouped(code))
+                        .scaledFont(.title, weight: .semibold, design: .monospaced)
+                        .textSelection(.enabled)
+                        .contentTransition(.numericText())
+                        .accessibilityLabel(code.map(String.init).joined(separator: " "))
+                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                        let left = max(0, Int((expiry ?? ctx.date).timeIntervalSince(ctx.date).rounded()))
+                        Text(left > 0
+                             ? "Valid for \(left / 60):\(String(format: "%02d", left % 60)) · works once"
+                             : "Expired")
+                            .scaledFont(.caption).monospacedDigit()
+                            .foregroundStyle(left > 0 ? Color.secondary : Color.orange)
+                    }
+                } else {
+                    Text("No code on offer — it was used or has expired.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button(status.code == nil ? "Create Code" : "New Code", action: newCode)
+                .buttonStyle(.glass)
+        }
+        .padding(.vertical, 4)
+        .animation(Motion.resolved(Motion.select), value: status.code)
+    }
+
+    static func grouped(_ code: String) -> String {
+        code.count == 6 ? "\(code.prefix(3)) \(code.suffix(3))" : code
     }
 }
 
@@ -232,7 +354,7 @@ struct AddDeviceSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Add Device").scaledFont(.title2, weight: .semibold)
-            Text("On the other device, start sharing. It shows a six-digit code that is valid for two minutes and works once.")
+            Text("On the other device, turn on sharing. It shows a six-digit code that is valid for two minutes and works once. Pairing is mutual: afterwards both devices see each other's usage, and this Mac starts sharing too.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Form {
                 TextField("Address", text: $address, prompt: Text(verbatim: "192.168.1.20:4319"))

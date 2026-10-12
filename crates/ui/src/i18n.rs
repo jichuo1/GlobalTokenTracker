@@ -409,8 +409,8 @@ pub fn en(zh: &str) -> &str {
             "{} and {} match on {} days of {} usage — they may scan the same synced folder; totals still count both."
         }
         "添加设备" => "Add device",
-        "在另一台设备上开始共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。" => {
-            "Start sharing on the other device. It shows a six-digit code that is valid for two minutes and works once."
+        "在另一台设备上开始共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。配对是双向的：完成后两台设备都能看到彼此的用量，本机也会开始共享。" => {
+            "Start sharing on the other device. It shows a six-digit code that is valid for two minutes and works once. Pairing is mutual: afterwards both devices see each other's usage, and this PC starts sharing too."
         }
         "配对码" => "Pairing code",
         "配对" => "Pair",
@@ -438,8 +438,8 @@ pub fn en(zh: &str) -> &str {
         }
         "局域网共享" => "LAN sharing",
         "共享本机用量" => "Share this PC's usage",
-        "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）" => {
-            "Paired devices on this network can read this PC's hourly usage totals (TLS-encrypted, pairing code required)"
+        "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）。配对是双向的，在任一端完成配对后两台设备即可互相查看。" => {
+            "Paired devices on this network can read this PC's hourly usage totals (TLS-encrypted, pairing code required). Pairing is mutual: pairing from either side lets both devices see each other."
         }
         "正在启动或停止共享…" => "Starting or stopping sharing…",
         "共享失败：{}" => "Sharing failed: {}",

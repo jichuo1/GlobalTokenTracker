@@ -293,6 +293,38 @@ struct DiscoverResult: Decodable, Sendable {
 
 struct PairResult: Decodable, Sendable {
     var device: PeerDevice
+    /// The other device can read this Mac too (core::peer::pairing).
+    var mutual: Bool
+    /// Pairing turned sharing on (mutual pairing needs this Mac to share).
+    var sharingStarted: Bool
+}
+
+/// This Mac's LAN share (core::peer::share::ShareStatus).
+struct ShareStatus: Decodable, Sendable, Equatable {
+    var deviceId: String
+    var deviceName: String
+    var fingerprint: String
+    var port: UInt16
+    /// What another device types into Add Device.
+    var addresses: [String]
+    var advertised: Bool
+    var code: String?
+    var codeExpiresIn: UInt64?
+}
+
+/// A device allowed to read this Mac (core::peer::trust::Viewer).
+struct ShareViewer: Decodable, Sendable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var createdAt: Int64
+    var lastSeenAt: Int64?
+    var revokedAt: Int64?
+}
+
+struct ShareInfo: Decodable, Sendable, Equatable {
+    var sharing: Bool
+    var status: ShareStatus?
+    var viewers: [ShareViewer]
 }
 
 struct EventRow: Decodable, Sendable, Identifiable, Equatable {
