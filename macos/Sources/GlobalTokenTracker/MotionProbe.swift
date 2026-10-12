@@ -234,6 +234,19 @@ enum ToolbarProbe {
             if let page = env["GTT_TOOLBAR_PAGE"].flatMap(Page.init(rawValue:)) {
                 model.page = page
                 try? await Task.sleep(for: .seconds(2))
+                if let y = env["GTT_TOOLBAR_SCROLL"].flatMap(Double.init), let root = window.contentView {
+                    // Every page stays mounted: scroll each page's scroller.
+                    func visit(_ v: NSView) {
+                        if let s = v as? NSScrollView, s.frame.width > 300,
+                           (s.documentView?.frame.height ?? 0) > s.contentView.bounds.height {
+                            s.contentView.setBoundsOrigin(NSPoint(x: 0, y: y))
+                            s.reflectScrolledClipView(s.contentView)
+                        }
+                        v.subviews.forEach(visit)
+                    }
+                    visit(root)
+                    try? await Task.sleep(for: .seconds(1.5))
+                }
                 log("shot")
                 return
             }

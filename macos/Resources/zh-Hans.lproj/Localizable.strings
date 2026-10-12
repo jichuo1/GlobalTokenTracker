@@ -404,3 +404,5 @@
 "No paired devices yet. Turn on sharing on either device to get a pairing code, then enter it on the other one — pairing works both ways." = "尚未配对任何设备。在任一设备上开启共享以获得配对码，再在另一台设备上输入——配对是双向的。";
 "Finds devices that are sharing, over Bonjour and by checking this Mac's own network. Not listed? Guest Wi-Fi, VLANs and client isolation block it — add the device by its address instead, e.g. 192.168.1.20:4319." = "通过 Bonjour 并检查本机所在网段来查找正在共享的设备。没有列出？访客 Wi-Fi、VLAN 和客户端隔离会阻止查找——请改用地址添加设备，例如 192.168.1.20:4319。";
 "On the other device, turn on sharing. It shows a six-digit code that is valid for two minutes and works once. Pairing is mutual: afterwards both devices see each other's usage, and this Mac starts sharing too." = "在另一台设备上开启共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。配对是双向的：完成后两台设备都能看到彼此的用量，本机也会开始共享。";
+"By Device · Cost" = "按设备 · 费用";
+"By Device · Tokens" = "按设备 · Tokens";

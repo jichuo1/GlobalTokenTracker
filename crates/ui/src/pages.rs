@@ -844,7 +844,7 @@ fn heat_card(
             &vm.heat,
             metric,
             args.heat,
-            args.canvas_ready < 6,
+            args.canvas_ready < 8,
             args.cols,
             ctx,
         ),
@@ -976,7 +976,7 @@ fn overview_widget(
             let app_tok = |a: &globaltokentracker_core::store::AppSummary| {
                 a.unclassified_tokens + a.input_tokens + a.output_tokens + a.cache_read_tokens
             };
-            let columns = [
+            let mut columns = vec![
                 (
                     tf!("{} · {}", tr("按工具"), tr("费用")),
                     fold(
@@ -1022,6 +1022,53 @@ fn overview_widget(
                     |v| i18n::compact(v as u64),
                 ),
             ];
+            // With paired devices: each device's part of the range — the
+            // devices the Devices filter includes (and that are enabled).
+            if vm.devices.len() > 1 {
+                let shown: Vec<_> = vm
+                    .devices
+                    .iter()
+                    .filter(|d| d.selected && d.enabled)
+                    .collect();
+                let label = |d: &globaltokentracker_core::viewmodel::DeviceVm| {
+                    let name = if d.local {
+                        crate::devices::local_label(&d.name)
+                    } else {
+                        d.name.clone()
+                    };
+                    if d.local && name != t!("本机") {
+                        tf!("{}（本机）", name)
+                    } else {
+                        name
+                    }
+                };
+                columns.push((
+                    tf!("{} · {}", tr("按设备"), tr("费用")),
+                    fold(
+                        shown.iter().map(|d| (label(d), d.span.cost_usd)).collect(),
+                        4,
+                    ),
+                    fmt::usd as fn(f64) -> String,
+                ));
+                columns.push((
+                    tf!("{} · Tokens", tr("按设备")),
+                    fold(
+                        shown
+                            .iter()
+                            .map(|d| {
+                                let t = &d.span;
+                                let headline = t.unclassified_tokens
+                                    + t.input_tokens
+                                    + t.output_tokens
+                                    + t.cache_read_tokens;
+                                (label(d), headline as f64)
+                            })
+                            .collect(),
+                        4,
+                    ),
+                    |v| i18n::compact(v as u64),
+                ));
+            }
             let mut cells: Vec<View> = Vec::with_capacity(columns.len());
             for (i, (title, slices, f)) in columns.iter().enumerate() {
                 let total: f64 = slices.iter().map(|s| s.1).sum();
@@ -1035,7 +1082,8 @@ fn overview_widget(
                         fmt_v: *f,
                         key: i as u8,
                         handle: &args.donuts[i],
-                        // Trend takes stage 1, donut `i` stage 2+i.
+                        // Trend takes stage 1, donut `i` stage 2+i (up to
+                        // six with paired devices), the heatmap stage 8.
                         defer: args.canvas_ready < 2 + i,
                         wide: args.cols >= 5,
                     },
@@ -1695,7 +1743,7 @@ pub struct OverviewArgs<'a> {
     /// Bound to the 1-DIP ruler panel mounted on this page.
     pub ruler: &'a ElementRef<SwapChainPanel>,
     /// Hover state per share-donut column (pointer → Msg → invalidation).
-    pub donuts: &'a [w::DonutHandle; 4],
+    pub donuts: &'a [w::DonutHandle; 6],
     /// How many of the page's D2D charts may be mounted yet (trend = 1st,
     /// then one donut per stage). Held at 0 while a slide starts, then
     /// stepped up one per ~16ms from the slide's back half

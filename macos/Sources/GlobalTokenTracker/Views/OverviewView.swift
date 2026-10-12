@@ -366,13 +366,15 @@ private struct TrendTooltip: View {
     }
 }
 
-// MARK: - Share (four donuts: tool/model × cost/tokens)
+// MARK: - Share (donuts: tool/model × cost/tokens, plus device × cost/tokens
+// once another device is paired)
 
 private struct ShareGrid: View, Equatable {
     let vm: OverviewVM
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.vm.range == b.vm.range && a.vm.byApp == b.vm.byApp && a.vm.byModel == b.vm.byModel
+            && a.vm.devices == b.vm.devices
     }
 
     var body: some View {
@@ -386,6 +388,19 @@ private struct ShareGrid: View, Equatable {
                 Donut(title: "By Model · Cost", items: byModelCost, format: Fmt.usd)
                 Donut(title: "By Tool · Tokens", items: byToolTokens) { Fmt.tokensCompact(UInt64(max(0, $0))) }
                 Donut(title: "By Model · Tokens", items: byModelTokens) { Fmt.tokensCompact(UInt64(max(0, $0))) }
+                // With paired devices: each device's part of the range — the
+                // devices the Devices filter includes (and that are enabled).
+                if vm.hasPeers {
+                    let shown = vm.devices.filter { $0.selected && $0.enabled }
+                    let label = { (d: DeviceVM) in
+                        d.local && d.displayName != String(localized: "This Mac")
+                            ? String(localized: "\(d.displayName) (This Mac)") : d.displayName
+                    }
+                    Donut(title: "By Device · Cost", items: shown.map { (label($0), $0.span.costUsd) }, format: Fmt.usd)
+                    Donut(title: "By Device · Tokens", items: shown.map { (label($0), Double($0.span.tokens)) }) {
+                        Fmt.tokensCompact(UInt64(max(0, $0)))
+                    }
+                }
             }
         }
     }
