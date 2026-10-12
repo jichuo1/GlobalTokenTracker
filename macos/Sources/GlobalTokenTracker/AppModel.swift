@@ -29,7 +29,7 @@ enum UpdateState: Equatable {
 }
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
-    case overview, detail, quota, sources, prices, settings
+    case overview, detail, quota, devices, sources, prices, settings
     var id: String { rawValue }
 
     var title: LocalizedStringKey {
@@ -37,6 +37,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .overview: "Overview"
         case .detail: "Details"
         case .quota: "Quota"
+        case .devices: "Devices"
         case .sources: "Sources"
         case .prices: "Prices"
         case .settings: "Settings"
@@ -53,6 +54,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .overview: "chart.bar.xaxis"
         case .detail: "list.bullet.rectangle"
         case .quota: "gauge.with.dots.needle.67percent"
+        case .devices: "macbook.and.iphone"
         case .sources: "externaldrive.connected.to.line.below"
         case .prices: "dollarsign.circle"
         case .settings: "gearshape"
@@ -78,6 +80,19 @@ final class AppModel {
     /// Quotas most-pressing first (core's rank_quotas) — the overview strip.
     private(set) var quotasRanked: [QuotaRow] = []
     private(set) var externalInterface: ExternalInterfaceState?
+
+    // MARK: LAN devices
+    /// This Mac + paired devices, as the ledger registry holds them.
+    private(set) var peers: PeerList?
+    private(set) var isSyncingPeers = false
+    /// Last sync failure that was not per-device (per-device codes live on
+    /// each device's `lastErrorCode`).
+    private(set) var peerError: String?
+    private(set) var nearby: [FoundDevice] = []
+    private(set) var isDiscovering = false
+    /// Device ids the statistics cover; nil = all devices. Saved by core
+    /// (`set_filter`), which `gtt_load` applies.
+    private(set) var deviceFilter: Set<String>?
     private(set) var updateState: UpdateState = .idle
     /// Banner dismissed for this session (Windows: DismissUpdateBanner).
     var updateBannerDismissed = false
@@ -164,6 +179,7 @@ final class AppModel {
     private var refreshTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
     private var updateTask: Task<Void, Never>?
+    private var peerSyncTask: Task<Void, Never>?
     private var watcher: FileWatcher?
     private var pricesDueHandled = false
     /// Filters changed: the next fresh detail page replaces scrolled pages.
@@ -183,6 +199,11 @@ final class AppModel {
         updateChannel = d.string(forKey: "updateChannel") ?? "stable"
         updateAuto = d.object(forKey: "updateAuto") as? Bool ?? true
         rangeInfo = try? Core.window(.describe(range))
+        // Inert unless set: open on a page (screenshots, UI checks).
+        if let p = ProcessInfo.processInfo.environment["GTT_OPEN_PAGE"].flatMap(Page.init(rawValue:)) {
+            page = p
+            chromePage = p
+        }
     }
 
     /// Apply a calendar / hour-dial / quick-range choice. core builds the
@@ -266,12 +287,15 @@ final class AppModel {
             armRefresh()
             armQuota()
             armUpdates()
+            await loadPeers()
+            armPeerSync()
         }
     }
 
     func manualRefresh() {
         requestLoad(scan: true, forceViews: true, rebuild: true)
         if page == .sources { loadSources() }
+        if !(peers?.peers.isEmpty ?? true) { syncPeers() }
     }
 
     // MARK: Loading
@@ -526,6 +550,158 @@ final class AppModel {
                 try? await Task.sleep(
                     for: .seconds(Self.quotaPollSeconds), tolerance: .seconds(120))
             }
+        }
+    }
+
+    // MARK: LAN devices
+
+    func loadPeers() async {
+        guard let list = try? await Core.peerList() else { return }
+        if list != peers { peers = list }
+        let filter = list.filter.map(Set.init)
+        if filter != deviceFilter { deviceFilter = filter }
+    }
+
+    /// Pull every enabled paired device now (`ifDue`: the timer's throttle).
+    func syncPeers(ifDue: Bool = false) {
+        guard !isSyncingPeers else { return }
+        isSyncingPeers = true
+        Task {
+            defer { isSyncingPeers = false }
+            do {
+                let r = try await Core.peerSync(ifDue: ifDue)
+                peerError = nil
+                await loadPeers()
+                if r.report?.changed == true { requestLoad(forceViews: true) }
+            } catch {
+                peerError = Self.peerMessage(error)
+            }
+        }
+    }
+
+    /// Background cadence: core's `sync_if_due` decides (5 min), we only
+    /// knock — every 2 min while devices are paired, relaxed when hidden.
+    private func armPeerSync() {
+        peerSyncTask?.cancel()
+        peerSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let self, !(self.peers?.peers.isEmpty ?? true) {
+                    self.syncPeers(ifDue: true)
+                }
+                let hidden = self.map { !$0.windowVisible } ?? false
+                try? await Task.sleep(for: .seconds(hidden ? 600 : 120), tolerance: .seconds(30))
+            }
+        }
+    }
+
+    func isDeviceSelected(_ id: String) -> Bool { deviceFilter?.contains(id) ?? true }
+
+    func toggleDevice(_ id: String) {
+        var set = deviceFilter ?? Set(vm?.devices.map(\.deviceId) ?? [])
+        if set.contains(id) { set.remove(id) } else { set.insert(id) }
+        setDeviceFilter(set.count == vm?.devices.count ? nil : set)
+    }
+
+    func setAllDevices(_ on: Bool) { setDeviceFilter(on ? nil : []) }
+
+    func setDeviceFilter(_ filter: Set<String>?) {
+        guard filter != deviceFilter else { return }
+        deviceFilter = filter
+        animateNextData = true
+        Task {
+            _ = try? await Core.setDeviceFilter(filter.map { Array($0).sorted() })
+            requestLoad(forceViews: true)
+        }
+    }
+
+    func setDeviceEnabled(_ id: String, _ on: Bool) {
+        Task {
+            _ = try? await Core.setDeviceEnabled(id, on)
+            await loadPeers()
+            requestLoad(forceViews: true, rebuild: true)
+        }
+    }
+
+    /// Forget a device: its pin, token and every synced row.
+    func forgetDevice(_ id: String) {
+        Task {
+            do {
+                _ = try await Core.forgetDevice(id)
+                peerError = nil
+            } catch {
+                peerError = Self.peerMessage(error)
+            }
+            if deviceFilter?.contains(id) == true {
+                var f = deviceFilter
+                f?.remove(id)
+                setDeviceFilter(f?.isEmpty == true ? nil : f)
+            }
+            await loadPeers()
+            requestLoad(forceViews: true, rebuild: true)
+        }
+    }
+
+    /// Pair, then pull the new device at once. Returns a user-facing error.
+    func pair(address: String, code: String) async -> String? {
+        do {
+            _ = try await Core.pair(address: address, code: code, name: peers?.device.name)
+        } catch {
+            return Self.peerMessage(error)
+        }
+        await loadPeers()
+        nearby.removeAll { n in peers?.peers.contains { $0.deviceId == n.deviceId } ?? false }
+        syncPeers()
+        return nil
+    }
+
+    func discover() {
+        guard !isDiscovering else { return }
+        isDiscovering = true
+        Task {
+            defer { isDiscovering = false }
+            do {
+                let r = try await Core.discover()
+                let mine = peers?.device.deviceId
+                let found = r.devices.filter { $0.deviceId != mine }
+                if found != nearby { nearby = found }
+                peerError = nil
+            } catch {
+                peerError = Self.peerMessage(error)
+            }
+        }
+    }
+
+    /// core's fixed codes → words (docs/PEER_API.md).
+    static func peerMessage(_ error: Error) -> String {
+        guard case CoreError.engine(let code) = error else { return error.localizedDescription }
+        return peerMessage(code: code)
+    }
+
+    static func peerMessage(code: String) -> String {
+        switch code {
+        case "invalid_code": String(localized: "The pairing code is six digits.")
+        case "pairing_failed": String(localized: "The code didn't match. Show a new code on the other device and try again.")
+        case "pairing_code_reused": String(localized: "This code already failed once. Show a new code on the other device.")
+        case "pairing_code_expired": String(localized: "The code expired. Show a new code on the other device.")
+        case "pairing_unavailable": String(localized: "The other device has no active pairing code.")
+        case "pairing_locked": String(localized: "Too many attempts. Wait a few seconds, then try again.")
+        case "pairing_busy": String(localized: "The other device is pairing with someone else. Try again shortly.")
+        case "pairing_self": String(localized: "That's this Mac.")
+        case "pairing_aborted", "pairing_refused": String(localized: "Pairing was interrupted. Try again.")
+        case "tls_required": String(localized: "That device isn't sharing over a secure connection.")
+        case "connect_failed": String(localized: "Couldn't reach the device. Check the address and that it is sharing.")
+        case "tls_failed": String(localized: "Couldn't set up a secure connection to the device.")
+        case "peer_fingerprint_mismatch": String(localized: "A different device answered at this address. Its identity doesn't match the paired one.")
+        case "auth_invalid", "auth_required": String(localized: "The device no longer accepts this Mac. Pair again.")
+        case "not_paired": String(localized: "Not paired.")
+        case "plaintext_not_allowed": String(localized: "Only secure connections are allowed on the network.")
+        case "sync_timeout": String(localized: "The device took too long to answer.")
+        case "unknown_peer": String(localized: "That device isn't paired.")
+        case "ambiguous_peer": String(localized: "More than one device matches.")
+        case "external_interface_disabled": String(localized: "The external interface is turned off on that device.")
+        case "ledger_busy", "ledger_unavailable": String(localized: "The device's ledger is busy. Try again shortly.")
+        case "unsupported_protocol_version": String(localized: "That device runs an incompatible version.")
+        default: code
         }
     }
 

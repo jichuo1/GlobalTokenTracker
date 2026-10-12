@@ -148,6 +148,54 @@ enum Core {
         return o
     }
 
+    // MARK: LAN devices (gtt_peer)
+
+    /// One `gtt_peer` op. Network ops (sync / pair / discover) take seconds:
+    /// they run detached at utility priority like every other engine call.
+    /// Failures carry core's fixed code (`CoreError.engine("pairing_failed")`).
+    private static func peer<T: Decodable & Sendable>(_ op: [String: Any]) async throws -> T {
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: op), as: UTF8.self)
+        return try await detached(priority: .utility) {
+            try call { json.withCString { gtt_peer($0) } }
+        }
+    }
+
+    nonisolated static func peerList() async throws -> PeerList {
+        try await peer(["op": "list"])
+    }
+
+    /// `ifDue`: the timer hook — runs only when the last sync is old enough.
+    nonisolated static func peerSync(ifDue: Bool) async throws -> SyncResult {
+        try await peer(["op": "sync", "if_due": ifDue])
+    }
+
+    struct FilterResult: Decodable, Sendable { var filter: [String]? }
+
+    /// nil = all devices.
+    nonisolated static func setDeviceFilter(_ ids: [String]?) async throws -> FilterResult {
+        try await peer(["op": "set_filter", "devices": ids.map { $0 as Any } ?? NSNull()])
+    }
+
+    struct Ack: Decodable, Sendable {}
+
+    nonisolated static func forgetDevice(_ id: String) async throws -> Ack {
+        try await peer(["op": "forget", "device": id])
+    }
+
+    nonisolated static func setDeviceEnabled(_ id: String, _ on: Bool) async throws -> Ack {
+        try await peer(["op": "set_enabled", "device": id, "enabled": on])
+    }
+
+    nonisolated static func pair(address: String, code: String, name: String?) async throws -> PairResult {
+        var op: [String: Any] = ["op": "pair", "addr": address, "code": code]
+        if let name { op["name"] = name }
+        return try await peer(op)
+    }
+
+    nonisolated static func discover(seconds: Int = 3) async throws -> DiscoverResult {
+        try await peer(["op": "discover", "timeout_secs": seconds])
+    }
+
     nonisolated static func info() async throws -> CoreInfo {
         try await detached { try call { gtt_info() } }
     }

@@ -8,7 +8,7 @@ import SwiftUI
 // MARK: - Layout (order + hidden, persisted)
 
 enum OverviewWidget: String, CaseIterable, Identifiable, Codable {
-    case stats, trend, share, apps, heat, quotas, unpriced
+    case stats, trend, share, apps, devices, heat, quotas, unpriced
     var id: String { rawValue }
 
     var title: LocalizedStringKey {
@@ -17,6 +17,7 @@ enum OverviewWidget: String, CaseIterable, Identifiable, Codable {
         case .trend: "Trend"
         case .share: "Share"
         case .apps: "By Tool"
+        case .devices: "By Device"
         case .heat: "Activity"
         case .quotas: "Subscription Quota"
         case .unpriced: "Unpriced Models"
@@ -29,6 +30,7 @@ enum OverviewWidget: String, CaseIterable, Identifiable, Codable {
         case .trend: "chart.bar.xaxis"
         case .share: "chart.pie"
         case .apps: "list.bullet"
+        case .devices: "macbook.and.iphone"
         case .heat: "square.grid.3x3.fill"
         case .quotas: "gauge.with.dots.needle.50percent"
         case .unpriced: "questionmark.diamond"
@@ -110,6 +112,7 @@ struct OverviewView: View {
         case .trend: TrendCard(vm: vm, series: model.trend).equatable()
         case .share: ShareGrid(vm: vm).equatable()
         case .apps: ToolsCard(vm: vm).equatable()
+        case .devices: if vm.hasPeers { DevicesCard(vm: vm).equatable() }
         case .heat: HeatmapCard(days: vm.heat).equatable()
         case .quotas: QuotaStrip(rows: model.quotasRanked)
         case .unpriced: if !vm.unpriced.isEmpty { UnpricedNote(items: vm.unpriced) }
@@ -539,6 +542,53 @@ private struct ToolsCard: View, Equatable {
                             ProgressView(value: Double(a.tokens), total: Double(maxTokens)).tint(.accentColor)
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Span totals per device for the range (this Mac first), and possible
+/// double counting. Shown once another device is paired.
+private struct DevicesCard: View, Equatable {
+    let vm: OverviewVM
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.vm.range == b.vm.range && a.vm.devices == b.vm.devices && a.vm.deviceWarnings == b.vm.deviceWarnings
+    }
+
+    var body: some View {
+        let maxTokens = max(1, vm.devices.map(\.span.tokens).max() ?? 1)
+        Card(title: "\(Text(vm.range.title)) · By Device") {
+            VStack(spacing: 10) {
+                ForEach(vm.devices) { d in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(d.displayName).fontWeight(.medium)
+                            if d.local && d.displayName != String(localized: "This Mac") {
+                                Pill(text: String(localized: "This Mac"), tint: .accentColor)
+                            }
+                            if !d.selected { Pill(text: String(localized: "Filtered out"), tint: .secondary) }
+                            if !d.enabled { Pill(text: String(localized: "Excluded"), tint: .secondary) }
+                            if let code = d.lastErrorCode {
+                                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                                    .help(AppModel.peerMessage(code: code))
+                            }
+                            Spacer()
+                            Text("\(Fmt.tokensExact(d.span.tokens)) tokens · \(Fmt.usd(d.span.costUsd))")
+                                .foregroundStyle(.secondary).monospacedDigit()
+                                .contentTransition(.numericText(value: Double(d.span.tokens)))
+                        }
+                        .scaledFont(.callout)
+                        ProgressView(value: Double(d.span.tokens), total: Double(maxTokens))
+                            .tint(d.local ? .accentColor : .teal)
+                            .opacity(d.selected ? 1 : 0.4)
+                    }
+                }
+                if !vm.deviceWarnings.isEmpty {
+                    Label("Some devices may count the same usage twice — see Devices.", systemImage: "exclamationmark.2")
+                        .scaledFont(.caption).foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }

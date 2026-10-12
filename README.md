@@ -120,7 +120,7 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 - 同一局域网内的设备互相只读查看用量聚合，**默认关闭**
 - 一次性 6 位配对码 + TLS 1.3 证书固定，随时撤销
 - Bonjour/mDNS 自动发现，也可直接按 IP 添加
-- 目前通过 CLI 使用，图形界面即将推出——见[下文](#局域网多设备查看预览)
+- macOS 应用的“设备”页可查看、配对、同步与筛选设备；共享本机与 Windows 界面暂用 CLI——见[下文](#局域网多设备查看预览)
 
 </td>
 </tr>
@@ -242,7 +242,7 @@ globaltokentracker-cli report week --device all                           # 本�
 globaltokentracker-cli peer forget "书房 Mac"
 ```
 
-目前通过 CLI 使用（输出 JSON）。同步来的数据单独存放（不写入本机事件表、也不会再共享出去），在统计中作为“设备”维度与本机并列，额度按账号取最新、不相加；图形界面中的多设备视图即将推出。协议与安全模型详见 [docs/PEER_API.md](docs/PEER_API.md)。
+macOS 应用已支持查看：侧边栏“设备”页列出本机与已配对设备（同步状态、计入开关、忘记）、可能的重复计算与附近设备，“添加设备”用地址和配对码配对；配对后工具栏多出“设备”筛选，总览新增“按设备”卡片，配额页显示来自其他设备的额度。共享本机目前仍需 CLI `peer serve`，Windows 界面即将推出。同步来的数据单独存放（不写入本机事件表、也不会再共享出去），在统计中作为“设备”维度与本机并列，额度按账号取最新、不相加。协议与安全模型详见 [docs/PEER_API.md](docs/PEER_API.md)。
 
 > [!NOTE]
 > macOS 需要“本地网络”权限，Windows 只应在“专用”网络放行 TCP 4319 与 UDP 5353。

@@ -95,6 +95,10 @@ struct DetailView: View {
             HStack {
                 Text("Showing \(model.detailRows.count) of \(Fmt.count(model.detailTotal))")
                 if model.detailLoadingMore { ProgressView().controlSize(.small) }
+                if model.vm?.hasPeers == true {
+                    // Peers share hourly totals, not events.
+                    Text("This Mac's events only").foregroundStyle(.tertiary)
+                }
                 Spacer()
                 Text("≈ estimated · ↺ provider-reported").foregroundStyle(.tertiary)
             }
@@ -157,6 +161,11 @@ private struct CostCell: View {
 
 struct QuotaView: View {
     @Environment(AppModel.self) private var model
+
+    /// Quotas whose freshest report came from another device.
+    private var fromOtherDevices: [MergedQuota] {
+        (model.vm?.quotasAllDevices ?? []).filter { !$0.local }
+    }
     /// Folded tool groups (Windows: ToggleQuotaGroup), kept for the session.
     @ViewState private var collapsed: Set<String> = []
 
@@ -183,6 +192,35 @@ struct QuotaView: View {
                                     Pill(text: Fmt.percent(w), tint: QuotaMeter.tint(w))
                                 }
                             }
+                        }
+                    }
+                    if !fromOtherDevices.isEmpty {
+                        Section {
+                            ForEach(fromOtherDevices) { q in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    QuotaMeter(row: q.row, showApp: true)
+                                    Text("Reported by \(q.deviceName)").scaledFont(.caption2).foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        } header: {
+                            Text("From Other Devices")
+                        } footer: {
+                            Text("The freshest report per account wins; quotas are never added up across devices.")
+                                .scaledFont(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .formStyle(.grouped)
+            } else if !fromOtherDevices.isEmpty {
+                Form {
+                    Section("From Other Devices") {
+                        ForEach(fromOtherDevices) { q in
+                            VStack(alignment: .leading, spacing: 2) {
+                                QuotaMeter(row: q.row, showApp: true)
+                                Text("Reported by \(q.deviceName)").scaledFont(.caption2).foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 4)
                         }
                     }
                 }

@@ -41,7 +41,7 @@ The Windows UI is native WinUI 3 (Rust + windows-reactor); the macOS app is nati
 - In-place upgrades: the installer remembers custom dirs and stops running processes
 - OTLP/HTTP receiver on `127.0.0.1:4318` for tools that emit telemetry
 - **macOS app**: SwiftUI window + menu bar extra (optional today's cost in the menu bar, hide Dock icon, open at login); drum-style page turns that pass through intermediate pages and can be interrupted; custom statistics range with a calendar + 24-hour dial; Settings with text size, theme and accent color, chart font, refresh cadence, update channel and automatic update checks; charts rasterised in one Metal pass (GPU); in-app updates download the new DMG and open it
-- **LAN multi-device viewing (preview)**: read-only, off by default, one-time pairing code + TLS 1.3 with pinned certificates, revocation, Bonjour/mDNS discovery or add by IP — CLI today, GUI view coming ([below](#lan-multi-device-viewing-preview))
+- **LAN multi-device viewing (preview)**: read-only, off by default, one-time pairing code + TLS 1.3 with pinned certificates, revocation, Bonjour/mDNS discovery or add by IP — viewing, pairing, syncing and a device filter in the macOS app's Devices page; sharing this machine and the Windows UI use the CLI for now ([below](#lan-multi-device-viewing-preview))
 
 ## Supported sources
 
@@ -97,7 +97,7 @@ globaltokentracker-cli report week --device all        # this device + peers, wi
 globaltokentracker-cli peer forget "Studio Mac"
 ```
 
-CLI only for now (JSON output). Synced data is stored separately (never in the local event tables, never re-shared) and appears as a device dimension next to this device; quotas take the freshest report per account and are never summed. The multi-device view in the apps is coming. macOS needs the Local Network permission; on Windows open TCP 4319 and UDP 5353 for the Private profile only. Protocol and security model: [docs/PEER_API.md](docs/PEER_API.md) (Chinese).
+The macOS app's Devices page lists this Mac and paired devices (sync status, include switch, forget), possible double counting and nearby devices, and pairs by address + code; once paired, a Devices filter joins the toolbar, the Overview gains a By Device card and the Quota page shows quotas reported by other devices. Sharing this machine still uses `peer serve`; the Windows UI is coming. Synced data is stored separately (never in the local event tables, never re-shared) and appears as a device dimension next to this device; quotas take the freshest report per account and are never summed. macOS needs the Local Network permission; on Windows open TCP 4319 and UDP 5353 for the Private profile only. Protocol and security model: [docs/PEER_API.md](docs/PEER_API.md) (Chinese).
 
 ## Build
 

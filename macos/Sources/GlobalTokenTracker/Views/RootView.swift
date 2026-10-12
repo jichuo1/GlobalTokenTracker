@@ -219,6 +219,7 @@ struct PageDeck: View {
         case .overview: OverviewView()
         case .detail: DetailView()
         case .quota: QuotaView()
+        case .devices: DevicesView()
         case .sources: SourcesView()
         case .prices: PricesView()
         case .settings: SettingsView()
@@ -287,6 +288,21 @@ struct MainToolbar: ToolbarContent {
                     isOn: model.isModelSelected, toggle: model.toggleModel,
                     setAll: model.setAllModels, selected: model.modelFilter?.count
                 )
+                // The device dimension, once another device is paired.
+                if let vm = model.vm, vm.hasPeers {
+                    FilterMenu(
+                        title: "Devices", symbol: "macbook.and.iphone",
+                        items: vm.devices.map(\.deviceId),
+                        label: { id in
+                            let d = vm.devices.first { $0.deviceId == id }
+                            guard let d, d.local, d.name != "This device" else { return vm.deviceName(id) }
+                            return String(localized: "\(d.name) (This Mac)")
+                        },
+                        isOn: model.isDeviceSelected, toggle: model.toggleDevice,
+                        setAll: model.setAllDevices, selected: model.deviceFilter?.count
+                    )
+                    .disabled(model.chromePage == .detail)
+                }
             }
         }
         if model.chromePage == .overview {

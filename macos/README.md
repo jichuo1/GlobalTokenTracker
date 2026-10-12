@@ -62,6 +62,17 @@ Optional repository secrets for Developer ID signing + notarization:
   source roots.
 - **Data** lives in `~/.globaltokentracker/ledger.db`, shared with the CLI.
   `GTT_DATA_DIR` relocates it; `GTT_NO_QUOTA=1` disables vendor quota polling.
+- **Devices** (LAN multi-device viewing): the *Devices* page lists this Mac,
+  paired devices (last sync, errors, include switch, forget), possible double
+  counting and devices found over Bonjour; *Add Device…* pairs by address and
+  one-time code. Once a device is paired, a *Devices* filter joins Tools /
+  Models in the toolbar, the Overview gains a *By Device* card and the Quota
+  page lists quotas reported by other devices. Paired devices sync on start,
+  on ⌘R and every few minutes (core throttles to one sync per 5 min). All of
+  it goes through `gtt_peer` / `gtt_load`'s device filter. Sharing *this* Mac
+  still needs `globaltokentracker-cli peer serve`.
+- `GTT_OPEN_PAGE=<overview|detail|quota|devices|sources|prices|settings>`
+  opens that page at launch (screenshots and UI checks).
 - **Minimum macOS 26** (Liquid Glass); universal binary, so Intel Macs on
   macOS 26 are covered.
 
