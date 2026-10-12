@@ -21,21 +21,23 @@ DMG="$OUT/GlobalTokenTracker-$TAG-macos-universal.dmg"
 
 [[ -d "$APP" ]] || { echo "missing $APP — run macos/scripts/build-app.sh first" >&2; exit 1; }
 
-# dmgbuild needs Python ≥ 3.10; isolated venv, pinned version.
-VENV="$OUT/.dmgbuild-venv"
-if [[ ! -x "$VENV/bin/dmgbuild" ]]; then
+# dmgbuild needs Python ≥ 3.10; isolated venv, pinned version. Kept in
+# macos/.build (git-ignored, outside target/): CI's Rust cache prunes
+# target/ and restored a half-empty venv without pip, failing the build.
+VENV="${DMGBUILD_VENV:-$ROOT/macos/.build/dmgbuild-venv}"
+if ! "$VENV/bin/python" -c 'import dmgbuild' >/dev/null 2>&1; then
   if command -v uv >/dev/null 2>&1; then
-    uv venv --quiet --python 3.13 "$VENV"
+    uv venv --quiet --clear --python 3.13 "$VENV"
     uv pip install --quiet --python "$VENV/bin/python" "dmgbuild==1.6.7"
   else
-    "${PYTHON:-python3}" -m venv "$VENV"
-    "$VENV/bin/pip" install --quiet "dmgbuild==1.6.7"
+    "${PYTHON:-python3}" -m venv --clear "$VENV"
+    "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check "dmgbuild==1.6.7"
   fi
 fi
 
 echo "==> Disk image $TAG"
 rm -f "$DMG"
-"$VENV/bin/dmgbuild" -s "$ROOT/macos/dmg/settings.py" -D app="$APP" \
+"$VENV/bin/python" -m dmgbuild -s "$ROOT/macos/dmg/settings.py" -D app="$APP" \
   -D background="$ROOT/macos/dmg/background.tiff" "GlobalTokenTracker" "$DMG"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" && "${CODESIGN_IDENTITY}" != "-" ]]; then

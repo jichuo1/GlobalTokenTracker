@@ -51,8 +51,10 @@ class StableTagGuardTests(unittest.TestCase):
         script = textwrap.dedent(step.split("        run: |\n", 1)[1])
         # Git is real; only the irreversible GitHub release command is replaced.
         shim = 'gh() { printf "GTT_RELEASE_CALLED %s\\n" "$*"; }\n'
+        # Mirrors the step's declared env (the macOS disk image ships too).
         env = {**os.environ, "RELEASE_TAG": TAG, "GITHUB_SHA": self.sha,
-               "GITHUB_REPOSITORY": "fixture/repository", "ASSET_FILENAME": "fixture.exe"}
+               "GITHUB_REPOSITORY": "fixture/repository", "ASSET_FILENAME": "fixture.exe",
+               "MAC_ASSET_FILENAME": "fixture.dmg"}
         return subprocess.run([self.bash, "-c", shim + script], cwd=self.work, env=env,
                               text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
 
@@ -61,6 +63,7 @@ class StableTagGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("GTT_RELEASE_CALLED", result.stdout)
         self.assertIn("--verify-tag", result.stdout)
+        self.assertIn("release-asset/fixture.dmg", result.stdout)
         self.assertEqual(self.git("ls-remote", "origin", "refs/tags/" + TAG).split()[0], self.sha)
 
     def test_matching_annotated_tag_is_peeled_to_verified_commit(self):
