@@ -244,6 +244,10 @@ pub(crate) fn pull_via(
     } else {
         let addr = match resolve(target) {
             Ok(a) => a,
+            // Neither a paired device's name or id nor a reachable address
+            // (e.g. a device just forgotten): for the authenticated
+            // endpoints that is "not paired", whatever the resolver says.
+            Err(_) if endpoint != "hello" => return Ok(Err("not_paired")),
             Err(code) => return Ok(Err(code)),
         };
         match registry.find(&addr.to_string()) {

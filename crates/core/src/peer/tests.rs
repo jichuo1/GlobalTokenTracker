@@ -857,6 +857,29 @@ fn pairing_happy_path_pins_and_authorizes() {
 }
 
 #[test]
+fn unknown_unresolvable_target_is_not_paired() {
+    // A name that is no paired device answers "not paired" whether or not
+    // the network's resolver claims it (some resolve every name, CI's
+    // resolve none) — it must not surface as a connection failure.
+    let viewer = fixture();
+    for endpoint in ["summary", "sources", "quotas"] {
+        assert_eq!(
+            client::pull(
+                &viewer.store,
+                "gone-device.invalid",
+                false,
+                false,
+                1,
+                endpoint,
+                ""
+            )
+            .unwrap(),
+            Err("not_paired")
+        );
+    }
+}
+
+#[test]
 fn revoked_tokens_fail_immediately() {
     let server_f = fixture();
     let viewer = fixture();
