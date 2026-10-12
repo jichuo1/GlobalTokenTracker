@@ -1100,6 +1100,69 @@ fn overview_widget(
                     )),
             ))
         }
+        // Span totals per device for the range (this PC first). Only once
+        // another device is paired — a lone PC has nothing to compare.
+        "devices" if vm.devices.len() > 1 => {
+            let top = vm
+                .devices
+                .iter()
+                .map(|d| fmt::tokens_total(&d.span))
+                .max()
+                .unwrap_or(0);
+            let mut rows: Vec<View> = Vec::new();
+            for d in &vm.devices {
+                let tokens = fmt::tokens_total(&d.span);
+                let mut name = if d.local {
+                    crate::devices::local_label(&d.name)
+                } else {
+                    d.name.clone()
+                };
+                if d.local && name != t!("本机") {
+                    name = tf!("{}（本机）", name);
+                }
+                if !d.selected {
+                    name = tf!("{} · 已筛除", name);
+                }
+                if d.last_error_code.is_some() {
+                    name = format!("⚠ {name}");
+                }
+                rows.push(usage_row(
+                    theme,
+                    name,
+                    if top > 0 {
+                        tokens as f64 / top as f64 * 100.0
+                    } else {
+                        0.0
+                    },
+                    tf!(
+                        "{} tok  ·  {}",
+                        fmt::tokens_exact(tokens),
+                        fmt::usd(d.span.cost_usd)
+                    ),
+                ));
+            }
+            if !vm.device_warnings.is_empty() {
+                rows.push(
+                    TextBlock::new()
+                        .text(t!("部分设备可能重复计算了同一份用量——详见“设备”。"))
+                        .font_size(theme.label_size)
+                        .foreground(theme.warn)
+                        .text_wrapping(TextWrapping::Wrap)
+                        .into(),
+                );
+            }
+            Some(w::card(
+                theme,
+                StackPanel::new()
+                    .orientation(Orientation::Vertical)
+                    .spacing(8.0)
+                    .children((
+                        w::section_header(theme, Symbol::Remote, &tf!("{rl} · 按设备", rl)),
+                        vstack(2.0, rows),
+                    )),
+            ))
+        }
+        "devices" => None,
         "quotas" => {
             // Most pressing first: windows still running before expired ones,
             // then by used percent (unknown last). Stable, so ties keep the
@@ -1193,13 +1256,17 @@ struct ChromeGeom {
     label_w: f64,
     tools_w: f64,
     models_w: f64,
+    devices_w: f64,
     refresh_w: f64,
     tools_x: f64,
     models_x: f64,
+    devices_x: f64,
     refresh_x: f64,
 }
 
-fn chrome_geom(theme: &Theme) -> ChromeGeom {
+/// `with_devices`: the device picker sits between Models and Refresh once
+/// another device is paired.
+fn chrome_geom(theme: &Theme, with_devices: bool) -> ChromeGeom {
     let en = i18n::lang() == i18n::Lang::En;
     // Design widths are for the default 12pt body; only ever grow from there.
     let k = (theme.body_size / 12.0).max(1.0);
@@ -1215,14 +1282,21 @@ fn chrome_geom(theme: &Theme) -> ChromeGeom {
     };
     let tools_x = CHROME_LEFT + label_w + GROUP_GAP;
     let models_x = tools_x + pill_w + PICKER_GAP + label_w + GROUP_GAP;
-    let refresh_x = models_x + pill_w + PICKER_GAP + label_w + GROUP_GAP;
+    let devices_x = models_x + pill_w + PICKER_GAP + label_w + GROUP_GAP;
+    let refresh_x = if with_devices {
+        devices_x + pill_w + PICKER_GAP + label_w + GROUP_GAP
+    } else {
+        devices_x
+    };
     ChromeGeom {
         label_w,
         tools_w: pill_w,
         models_w: pill_w,
+        devices_w: pill_w,
         refresh_w,
         tools_x,
         models_x,
+        devices_x,
         refresh_x,
     }
 }
@@ -1232,6 +1306,8 @@ fn chrome_geom(theme: &Theme) -> ChromeGeom {
 pub struct ChromeState<'a> {
     pub apps: &'a Option<Vec<String>>,
     pub models: &'a Option<Vec<String>>,
+    /// LAN device scope; the picker shows once `vm.devices` has a peer.
+    pub devices: &'a Option<Vec<String>>,
     pub refresh_secs: u64,
     pub open: Option<MenuKind>,
 }
@@ -1256,37 +1332,49 @@ pub fn filter_chrome(
     state: &ChromeState,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
-    let g = chrome_geom(theme);
+    let with_devices = s.vm.devices.len() > 1;
+    let g = chrome_geom(theme, with_devices);
+    let mut pickers: Vec<View> = vec![
+        picker_button(
+            theme,
+            check_summary(state.apps, s.vm.apps.len()),
+            (g.label_w, g.tools_w),
+            state.open == Some(MenuKind::Tools),
+            MenuKind::Tools,
+            ctx,
+        ),
+        picker_button(
+            theme,
+            check_summary(state.models, s.vm.models.len()),
+            (g.label_w, g.models_w),
+            state.open == Some(MenuKind::Models),
+            MenuKind::Models,
+            ctx,
+        ),
+    ];
+    if with_devices {
+        pickers.push(picker_button(
+            theme,
+            check_summary(state.devices, s.vm.devices.len()),
+            (g.label_w, g.devices_w),
+            state.open == Some(MenuKind::Devices),
+            MenuKind::Devices,
+            ctx,
+        ));
+    }
+    pickers.push(picker_button(
+        theme,
+        tr(refresh_label(state.refresh_secs)).to_string(),
+        (g.label_w, g.refresh_w),
+        state.open == Some(MenuKind::Refresh),
+        MenuKind::Refresh,
+        ctx,
+    ));
     StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(PICKER_GAP)
         .margin(Thickness::xy(CHROME_LEFT, 4.0))
-        .children((
-            picker_button(
-                theme,
-                check_summary(state.apps, s.vm.apps.len()),
-                (g.label_w, g.tools_w),
-                state.open == Some(MenuKind::Tools),
-                MenuKind::Tools,
-                ctx,
-            ),
-            picker_button(
-                theme,
-                check_summary(state.models, s.vm.models.len()),
-                (g.label_w, g.models_w),
-                state.open == Some(MenuKind::Models),
-                MenuKind::Models,
-                ctx,
-            ),
-            picker_button(
-                theme,
-                tr(refresh_label(state.refresh_secs)).to_string(),
-                (g.label_w, g.refresh_w),
-                state.open == Some(MenuKind::Refresh),
-                MenuKind::Refresh,
-                ctx,
-            ),
-        ))
+        .keyed_children(keyed(pickers))
 }
 
 /// Label + fixed-width pill whose click toggles `kind` in `open_menu`.
@@ -1302,6 +1390,7 @@ fn picker_button(
     let (label, a11y) = match kind {
         MenuKind::Tools => (t!("工具"), t!("工具筛选")),
         MenuKind::Models => (t!("模型"), t!("模型筛选")),
+        MenuKind::Devices => (t!("设备"), t!("设备筛选")),
         MenuKind::Refresh => (t!("刷新"), t!("刷新频率")),
     };
     StackPanel::new()
@@ -1448,6 +1537,60 @@ fn models_menu_items(
     ]
 }
 
+/// Device-checkbox rows (this PC first) plus select-all / clear — the LAN
+/// device dimension. `filter` `None` = all devices.
+fn devices_menu_items(
+    s: &Snapshot,
+    theme: &Theme,
+    filter: &Option<Vec<String>>,
+    ctx: &mut ViewContext<Shell>,
+) -> Vec<View> {
+    let mut col: Vec<View> = Vec::with_capacity(s.vm.devices.len() + 2);
+    for d in &s.vm.devices {
+        let checked = filter.as_ref().is_none_or(|f| f.contains(&d.device_id));
+        let id = d.device_id.clone();
+        let label = if d.local {
+            let name = crate::devices::local_label(&d.name);
+            if name == t!("本机") {
+                name
+            } else {
+                tf!("{}（本机）", name)
+            }
+        } else {
+            d.name.clone()
+        };
+        col.push(
+            CheckBox::new()
+                .is_checked(checked)
+                .on_is_checked_changed(
+                    ctx.callback(move |on: bool| Msg::ToggleDevice(id.clone(), on)),
+                )
+                .content(TextBlock::new().text(label).font_size(theme.body_size)),
+        );
+    }
+    col.push(
+        Border::new()
+            .height(1.0)
+            .background(theme.divider)
+            .margin(Thickness::xy(0.0, 6.0))
+            .into(),
+    );
+    col.push(
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .children((
+                Button::new()
+                    .on_click(ctx.callback(|_| Msg::SetDevices(None)))
+                    .content(t!("全选")),
+                Button::new()
+                    .on_click(ctx.callback(|_| Msg::SetDevices(Some(Vec::new()))))
+                    .content(t!("清空")),
+            )),
+    );
+    col
+}
+
 /// Refresh-cadence radio rows — single-select, so a pick light-dismisses the
 /// panel (`SetRefreshSecs` clears `open_menu`). `0` seconds = file-watch only.
 fn refresh_menu_items(theme: &Theme, secs: u64, ctx: &mut ViewContext<Shell>) -> Vec<View> {
@@ -1488,10 +1631,14 @@ pub fn dropdown_overlay(
     open: MenuKind,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
-    let g = chrome_geom(theme);
+    let g = chrome_geom(theme, s.vm.devices.len() > 1);
     let (x, items) = match open {
         MenuKind::Tools => (g.tools_x, tools_menu_items(s, theme, state.apps, ctx)),
         MenuKind::Models => (g.models_x, models_menu_items(s, theme, state.models, ctx)),
+        MenuKind::Devices => (
+            g.devices_x,
+            devices_menu_items(s, theme, state.devices, ctx),
+        ),
         MenuKind::Refresh => (
             g.refresh_x,
             refresh_menu_items(theme, state.refresh_secs, ctx),
@@ -2008,6 +2155,17 @@ pub fn detail_page(
                 .content(t!("下一页 →")),
         );
     }
+    // Peers share hourly totals, not events: the table is this PC's alone.
+    if s.vm.devices.len() > 1 {
+        nav.push(
+            TextBlock::new()
+                .text(t!("仅本机事件"))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        );
+    }
 
     vec![
         header(
@@ -2305,6 +2463,52 @@ pub fn quota_page(
         }
         list.push(w::card(theme, vstack(10.0, inner)));
     }
+    // Quotas whose freshest report came from another device: one card, each
+    // row naming the device. Never summed — the newest report per account.
+    let others: Vec<&globaltokentracker_core::peer::merged::MergedQuota> =
+        s.vm.quotas_all_devices
+            .iter()
+            .filter(|q| !q.local)
+            .collect();
+    if !others.is_empty() {
+        let mut inner: Vec<View> =
+            vec![w::section_header(theme, Symbol::Remote, t!("来自其他设备"))];
+        for (i, q) in others.iter().enumerate() {
+            if i > 0 && theme.line_separators {
+                inner.push(Border::new().height(1.0).background(theme.divider).into());
+            }
+            let row = globaltokentracker_core::store::QuotaRow {
+                app: q.app.clone(),
+                account: None,
+                captured_at: q.captured_at,
+                window_kind: q.window_kind.clone(),
+                used: q.used,
+                limit_value: q.limit_value,
+                used_percent: q.used_percent,
+                resets_at: q.resets_at,
+            };
+            inner.push(vstack(
+                4.0,
+                vec![
+                    TextBlock::new()
+                        .text(tf!("{} · 来自 {}", app_display(&q.app), q.device_name))
+                        .font_size(theme.label_size)
+                        .foreground(theme.subtle)
+                        .into(),
+                    quota_row(theme, &row),
+                ],
+            ));
+        }
+        inner.push(
+            TextBlock::new()
+                .text(t!("每个账号取最新的一条；额度绝不跨设备相加。"))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        );
+        list.push(w::card(theme, vstack(10.0, inner)));
+    }
     if list.is_empty() {
         list.push(
             TextBlock::new()
@@ -2396,6 +2600,335 @@ pub fn sources_page(
     std::iter::once(header(theme, t!("数据源"), vec![]))
         .chain(list)
         .collect()
+}
+
+// ---------------------------------------------------------------- devices
+
+/// Devices page inputs (shell state the page renders).
+pub struct DevicesArgs<'a> {
+    pub info: Option<&'a crate::devices::DevicesInfo>,
+    pub nearby: &'a [globaltokentracker_core::peer::discovery::Found],
+    pub syncing: bool,
+    pub discovering: bool,
+    pub error: Option<&'a str>,
+    pub pair: &'a crate::devices::PairForm,
+}
+
+fn subtle_text(theme: &Theme, text: String) -> View {
+    TextBlock::new()
+        .text(text)
+        .font_size(theme.label_size)
+        .foreground(theme.subtle)
+        .text_wrapping(TextWrapping::Wrap)
+        .into()
+}
+
+fn warn_text(theme: &Theme, text: String) -> View {
+    TextBlock::new()
+        .text(text)
+        .font_size(theme.label_size)
+        .foreground(theme.warn)
+        .text_wrapping(TextWrapping::Wrap)
+        .into()
+}
+
+/// One paired device: name + address, sync status (or the last error in
+/// words), its span totals, the include switch and Forget.
+fn paired_device_card(
+    theme: &Theme,
+    p: &globaltokentracker_core::peer::devices::PeerDevice,
+    span: Option<&globaltokentracker_core::store::Totals>,
+    range_label: &str,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let mut lines: Vec<View> = vec![
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .children((
+                SymbolIcon::new().symbol(Symbol::Remote),
+                TextBlock::new()
+                    .text(p.name.clone())
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+                w::badge(theme, p.last_address.clone(), w::BadgeTone::Muted),
+            )),
+    ];
+    match &p.last_error_code {
+        Some(code) => lines.push(warn_text(theme, crate::devices::message(code))),
+        None => lines.push(subtle_text(
+            theme,
+            match p.last_seen_at {
+                Some(t) => tf!("同步于 {}", fmt::ts_short(Some(t))),
+                None => t!("尚未同步").to_string(),
+            },
+        )),
+    }
+    if let (Some(t), true) = (span, p.enabled) {
+        lines.push(subtle_text(
+            theme,
+            tf!(
+                "{} · {} tok · {}",
+                range_label,
+                fmt::tokens_exact(fmt::tokens_total(t)),
+                fmt::usd(t.cost_usd)
+            ),
+        ));
+    }
+    if let Some(v) = &p.gtt_version {
+        lines.push(subtle_text(theme, tf!("版本 {}", v)));
+    }
+    let id = p.device_id.clone();
+    let (fid, fname) = (p.device_id.clone(), p.name.clone());
+    w::card(
+        theme,
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
+            .column_spacing(12.0)
+            .children([
+                cell(0, vstack(4.0, lines)),
+                cell(
+                    1,
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(6.0)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .children((
+                            TextBlock::new()
+                                .text(t!("计入"))
+                                .font_size(theme.label_size)
+                                .foreground(theme.subtle)
+                                .vertical_alignment(VerticalAlignment::Center),
+                            switch(
+                                theme,
+                                p.enabled,
+                                ctx.callback(move |on: bool| Msg::SetPeerEnabled(id.clone(), on)),
+                            ),
+                        )),
+                ),
+                cell(
+                    2,
+                    Button::new()
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .on_click(ctx.callback(move |_| Msg::ForgetAsk(fid.clone(), fname.clone())))
+                        .content(t!("忘记…")),
+                ),
+            ]),
+    )
+}
+
+/// LAN multi-device viewing: this PC, paired devices, possible double
+/// counting, the Add-device form and devices found nearby.
+pub fn devices_page(
+    snap: Option<&Snapshot>,
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+    args: &DevicesArgs,
+) -> Vec<View> {
+    let Some(info) = args.info else {
+        return vec![header(theme, t!("设备"), vec![]), loading(theme, true)];
+    };
+    let has_peers = !info.peers.is_empty();
+    let sync_btn: View = Button::new()
+        .is_enabled(has_peers && !args.syncing)
+        .on_click(ctx.callback(|_| Msg::SyncPeers { if_due: false }))
+        .content(if args.syncing {
+            t!("正在同步…")
+        } else {
+            t!("立即同步")
+        });
+    let mut blocks: Vec<View> = vec![header(theme, t!("设备"), vec![sync_btn])];
+
+    // This PC.
+    blocks.push(w::section_header(theme, Symbol::Home, t!("本机")));
+    blocks.push(w::card(
+        theme,
+        vstack(
+            6.0,
+            vec![
+                TextBlock::new()
+                    .text(crate::devices::local_label(&info.local_name))
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .into(),
+                subtle_text(
+                    theme,
+                    tf!(
+                        "设备 ID {}",
+                        info.local_id.chars().take(8).collect::<String>()
+                    ),
+                ),
+                subtle_text(
+                    theme,
+                    t!("在“设置 → 局域网共享”中开启后，其他设备即可与本机配对并查看本机用量。")
+                        .into(),
+                ),
+            ],
+        ),
+    ));
+
+    // Paired devices.
+    blocks.push(w::section_header(theme, Symbol::Link, t!("已配对的设备")));
+    let range_label = snap.map_or_else(String::new, |s| tr(s.vm.range.label()).to_string());
+    if has_peers {
+        for p in &info.peers {
+            let span = snap.and_then(|s| {
+                s.vm.devices
+                    .iter()
+                    .find(|d| d.device_id == p.device_id)
+                    .map(|d| &d.span)
+            });
+            blocks.push(paired_device_card(theme, p, span, &range_label, ctx));
+        }
+    } else {
+        blocks.push(w::card(
+            theme,
+            subtle_text(
+                theme,
+                t!("尚未配对任何设备。在另一台设备上开始共享以获得配对码，然后在下方添加设备。")
+                    .into(),
+            ),
+        ));
+    }
+    if let Some(e) = args.error {
+        blocks.push(warn_text(theme, crate::devices::message(e)));
+    }
+
+    // Possible double counting.
+    if !info.warnings.is_empty() {
+        let mut rows: Vec<View> = vec![w::section_header(
+            theme,
+            Symbol::Important,
+            t!("可能重复计算"),
+        )];
+        for wr in &info.warnings {
+            rows.push(warn_text(
+                theme,
+                tf!(
+                    "{} 与 {} 有 {} 天的 {} 用量完全相同，可能扫描了同一个同步文件夹；合计中两者仍都计入。",
+                    info.name_of(&wr.device_a),
+                    info.name_of(&wr.device_b),
+                    wr.days,
+                    app_display(&wr.app)
+                ),
+            ));
+        }
+        blocks.push(w::card(theme, vstack(8.0, rows)));
+    }
+
+    // Add device.
+    let pair = args.pair;
+    blocks.push(w::section_header(theme, Symbol::Add, t!("添加设备")));
+    let mut form: Vec<View> = vec![
+        subtle_text(
+            theme,
+            t!("在另一台设备上开始共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。")
+                .into(),
+        ),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(10.0)
+            .children((
+                TextBox::new()
+                    .text(pair.addr.clone())
+                    .placeholder_text("192.168.1.20:4319")
+                    .on_text_changed(ctx.callback(Msg::PairAddr))
+                    .width(240.0),
+                TextBox::new()
+                    .text(pair.code.clone())
+                    .placeholder_text(t!("配对码"))
+                    .on_text_changed(ctx.callback(Msg::PairCode))
+                    .width(120.0),
+                Button::new()
+                    .is_enabled(pair.ready())
+                    .on_click(ctx.callback(|_| Msg::PairSubmit))
+                    .content(if pair.busy {
+                        t!("正在配对…")
+                    } else {
+                        t!("配对")
+                    }),
+            )),
+    ];
+    if let Some(code) = &pair.error {
+        form.push(warn_text(theme, crate::devices::message(code)));
+    } else if let Some(name) = &pair.paired {
+        form.push(
+            TextBlock::new()
+                .text(tf!("已与 {} 配对", name))
+                .font_size(theme.label_size)
+                .foreground(theme.ok)
+                .into(),
+        );
+    }
+    blocks.push(w::card(theme, vstack(10.0, form)));
+
+    // Nearby (Bonjour).
+    let find_btn: View = Button::new()
+        .is_enabled(!args.discovering)
+        .on_click(ctx.callback(|_| Msg::Discover))
+        .content(if args.discovering {
+            t!("正在查找设备…")
+        } else {
+            t!("查找设备")
+        });
+    blocks.push(
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .children([
+                cell(0, w::section_header(theme, Symbol::Globe, t!("附近"))),
+                cell(1, find_btn),
+            ]),
+    );
+    let mut nearby: Vec<View> = Vec::new();
+    for d in args.nearby {
+        let mut left: Vec<View> = vec![
+            TextBlock::new()
+                .text(d.name.clone())
+                .font_weight(FontWeight::SEMI_BOLD)
+                .into(),
+            subtle_text(theme, d.addresses.first().cloned().unwrap_or_default()),
+        ];
+        if d.warnings.iter().any(|w| w == "fingerprint_mismatch") {
+            left.push(warn_text(
+                theme,
+                t!("其身份与该 ID 的已配对设备不一致——拉取将被拒绝。").into(),
+            ));
+        } else if d.warnings.iter().any(|w| w == "duplicate_device_id") {
+            left.push(warn_text(
+                theme,
+                t!("另一台设备使用了相同的 ID（账本被复制过？）。").into(),
+            ));
+        }
+        let right: View = if d.paired {
+            w::badge(theme, t!("已配对").into(), w::BadgeTone::Accent)
+        } else {
+            let addr = d.addresses.first().cloned().unwrap_or_default();
+            Button::new()
+                .is_enabled(!addr.is_empty())
+                .on_click(ctx.callback(move |_| Msg::PairUse(addr.clone())))
+                .content(t!("用此地址配对"))
+        };
+        nearby.push(
+            Grid::new()
+                .columns([GridLength::STAR, GridLength::Auto])
+                .children([cell(0, vstack(2.0, left)), cell(1, right)]),
+        );
+    }
+    if nearby.is_empty() {
+        nearby.push(subtle_text(
+            theme,
+            t!("选择“查找设备”以搜索此网络中正在共享的 GlobalTokenTracker 设备。").into(),
+        ));
+    }
+    nearby.push(subtle_text(
+        theme,
+        t!("没有列出？访客 Wi-Fi、VLAN 和客户端隔离会阻止发现——请改用地址添加设备，例如 192.168.1.20:4319。").into(),
+    ));
+    blocks.push(w::card(theme, vstack(10.0, nearby)));
+    blocks.push(subtle_text(
+        theme,
+        t!("设备之间只共享按小时汇总的用量，从不共享提示词、会话、项目或路径。额度按账号计算，绝不跨设备相加。").into(),
+    ));
+    blocks
 }
 
 // ---------------------------------------------------------------- prices
@@ -2880,6 +3413,149 @@ fn switch(theme: &Theme, is_on: bool, toggled: Callback<bool>) -> View {
     ])
 }
 
+/// Settings "LAN sharing": switch, address to give other devices, the
+/// one-time pairing code, and the viewers paired with this PC.
+fn share_rows(
+    config: &UiConfig,
+    share: &crate::devices::ShareState,
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+) -> Vec<View> {
+    let mut rows: Vec<View> = vec![setting_row(
+        theme,
+        "共享本机用量",
+        Some(
+            "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）",
+        ),
+        switch(theme, config.share_lan, ctx.callback(Msg::SetShareLan)),
+    )];
+    if share.busy {
+        rows.push(subtle_text(theme, t!("正在启动或停止共享…").into()));
+    }
+    if let Some(e) = &share.error {
+        rows.push(warn_text(theme, tf!("共享失败：{}", e)));
+    }
+    if let Some(st) = &share.status {
+        let addr = if st.addresses.is_empty() {
+            tf!("本机 IP:{}", st.port)
+        } else {
+            st.addresses.join(" · ")
+        };
+        rows.push(setting_row(
+            theme,
+            "本机地址",
+            Some("在另一台设备的“设备 → 添加设备”中填写此地址"),
+            TextBlock::new()
+                .text(addr)
+                .font_size(theme.body_size)
+                .is_text_selection_enabled(true)
+                .into(),
+        ));
+        let code_view: View = match &st.code {
+            Some(code) => {
+                let until = share
+                    .code_until
+                    .map(|t| {
+                        let ms = t
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as i64);
+                        tf!("有效至 {}", fmt::ts_short(Some(ms)))
+                    })
+                    .unwrap_or_default();
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(12.0)
+                    .children((
+                        TextBlock::new()
+                            .text(format!("{} {}", &code[..3], &code[3..]))
+                            .font_size(theme.title_size)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .is_text_selection_enabled(true)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        TextBlock::new()
+                            .text(until)
+                            .font_size(theme.label_size)
+                            .foreground(theme.subtle)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        Button::new()
+                            .on_click(ctx.callback(|_| Msg::ShareNewCode))
+                            .content(t!("新配对码")),
+                    ))
+            }
+            None => Button::new()
+                .on_click(ctx.callback(|_| Msg::ShareNewCode))
+                .content(t!("生成配对码")),
+        };
+        rows.push(setting_row(
+            theme,
+            "配对码",
+            Some("2 分钟内有效，只能使用一次；连续输错 5 次后作废"),
+            code_view,
+        ));
+        rows.push(subtle_text(
+            theme,
+            tf!(
+                "证书指纹 {}…（对方配对后固定此身份）",
+                st.fingerprint.chars().take(16).collect::<String>()
+            ),
+        ));
+    }
+    let active: Vec<&globaltokentracker_core::peer::trust::Viewer> = share
+        .viewers
+        .iter()
+        .filter(|v| v.revoked_at.is_none())
+        .collect();
+    if !active.is_empty() {
+        let mut list: Vec<View> = Vec::new();
+        for v in active {
+            let id = v.id.clone();
+            list.push(
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::Auto])
+                    .children([
+                        cell(
+                            0,
+                            vstack(
+                                2.0,
+                                vec![
+                                    TextBlock::new()
+                                        .text(v.name.clone())
+                                        .font_size(theme.body_size)
+                                        .into(),
+                                    subtle_text(
+                                        theme,
+                                        tf!(
+                                            "配对于 {} · 最近访问 {}",
+                                            fmt::ts_short(Some(v.created_at)),
+                                            fmt::ts_short(v.last_seen_at)
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                        cell(
+                            1,
+                            Button::new()
+                                .on_click(ctx.callback(move |_| Msg::Revoke(id.clone())))
+                                .content(t!("撤销")),
+                        ),
+                    ]),
+            );
+        }
+        rows.push(setting_row(
+            theme,
+            "已配对的查看方",
+            Some("撤销后立即失效，需重新配对才能再次查看"),
+            vstack(8.0, list),
+        ));
+    }
+    rows.push(subtle_text(
+        theme,
+        t!("Windows 防火墙只应对“专用”网络放行 TCP 4319 与 UDP 5353；安装程序会添加对应规则（需要管理员确认）。").into(),
+    ));
+    rows
+}
+
 const UPDATE_CHANNEL_OPTIONS: &[(&str, &str)] = &[("stable", "正式版"), ("alpha", "预览版")];
 
 fn release_notes_link(rel: &Release) -> Option<View> {
@@ -3076,15 +3752,29 @@ pub fn update_banner(
         .children([banner_base, banner_bg, banner_frame])
 }
 
+/// Shell state the Settings page renders besides `UiConfig`.
+pub struct SettingsArgs<'a> {
+    pub update: &'a UpdateState,
+    pub update_error: Option<&'a str>,
+    pub external_interface_enabled: bool,
+    pub external_interface_error: Option<&'a str>,
+    pub share: &'a crate::devices::ShareState,
+}
+
 pub fn settings_page(
     config: &UiConfig,
-    update: &UpdateState,
-    update_error: Option<&str>,
-    external_interface_enabled: bool,
-    external_interface_error: Option<&str>,
+    args: &SettingsArgs,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
 ) -> Vec<View> {
+    let SettingsArgs {
+        update,
+        update_error,
+        external_interface_enabled,
+        external_interface_error,
+        share,
+    } = *args;
+    let share_rows = share_rows(config, share, theme, ctx);
     let version_row = setting_row(
         theme,
         "当前版本",
@@ -3218,6 +3908,8 @@ pub fn settings_page(
         ),
         w::section_header(theme, Symbol::Setting, tr("外部协同")),
         w::card(theme, vstack(theme.gap, interface_rows)),
+        w::section_header(theme, Symbol::Permissions, tr("局域网共享")),
+        w::card(theme, vstack(theme.gap, share_rows)),
         w::section_header(theme, Symbol::Sync, tr("更新")),
         w::card(
             theme,

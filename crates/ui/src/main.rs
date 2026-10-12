@@ -10,6 +10,7 @@
 mod autostart;
 mod close_hook;
 mod config;
+mod devices;
 mod fonts;
 mod gpu_slide;
 mod heat;
@@ -108,6 +109,7 @@ pub enum Page {
     Overview,
     Detail,
     Quota,
+    Devices,
     Sources,
     Prices,
     Settings,
@@ -235,6 +237,24 @@ pub struct Shell {
     update_seen_tag: Option<String>,
     /// Last download/install failure — shown on the banner and settings row.
     update_error: Option<String>,
+    /// LAN devices: this PC + paired devices (`devices::load`).
+    devices: Option<devices::DevicesInfo>,
+    /// Devices found over Bonjour (`Find devices`).
+    nearby: Vec<globaltokentracker_core::peer::discovery::Found>,
+    peer_syncing: bool,
+    discovering: bool,
+    /// Last device-level failure (sync / discover / forget), as a code or text.
+    peer_error: Option<String>,
+    /// Devices page "Add device" form.
+    pair: devices::PairForm,
+    /// Forget confirmation open for (device id, name).
+    forget_target: Option<(String, String)>,
+    /// Statistics device filter (persisted in ui.json as `devices`).
+    device_filter: Option<Vec<String>>,
+    /// Settings "LAN sharing": the running share and what it shows.
+    share: devices::ShareState,
+    /// Bumped whenever the peer-sync timer chain is re-armed.
+    peer_gen: u64,
 }
 
 /// Which filter-strip picker is open — `Tools`/`Models` are multi-select
@@ -243,6 +263,8 @@ pub struct Shell {
 pub enum MenuKind {
     Tools,
     Models,
+    /// LAN devices (shown once another device is paired).
+    Devices,
     Refresh,
 }
 
@@ -380,6 +402,40 @@ pub enum Msg {
     SetUpdateChannel(&'static str),
     SetUpdateAuto(bool),
     DismissUpdateBanner,
+    // ---- LAN devices
+    DevicesLoaded(Result<devices::DevicesInfo, String>),
+    /// Pull paired devices — `if_due`: core's 5-minute throttle.
+    SyncPeers {
+        if_due: bool,
+    },
+    PeersSynced(Result<Option<globaltokentracker_core::peer::sync::SyncReport>, String>),
+    /// Peer-sync timer of chain `gen` fired.
+    PeerTick(u64),
+    Discover,
+    Discovered(Result<Vec<globaltokentracker_core::peer::discovery::Found>, String>),
+    PairAddr(String),
+    PairCode(String),
+    /// "Use this address" on a nearby device.
+    PairUse(String),
+    PairSubmit,
+    Paired(Result<globaltokentracker_core::peer::devices::PeerDevice, String>),
+    /// Forget… clicked (device id, name) — opens the confirmation.
+    ForgetAsk(String, String),
+    ForgetResult(ContentDialogResult),
+    SetPeerEnabled(String, bool),
+    /// A forget / include toggle finished.
+    PeerOpDone(Result<(), String>),
+    /// Device checkbox in the filter strip (device id, checked).
+    ToggleDevice(String, bool),
+    /// Bulk device scope — `None` = all devices, `Some(vec![])` = none.
+    SetDevices(Option<Vec<String>>),
+    /// Settings: share this PC on the LAN.
+    SetShareLan(bool),
+    ShareStarted(Result<Box<globaltokentracker_core::peer::share::Sharing>, String>),
+    ShareStopped,
+    ShareNewCode,
+    ViewersLoaded(Result<Vec<globaltokentracker_core::peer::trust::Viewer>, String>),
+    Revoke(String),
 }
 
 const DETAIL_PAGE_SIZE: i64 = 200;
@@ -491,6 +547,8 @@ struct LoadReq {
     range: Range,
     apps: Option<Vec<String>>,
     models: Option<Vec<String>>,
+    /// LAN device scope (`None` = all devices).
+    devices: Option<Vec<String>>,
     force_prices: bool,
     /// True when the caller knows visible data must be rebuilt even if the
     /// scan lands nothing (filter/range/page change, reprice, quota poll).
@@ -509,6 +567,7 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         range,
         apps,
         models,
+        devices,
         force_prices,
         force_views,
         prev_cube,
@@ -561,7 +620,13 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         }
     );
     let vm = store
-        .overview_from_cube(&cube, range, apps.as_deref(), models.as_deref())
+        .overview_from_cube_for(
+            &cube,
+            range,
+            apps.as_deref(),
+            models.as_deref(),
+            devices.as_deref(),
+        )
         .map_err(|e| e.to_string())?;
     // Rows only — the total comes from the cube (no COUNT(*) over the ledger).
     let rows = store
@@ -675,6 +740,20 @@ fn arm_update(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
     });
 }
 
+/// First peer sync after launch, then every `PEER_SYNC_SECS` the timer asks
+/// core whether one is due (core throttles to one per 5 minutes).
+const PEER_FIRST_SYNC_SECS: u64 = 20;
+const PEER_SYNC_SECS: u64 = 120;
+
+/// Arms one peer-sync timer of chain `gen_id`.
+fn arm_peer_sync(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
+    context.spawn_background(move |_| {
+        power::worker("gtt-peer-timer");
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        Msg::PeerTick(gen_id)
+    });
+}
+
 /// One blocking tray-event poll per arm; re-armed on every message.
 fn arm_tray(context: &ComponentContext<Shell>) {
     context.spawn_background(|_| {
@@ -703,9 +782,11 @@ impl Component for Shell {
         let range = Range::from_config(&config.range, config.range_start_ms, config.range_end_ms);
         let app_filter = config.apps.clone();
         let model_filter = config.models.clone();
+        let device_filter = config.devices.clone();
         let page = match std::env::var("GTT_PAGE").as_deref() {
             Ok("detail") => Page::Detail,
             Ok("quota") => Page::Quota,
+            Ok("devices") => Page::Devices,
             Ok("sources") => Page::Sources,
             Ok("prices") => Page::Prices,
             Ok("settings") => Page::Settings,
@@ -723,6 +804,7 @@ impl Component for Shell {
                 range,
                 apps: app_filter,
                 models: model_filter,
+                devices: device_filter,
                 force_prices: true,
                 force_views: true,
                 prev_cube: None,
@@ -766,6 +848,23 @@ impl Component for Shell {
         if config.update_auto {
             arm_update(context, 0, updater::FIRST_CHECK_SECS);
         }
+        // LAN devices: the registry for the Devices page / filter, a sync
+        // once due, and sharing if the user left it on.
+        context.spawn_background(|_| {
+            power::worker("gtt-peers");
+            Msg::DevicesLoaded(devices::load(&db_path()))
+        });
+        arm_peer_sync(context, 0, PEER_FIRST_SYNC_SECS);
+        if config.share_lan {
+            context.spawn_background(|_| {
+                power::worker("gtt-share");
+                Msg::ShareStarted(devices::start_sharing(&db_path()).map(Box::new))
+            });
+        }
+        let share = devices::ShareState {
+            busy: config.share_lan,
+            ..Default::default()
+        };
         Self {
             snap: None,
             sources: None,
@@ -788,6 +887,7 @@ impl Component for Shell {
             watch_gen,
             app_filter: config.apps.clone(),
             model_filter: config.models.clone(),
+            device_filter: config.devices.clone(),
             config,
             external_interface_enabled,
             external_interface_error,
@@ -826,6 +926,15 @@ impl Component for Shell {
             update_checking: false,
             update_seen_tag: None,
             update_error: None,
+            devices: None,
+            nearby: Vec::new(),
+            peer_syncing: false,
+            discovering: false,
+            peer_error: None,
+            pair: devices::PairForm::default(),
+            forget_target: None,
+            share,
+            peer_gen: 0,
         }
     }
 
@@ -859,14 +968,20 @@ impl Component for Shell {
                         // it started; the user may have moved on since —
                         // re-aim at the current ones (a cube fold).
                         let (apps, models) = (self.app_filter.clone(), self.model_filter.clone());
+                        let devices = self.device_filter.clone();
                         let range = self.range;
                         let gen_now = self.filter_gen;
                         let mut detail_stale = false;
                         if let Some(sn) = self.snap.as_mut()
                             && (sn.vm.range != range || sn.filter_gen != gen_now)
                         {
-                            sn.vm
-                                .apply_cube(&sn.cube, range, apps.as_deref(), models.as_deref());
+                            sn.vm.apply_cube_for(
+                                &sn.cube,
+                                range,
+                                apps.as_deref(),
+                                models.as_deref(),
+                                devices.as_deref(),
+                            );
                             sn.detail.total =
                                 sn.cube.event_count(apps.as_deref(), models.as_deref());
                             detail_stale = sn.filter_gen != gen_now;
@@ -995,6 +1110,7 @@ impl Component for Shell {
                 // the aggregates from the raw events.
                 self.cube_rebuild = true;
                 globaltokentracker_core::adapters::forget_scan_memos();
+                self.sync_peers(false, context);
                 // Invalidate in-flight timer so manual refresh resets the countdown cleanly
                 if self.config.refresh_secs > 0 {
                     self.refresh_gen += 1;
@@ -1419,6 +1535,220 @@ impl Component for Shell {
                 }
             }
             Msg::DismissUpdateBanner => self.update_banner_dismissed = true,
+            // ---- LAN devices
+            Msg::DevicesLoaded(res) => match res {
+                Ok(info) => {
+                    // A forgotten device leaves the filter (an empty
+                    // remainder means "all" again).
+                    if let Some(f) = &mut self.device_filter {
+                        let before = f.len();
+                        f.retain(|id| {
+                            *id == info.local_id || info.peers.iter().any(|p| p.device_id == *id)
+                        });
+                        if f.len() != before {
+                            if f.is_empty() {
+                                self.device_filter = None;
+                            }
+                            self.config.devices = self.device_filter.clone();
+                            self.config.save();
+                        }
+                    }
+                    self.devices = Some(info);
+                }
+                Err(e) => self.peer_error = Some(e),
+            },
+            Msg::SyncPeers { if_due } => self.sync_peers(if_due, context),
+            Msg::PeersSynced(res) => {
+                self.peer_syncing = false;
+                match res {
+                    Ok(report) => {
+                        self.peer_error = None;
+                        if report.is_some_and(|r| r.changed) {
+                            // Peer rows changed: the cube must be rebuilt.
+                            self.cube_rebuild = true;
+                            self.views_stale = true;
+                            self.reload_views(context);
+                        }
+                    }
+                    Err(e) => self.peer_error = Some(e),
+                }
+                self.load_devices(context);
+            }
+            Msg::PeerTick(gen_id) => {
+                if gen_id == self.peer_gen {
+                    self.sync_peers(true, context);
+                    arm_peer_sync(context, gen_id, PEER_SYNC_SECS);
+                }
+            }
+            Msg::Discover => {
+                if !self.discovering {
+                    self.discovering = true;
+                    context.spawn_background(|_| {
+                        power::worker("gtt-discover");
+                        Msg::Discovered(devices::discover(&db_path()))
+                    });
+                }
+            }
+            Msg::Discovered(res) => {
+                self.discovering = false;
+                match res {
+                    Ok(found) => {
+                        self.nearby = found;
+                        self.peer_error = None;
+                    }
+                    Err(e) => self.peer_error = Some(e),
+                }
+            }
+            Msg::PairAddr(a) => self.pair.addr = a,
+            Msg::PairCode(c) => self.pair.code = c,
+            Msg::PairUse(a) => {
+                self.pair.addr = a;
+                self.pair.error = None;
+            }
+            Msg::PairSubmit => {
+                if self.pair.ready() {
+                    self.pair.busy = true;
+                    self.pair.error = None;
+                    self.pair.paired = None;
+                    let (addr, code) = (self.pair.addr.clone(), self.pair.digits());
+                    context.spawn_background(move |_| {
+                        power::worker("gtt-pair");
+                        Msg::Paired(devices::pair(&db_path(), &addr, &code))
+                    });
+                }
+            }
+            Msg::Paired(res) => {
+                self.pair.busy = false;
+                self.pair.code.clear();
+                match res {
+                    Ok(device) => {
+                        self.pair.paired = Some(device.name);
+                        self.pair.addr.clear();
+                        self.nearby.retain(|n| n.device_id != device.device_id);
+                        self.load_devices(context);
+                        // Pull the new device at once.
+                        self.sync_peers(false, context);
+                    }
+                    Err(code) => self.pair.error = Some(code),
+                }
+            }
+            Msg::ForgetAsk(id, name) => self.forget_target = Some((id, name)),
+            Msg::ForgetResult(result) => {
+                if let Some((id, _)) = self.forget_target.take()
+                    && result == ContentDialogResult::Primary
+                {
+                    context.spawn_background(move |_| {
+                        power::worker("gtt-forget");
+                        Msg::PeerOpDone(devices::forget(&db_path(), &id))
+                    });
+                }
+            }
+            Msg::SetPeerEnabled(id, on) => {
+                context.spawn_background(move |_| {
+                    power::worker("gtt-peer-enable");
+                    Msg::PeerOpDone(devices::set_enabled(&db_path(), &id, on))
+                });
+            }
+            Msg::PeerOpDone(res) => {
+                if let Err(e) = res {
+                    self.peer_error = Some(e);
+                }
+                self.load_devices(context);
+                self.cube_rebuild = true;
+                self.views_stale = true;
+                self.reload_views(context);
+            }
+            Msg::ToggleDevice(id, on) => {
+                let all: Vec<String> = self
+                    .snap
+                    .as_ref()
+                    .map(|s| s.vm.devices.iter().map(|d| d.device_id.clone()).collect())
+                    .unwrap_or_default();
+                let mut set: std::collections::BTreeSet<String> = self
+                    .device_filter
+                    .clone()
+                    .unwrap_or_else(|| all.clone())
+                    .into_iter()
+                    .collect();
+                if on {
+                    set.insert(id);
+                } else {
+                    set.remove(&id);
+                }
+                let next = if all.iter().all(|d| set.contains(d)) {
+                    None
+                } else {
+                    Some(set.into_iter().collect())
+                };
+                self.set_device_filter(next, context);
+            }
+            Msg::SetDevices(f) => self.set_device_filter(f, context),
+            Msg::SetShareLan(on) => {
+                self.config.share_lan = on;
+                self.config.save();
+                self.share.error = None;
+                if on && self.share.running.is_none() && !self.share.busy {
+                    self.share.busy = true;
+                    context.spawn_background(|_| {
+                        power::worker("gtt-share");
+                        Msg::ShareStarted(devices::start_sharing(&db_path()).map(Box::new))
+                    });
+                } else if !on && let Some(running) = self.share.running.take() {
+                    self.share.busy = true;
+                    self.share.refresh_status();
+                    context.spawn_background(move |_| {
+                        power::worker("gtt-share-stop");
+                        running.stop();
+                        Msg::ShareStopped
+                    });
+                }
+            }
+            Msg::ShareStarted(res) => {
+                self.share.busy = false;
+                match res {
+                    // Switched off while starting: stop it again.
+                    Ok(running) if !self.config.share_lan => {
+                        context.spawn_background(move |_| {
+                            running.stop();
+                            Msg::ShareStopped
+                        });
+                    }
+                    Ok(running) => {
+                        self.share.running = Some(*running);
+                        self.share.refresh_status();
+                        self.load_viewers(context);
+                    }
+                    Err(e) => self.share.error = Some(e),
+                }
+            }
+            Msg::ShareStopped => {
+                self.share.busy = false;
+                self.share.refresh_status();
+            }
+            Msg::ShareNewCode => {
+                if let Some(running) = &self.share.running
+                    && let Err(e) = running.new_code()
+                {
+                    self.share.error = Some(e.to_string());
+                }
+                self.share.refresh_status();
+                // A viewer may have just paired with the previous code.
+                self.load_viewers(context);
+            }
+            Msg::ViewersLoaded(res) => match res {
+                Ok(v) => self.share.viewers = v,
+                Err(e) => self.share.error = Some(e),
+            },
+            Msg::Revoke(id) => {
+                context.spawn_background(move |_| {
+                    power::worker("gtt-revoke");
+                    let db = db_path();
+                    match devices::revoke(&db, &id) {
+                        Ok(()) => Msg::ViewersLoaded(devices::viewers(&db)),
+                        Err(e) => Msg::ViewersLoaded(Err(devices::message(&e))),
+                    }
+                });
+            }
             Msg::NavGo(id) => self.nav_go(id, context),
             Msg::NavSettled(id) => {
                 if self.flight.as_ref().is_some_and(|f| f.id == id)
@@ -1512,6 +1842,7 @@ impl Component for Shell {
                 self.page = match tag.as_deref() {
                     Some("明细") | Some("Details") | Some("detail") => Page::Detail,
                     Some("配额") | Some("Quota") | Some("quota") => Page::Quota,
+                    Some("设备") | Some("Devices") | Some("devices") => Page::Devices,
                     Some("数据源") | Some("Sources") | Some("sources") => Page::Sources,
                     Some("价格") | Some("Prices") | Some("prices") => Page::Prices,
                     Some("设置") | Some("Settings") | Some("settings") => Page::Settings,
@@ -1529,6 +1860,11 @@ impl Component for Shell {
                 // No scan — that used to land mid-slide and stall the flight.
                 if self.page != prev {
                     self.load_page_data(self.page, context);
+                    match self.page {
+                        Page::Devices => self.load_devices(context),
+                        Page::Settings => self.load_viewers(context),
+                        _ => {}
+                    }
                 }
             }
             Msg::DetailPage(page) => {
@@ -1800,6 +2136,7 @@ impl Component for Shell {
                     KeyedView::new("overview", item(t!("总览"), Page::Overview)),
                     KeyedView::new("detail", item(t!("明细"), Page::Detail)),
                     KeyedView::new("quota", item(t!("配额"), Page::Quota)),
+                    KeyedView::new("devices", item(t!("设备"), Page::Devices)),
                     KeyedView::new("sources", item(t!("数据源"), Page::Sources)),
                     KeyedView::new("prices", item(t!("价格"), Page::Prices)),
                     KeyedView::new("settings", item(t!("设置"), Page::Settings)),
@@ -1836,6 +2173,7 @@ impl Component for Shell {
         let chrome_state = ChromeState {
             apps: &self.app_filter,
             models: &self.model_filter,
+            devices: &self.device_filter,
             refresh_secs: self.config.refresh_secs,
             open: self.open_menu,
         };
@@ -1960,6 +2298,29 @@ impl Component for Shell {
         root.push(KeyedView::new("chrome", chrome));
         root.push(KeyedView::new("overlay", overlay));
         root.push(KeyedView::new("closedlg", close_dialog));
+        // Forget-device confirmation (destructive: its synced rows go too).
+        let forget_name = self
+            .forget_target
+            .as_ref()
+            .map(|(_, n)| n.clone())
+            .unwrap_or_default();
+        root.push(KeyedView::new(
+            "forgetdlg",
+            ContentDialog::new()
+                .is_open(self.forget_target.is_some())
+                .title(tf!("忘记“{}”？", forget_name))
+                .primary_button_text(tr("忘记设备"))
+                .close_button_text(tr("取消"))
+                .on_closed(context.callback(Msg::ForgetResult))
+                .content(
+                    TextBlock::new()
+                        .text(tr(
+                            "将从本机删除它已同步的用量。如需再次查看，请用新的配对码重新配对。",
+                        ))
+                        .font_size(theme.body_size)
+                        .text_wrapping(windows_reactor::TextWrapping::Wrap),
+                ),
+        ));
         Grid::new()
             .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
             .keyed_children(root)
@@ -2043,6 +2404,19 @@ impl Shell {
                 },
             ),
             Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context),
+            Page::Devices => devices_page(
+                snap,
+                theme,
+                context,
+                &DevicesArgs {
+                    info: self.devices.as_ref(),
+                    nearby: &self.nearby,
+                    syncing: self.peer_syncing,
+                    discovering: self.discovering,
+                    error: self.peer_error.as_deref(),
+                    pair: &self.pair,
+                },
+            ),
             Page::Sources => sources_page(self.sources.as_deref(), theme),
             Page::Prices => prices_page(
                 self.prices.as_ref(),
@@ -2064,10 +2438,13 @@ impl Shell {
             ),
             Page::Settings => settings_page(
                 &self.config,
-                &self.update,
-                self.update_error.as_deref(),
-                self.external_interface_enabled,
-                self.external_interface_error.as_deref(),
+                &SettingsArgs {
+                    update: &self.update,
+                    update_error: self.update_error.as_deref(),
+                    external_interface_enabled: self.external_interface_enabled,
+                    external_interface_error: self.external_interface_error.as_deref(),
+                    share: &self.share,
+                },
                 theme,
                 context,
             ),
@@ -2078,7 +2455,7 @@ impl Shell {
     /// the list pages pack tighter (10 DIP, their historical rhythm).
     fn page_gap(&self, page: Page) -> f64 {
         match page {
-            Page::Overview | Page::Settings => self.theme.section_gap,
+            Page::Overview | Page::Settings | Page::Devices => self.theme.section_gap,
             _ => 10.0,
         }
     }
@@ -2328,6 +2705,7 @@ impl Shell {
                 range: self.range,
                 apps: self.app_filter.clone(),
                 models: self.model_filter.clone(),
+                devices: self.device_filter.clone(),
                 force_prices: false,
                 force_views,
                 prev_cube,
@@ -2358,6 +2736,7 @@ impl Shell {
                 range: self.range,
                 apps: self.app_filter.clone(),
                 models: self.model_filter.clone(),
+                devices: self.device_filter.clone(),
                 force_prices: false,
                 force_views,
                 prev_cube,
@@ -2381,11 +2760,17 @@ impl Shell {
     /// ledger, as a one-row-page query.
     fn refresh_views(&mut self, context: &ComponentContext<Self>, filters_changed: bool) {
         let (apps, models) = (self.app_filter.clone(), self.model_filter.clone());
+        let devices = self.device_filter.clone();
         let range = self.range;
         let t_fold = std::time::Instant::now();
         let applied = self.snap.as_mut().is_some_and(|s| {
-            let ok =
-                s.vm.apply_cube(&s.cube, range, apps.as_deref(), models.as_deref());
+            let ok = s.vm.apply_cube_for(
+                &s.cube,
+                range,
+                apps.as_deref(),
+                models.as_deref(),
+                devices.as_deref(),
+            );
             if ok && filters_changed {
                 s.detail.total = s.cube.event_count(apps.as_deref(), models.as_deref());
             }
@@ -2498,6 +2883,46 @@ impl Shell {
     /// Kick a light table query for a lazy page. One in flight per page; a
     /// request that arrives meanwhile re-runs once on completion, so the
     /// table always ends up reflecting the newest ledger state.
+    fn load_devices(&self, context: &ComponentContext<Self>) {
+        context.spawn_background(|_| {
+            power::worker("gtt-peers");
+            Msg::DevicesLoaded(devices::load(&db_path()))
+        });
+    }
+
+    fn load_viewers(&self, context: &ComponentContext<Self>) {
+        context.spawn_background(|_| {
+            power::worker("gtt-viewers");
+            Msg::ViewersLoaded(devices::viewers(&db_path()))
+        });
+    }
+
+    /// Pull paired devices in the background (one at a time; nothing to do
+    /// without paired devices).
+    fn sync_peers(&mut self, if_due: bool, context: &ComponentContext<Self>) {
+        let has_peers = self.devices.as_ref().is_some_and(|d| !d.peers.is_empty());
+        if self.peer_syncing || !has_peers {
+            return;
+        }
+        self.peer_syncing = true;
+        context.spawn_background(move |_| {
+            power::worker("gtt-peer-sync");
+            Msg::PeersSynced(devices::sync(&db_path(), if_due))
+        });
+    }
+
+    /// The statistics device scope changed: persist it and re-fold.
+    fn set_device_filter(&mut self, filter: Option<Vec<String>>, context: &ComponentContext<Self>) {
+        if filter == self.device_filter {
+            return;
+        }
+        self.device_filter = filter;
+        self.config.devices = self.device_filter.clone();
+        self.config.save();
+        self.filter_gen += 1;
+        self.refresh_views(context, true);
+    }
+
     fn load_page_data(&mut self, page: Page, context: &ComponentContext<Self>) {
         let Some(slot) = lazy_slot(page) else {
             return;

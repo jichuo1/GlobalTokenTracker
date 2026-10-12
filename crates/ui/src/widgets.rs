@@ -19,6 +19,7 @@ pub const OVERVIEW_WIDGETS: &[(&str, &str, Symbol)] = &[
     ("heat", "活跃热力图", Symbol::Calendar),
     ("share", "占比分布", Symbol::AllApps),
     ("apps", "本周 · 按工具", Symbol::List),
+    ("devices", "按设备", Symbol::Remote),
     ("quotas", "订阅配额", Symbol::Clock),
     ("unpriced", "未计价提示", Symbol::Important),
 ];

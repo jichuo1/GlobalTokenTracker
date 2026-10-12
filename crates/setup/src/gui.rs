@@ -1523,7 +1523,9 @@ fn start_work(hwnd: HWND) {
         let log = |_msg: String| {};
         let res = match mode {
             Mode::Install => {
-                install_steps(&dir, want_shortcut, want_path, &mut step, &log).map(|()| {
+                // The GUI always offers the LAN-sharing firewall rules (one
+                // UAC prompt when they are missing; declining is fine).
+                install_steps(&dir, want_shortcut, want_path, true, &mut step, &log).map(|()| {
                     // Update that moved dirs — retire the old program dir.
                     if let Some(old) = &prior_dir {
                         crate::cleanup_prior_install(old, &dir, &log);

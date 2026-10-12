@@ -73,6 +73,12 @@ pub struct UiConfig {
     pub trend_line: bool,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
+    /// LAN devices included in the statistics (device ids); `None` = all
+    /// devices, `Some(empty)` = deliberately empty view.
+    pub devices: Option<Vec<String>>,
+    /// Share this PC on the LAN (TLS + mDNS) while the app runs. Off by
+    /// default; re-started at launch when on.
+    pub share_lan: bool,
 }
 
 fn default_true() -> bool {
@@ -102,6 +108,8 @@ impl Default for UiConfig {
             heat_metric: "tokens".into(),
             trend_line: false,
             pages: BTreeMap::new(),
+            devices: None,
+            share_lan: false,
         }
     }
 }
@@ -221,5 +229,19 @@ mod tests {
         };
         let back: UiConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert!(back.trend_line);
+    }
+
+    #[test]
+    fn lan_settings_default_off_and_round_trip() {
+        let old: UiConfig = serde_json::from_str("{\"range\":\"week\"}").unwrap();
+        assert!(!old.share_lan && old.devices.is_none());
+        let c = UiConfig {
+            share_lan: true,
+            devices: Some(vec!["abc".into()]),
+            ..Default::default()
+        };
+        let back: UiConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(back.share_lan);
+        assert_eq!(back.devices, Some(vec!["abc".to_string()]));
     }
 }

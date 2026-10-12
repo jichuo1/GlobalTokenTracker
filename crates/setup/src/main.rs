@@ -62,6 +62,118 @@ fn ps(script: &str) -> Result<std::process::Output> {
         .context("spawn powershell")
 }
 
+/// Windows Firewall rules for LAN sharing (TCP 4319 serve, UDP 5353 mDNS):
+/// inbound, **Private profile only** (never Public / Domain), scoped to our
+/// own executables, all in one group so uninstall can drop them together.
+const FW_GROUP: &str = "GlobalTokenTracker LAN sharing";
+
+/// The PowerShell that (re)creates the rules for the programs in `dest`.
+fn firewall_add_script(dest: &Path) -> String {
+    use std::fmt::Write as _;
+    let exe = |name: &str| dest.join(name).display().to_string().replace('\'', "''");
+    let mut script = format!(
+        "$g='{FW_GROUP}'; Remove-NetFirewallRule -Group $g -ErrorAction SilentlyContinue; "
+    );
+    for program in [
+        exe("globaltokentracker-ui.exe"),
+        exe("globaltokentracker-cli.exe"),
+    ] {
+        for (proto, port, what) in [("TCP", 4319, "sharing"), ("UDP", 5353, "discovery")] {
+            let _ = write!(
+                script,
+                "New-NetFirewallRule -DisplayName 'GlobalTokenTracker LAN {what} ({proto} {port})' \
+                 -Group $g -Direction Inbound -Action Allow -Protocol {proto} -LocalPort {port} \
+                 -Profile Private -Program '{program}' | Out-Null; "
+            );
+        }
+    }
+    script
+}
+
+fn firewall_remove_script() -> String {
+    format!("Remove-NetFirewallRule -Group '{FW_GROUP}' -ErrorAction SilentlyContinue")
+}
+
+/// Standard base64 (for `powershell -EncodedCommand`, which takes UTF-16LE).
+fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            out.push(if i <= c.len() {
+                T[((n >> shift) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+fn encoded_command(script: &str) -> String {
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64(&utf16)
+}
+
+/// Rules of our group exist (reading needs no elevation).
+fn firewall_rules_present() -> bool {
+    ps(&format!(
+        "@(Get-NetFirewallRule -Group '{FW_GROUP}' -ErrorAction SilentlyContinue).Count"
+    ))
+    .is_ok_and(|o| {
+        o.status.success()
+            && String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .is_ok_and(|n| n > 0)
+    })
+}
+
+/// Run `script` elevated (one UAC prompt) and wait for it.
+fn ps_elevated(script: &str) -> Result<()> {
+    let out = ps(&format!(
+        "Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden \
+         -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','{}')",
+        encoded_command(script)
+    ))?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// Add the LAN-sharing firewall rules unless present. Needs admin: a
+/// declined UAC prompt is logged, never fatal (Windows then asks on first
+/// use instead).
+fn ensure_firewall_rules(dest: &Path, log: &dyn Fn(String)) {
+    if firewall_rules_present() {
+        log("局域网共享防火墙规则已就位（仅专用网络）".into());
+        return;
+    }
+    log("添加局域网共享防火墙规则（仅专用网络，需要管理员确认）…".into());
+    match ps_elevated(&firewall_add_script(dest)) {
+        Ok(()) if firewall_rules_present() => {
+            log("已添加防火墙规则：TCP 4319、UDP 5353，仅专用网络".into());
+        }
+        Ok(()) => log("未添加防火墙规则（未获管理员授权）；开启共享时 Windows 会再次询问".into()),
+        Err(e) => log(format!("未添加防火墙规则：{e:#}")),
+    }
+}
+
+fn remove_firewall_rules(log: &dyn Fn(String)) {
+    if !firewall_rules_present() {
+        return;
+    }
+    match ps_elevated(&firewall_remove_script()) {
+        Ok(()) if !firewall_rules_present() => log("已移除局域网共享防火墙规则".into()),
+        Ok(()) => log("防火墙规则未移除（未获管理员授权）".into()),
+        Err(e) => log(format!("防火墙规则未移除：{e:#}")),
+    }
+}
+
 fn winapp_runtime_present() -> bool {
     ps("Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime*' | Select-Object -First 1 -ExpandProperty Name")
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
@@ -466,6 +578,7 @@ pub fn install_steps(
     dest: &Path,
     want_shortcut: bool,
     want_path: bool,
+    want_firewall: bool,
     step: &mut dyn FnMut(u32, &str),
     log: &dyn Fn(String),
 ) -> Result<()> {
@@ -493,6 +606,10 @@ pub fn install_steps(
     if want_path {
         step(90, "加入用户 PATH…");
         extend_user_path(dest, log);
+    }
+    if want_firewall {
+        step(95, "配置局域网共享防火墙规则…");
+        ensure_firewall_rules(dest, log);
     }
     step(100, "安装完成");
     log(format!("程序目录 : {}", dest.display()));
@@ -626,6 +743,8 @@ pub fn uninstall_steps(
     let _ = hkcu.delete_subkey_all(UNINSTALL_KEY);
     step(75, "清理用户 PATH…");
     remove_user_path(dest, log);
+    step(85, "移除局域网共享防火墙规则…");
+    remove_firewall_rules(log);
     if purge_data {
         step(90, "删除用户数据…");
         let profile = env::var_os("USERPROFILE").map(PathBuf::from);
@@ -745,6 +864,9 @@ fn usage() {
     println!("                                             静默命令行安装/卸载");
     println!("  globaltokentracker-setup --cli               强制命令行模式");
     println!("  globaltokentracker-setup --quiet --launch    静默安装后启动程序");
+    println!(
+        "  globaltokentracker-setup --quiet --firewall  同时添加局域网共享防火墙规则（仅专用网络，需要管理员确认）"
+    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -753,6 +875,7 @@ fn main() -> Result<()> {
     let mut quiet = false;
     let mut force_cli = false;
     let mut launch = false;
+    let mut firewall = false;
     let mut help = false;
     let mut dir: Option<String> = None;
     let mut it = env::args().skip(1);
@@ -763,6 +886,7 @@ fn main() -> Result<()> {
             "--quiet" | "-q" => quiet = true,
             "--cli" => force_cli = true,
             "--launch" => launch = true,
+            "--firewall" => firewall = true,
             "--dir" => match it.next() {
                 Some(d) if !d.starts_with("--") => dir = Some(d),
                 _ => {
@@ -838,7 +962,7 @@ fn main() -> Result<()> {
             Some((v, _)) => println!("{APP} v{v} → v{VER} —— 更新 {}", dest.display()),
             None => println!("{APP} {VER} 安装程序 —— 安装到 {}", dest.display()),
         }
-        install_steps(&dest, true, true, &mut step, &log)?;
+        install_steps(&dest, true, true, firewall, &mut step, &log)?;
         if let Some((_, old)) = &prior {
             cleanup_prior_install(old, &dest, &log);
         }
@@ -864,6 +988,34 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn firewall_rules_are_private_only_and_scoped_to_our_programs() {
+        let script = firewall_add_script(Path::new(r"C:\Users\o'neil\GTT"));
+        assert_eq!(script.matches("New-NetFirewallRule").count(), 4);
+        assert_eq!(script.matches("-Profile Private").count(), 4);
+        assert!(
+            !script.contains("Public") && !script.contains("Domain") && !script.contains("Any")
+        );
+        assert!(script.contains("-Protocol TCP -LocalPort 4319"));
+        assert!(script.contains("-Protocol UDP -LocalPort 5353"));
+        assert!(script.contains(r"C:\Users\o''neil\GTT\globaltokentracker-ui.exe"));
+        assert!(script.contains(r"globaltokentracker-cli.exe"));
+        assert!(script.starts_with("$g='GlobalTokenTracker LAN sharing'; Remove-NetFirewallRule"));
+        assert!(firewall_remove_script().contains("-Group 'GlobalTokenTracker LAN sharing'"));
+    }
+
+    #[test]
+    fn encoded_commands_are_utf16le_base64() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // `powershell -EncodedCommand` of "dir" (UTF-16LE).
+        assert_eq!(encoded_command("dir"), "ZABpAHIA");
+    }
+
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
     use winreg::RegKey;

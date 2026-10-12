@@ -94,6 +94,12 @@ pub fn tr(zh: &str) -> &str {
     if lang() == Lang::Zh {
         return zh;
     }
+    en(zh)
+}
+
+/// The English table behind `tr` — pure, so tests need not flip the global
+/// render locale.
+pub fn en(zh: &str) -> &str {
     match zh {
         // ---- nav & page titles
         "总览" => "Overview",
@@ -361,6 +367,157 @@ pub fn tr(zh: &str) -> &str {
         "记住我的选择" => "Remember my choice",
         "托盘图标不可用" => "Tray icon unavailable",
         "取消" => "Cancel",
+        // ---- LAN devices + sharing
+        "仅本机事件" => "This PC's events only",
+        "设备" => "Devices",
+        "设备筛选" => "Device filter",
+        "按设备" => "By device",
+        "{rl} · 按设备" => "{rl} · by device",
+        "本机" => "This PC",
+        "{}（本机）" => "{} (this PC)",
+        "{} · 已筛除" => "{} · filtered out",
+        "{} · 来自 {}" => "{} · from {}",
+        "部分设备可能重复计算了同一份用量——详见“设备”。" => {
+            "Some devices may count the same usage twice — see Devices."
+        }
+        "来自其他设备" => "From other devices",
+        "每个账号取最新的一条；额度绝不跨设备相加。" => {
+            "The newest report per account wins; quotas are never added up across devices."
+        }
+        "立即同步" => "Sync now",
+        "正在同步…" => "Syncing…",
+        "在“设置 → 局域网共享”中开启后，其他设备即可与本机配对并查看本机用量。" => {
+            "Turn on Settings → LAN sharing to let other devices pair with this PC and see its usage."
+        }
+        "设备 ID {}" => "Device ID {}",
+        "已配对的设备" => "Paired devices",
+        "尚未配对任何设备。在另一台设备上开始共享以获得配对码，然后在下方添加设备。" => {
+            "No paired devices yet. Start sharing on the other device to get a pairing code, then add it below."
+        }
+        "同步于 {}" => "Synced {}",
+        "尚未同步" => "Not synced yet",
+        "版本 {}" => "Version {}",
+        "计入" => "Include",
+        "忘记…" => "Forget…",
+        "忘记“{}”？" => "Forget “{}”?",
+        "忘记设备" => "Forget device",
+        "将从本机删除它已同步的用量。如需再次查看，请用新的配对码重新配对。" => {
+            "Its synced usage is removed from this PC. To see it again, pair with a new code."
+        }
+        "可能重复计算" => "Possible double counting",
+        "{} 与 {} 有 {} 天的 {} 用量完全相同，可能扫描了同一个同步文件夹；合计中两者仍都计入。" => {
+            "{} and {} match on {} days of {} usage — they may scan the same synced folder; totals still count both."
+        }
+        "添加设备" => "Add device",
+        "在另一台设备上开始共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。" => {
+            "Start sharing on the other device. It shows a six-digit code that is valid for two minutes and works once."
+        }
+        "配对码" => "Pairing code",
+        "配对" => "Pair",
+        "正在配对…" => "Pairing…",
+        "已与 {} 配对" => "Paired with {}",
+        "附近" => "Nearby",
+        "查找设备" => "Find devices",
+        "正在查找设备…" => "Looking for devices…",
+        "其身份与该 ID 的已配对设备不一致——拉取将被拒绝。" => {
+            "Its identity differs from the paired device with this ID — pulls will be refused."
+        }
+        "另一台设备使用了相同的 ID（账本被复制过？）。" => {
+            "Another device uses the same ID (a copied ledger?)."
+        }
+        "已配对" => "Paired",
+        "用此地址配对" => "Use this address",
+        "选择“查找设备”以搜索此网络中正在共享的 GlobalTokenTracker 设备。" => {
+            "Choose Find devices to look for GlobalTokenTracker devices sharing on this network."
+        }
+        "没有列出？访客 Wi-Fi、VLAN 和客户端隔离会阻止发现——请改用地址添加设备，例如 192.168.1.20:4319。" => {
+            "Not listed? Guest Wi-Fi, VLANs and client isolation block discovery — add the device by its address instead, e.g. 192.168.1.20:4319."
+        }
+        "设备之间只共享按小时汇总的用量，从不共享提示词、会话、项目或路径。额度按账号计算，绝不跨设备相加。" => {
+            "Devices share hourly totals only — never prompts, sessions, projects or paths. Quotas are per account and never added up across devices."
+        }
+        "局域网共享" => "LAN sharing",
+        "共享本机用量" => "Share this PC's usage",
+        "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）" => {
+            "Paired devices on this network can read this PC's hourly usage totals (TLS-encrypted, pairing code required)"
+        }
+        "正在启动或停止共享…" => "Starting or stopping sharing…",
+        "共享失败：{}" => "Sharing failed: {}",
+        "本机地址" => "This PC's address",
+        "在另一台设备的“设备 → 添加设备”中填写此地址" => {
+            "Enter this address under Devices → Add device on the other device"
+        }
+        "本机 IP:{}" => "this PC's IP:{}",
+        "有效至 {}" => "valid until {}",
+        "新配对码" => "New code",
+        "生成配对码" => "Create a pairing code",
+        "2 分钟内有效，只能使用一次；连续输错 5 次后作废" => {
+            "Valid for two minutes and works once; five wrong tries void it"
+        }
+        "证书指纹 {}…（对方配对后固定此身份）" => {
+            "Certificate fingerprint {}… (paired devices pin this identity)"
+        }
+        "已配对的查看方" => "Paired viewers",
+        "撤销后立即失效，需重新配对才能再次查看" => {
+            "Revoked viewers lose access at once and must pair again"
+        }
+        "撤销" => "Revoke",
+        "配对于 {} · 最近访问 {}" => "Paired {} · last seen {}",
+        "Windows 防火墙只应对“专用”网络放行 TCP 4319 与 UDP 5353；安装程序会添加对应规则（需要管理员确认）。" => {
+            "Windows Firewall should allow TCP 4319 and UDP 5353 on Private networks only; the installer adds these rules (with administrator approval)."
+        }
+        "配对码为 6 位数字。" => "The pairing code is six digits.",
+        "配对码不匹配。请在另一台设备上生成新的配对码后重试。" => {
+            "The code didn't match. Show a new code on the other device and try again."
+        }
+        "此配对码已失败过一次。请在另一台设备上生成新的配对码。" => {
+            "This code already failed once. Show a new code on the other device."
+        }
+        "配对码已过期。请在另一台设备上生成新的配对码。" => {
+            "The code expired. Show a new code on the other device."
+        }
+        "另一台设备当前没有有效的配对码。" => {
+            "The other device has no active pairing code."
+        }
+        "尝试次数过多。请稍等几秒再试。" => {
+            "Too many attempts. Wait a few seconds, then try again."
+        }
+        "另一台设备正在与其他设备配对，请稍后再试。" => {
+            "The other device is pairing with someone else. Try again shortly."
+        }
+        "这是本机。" => "That's this PC.",
+        "配对中断，请重试。" => "Pairing was interrupted. Try again.",
+        "该设备未通过安全连接共享。" => {
+            "That device isn't sharing over a secure connection."
+        }
+        "无法连接该设备。请检查地址，并确认它正在共享。" => {
+            "Couldn't reach the device. Check the address and that it is sharing."
+        }
+        "无法与该设备建立安全连接。" => {
+            "Couldn't set up a secure connection to the device."
+        }
+        "此地址上响应的是另一台设备，其身份与已配对的设备不符。" => {
+            "A different device answered at this address. Its identity doesn't match the paired one."
+        }
+        "该设备已不再接受本机，请重新配对。" => {
+            "The device no longer accepts this PC. Pair again."
+        }
+        "未配对。" => "Not paired.",
+        "网络中只允许安全连接。" => {
+            "Only secure connections are allowed on the network."
+        }
+        "该设备响应超时。" => "The device took too long to answer.",
+        "同步失败。" => "Sync failed.",
+        "该设备未配对。" => "That device isn't paired.",
+        "有多台设备匹配。" => "More than one device matches.",
+        "找不到该查看方。" => "No such viewer.",
+        "该设备已关闭外部接口。" => {
+            "The external interface is turned off on that device."
+        }
+        "该设备的账本正忙，请稍后再试。" => {
+            "The device's ledger is busy. Try again shortly."
+        }
+        "该设备运行的版本不兼容。" => "That device runs an incompatible version.",
         _ => zh,
     }
 }

@@ -21,7 +21,7 @@ globaltokentracker-cli peer pull "书房 Mac" --endpoint days --no-discover   # 
 globaltokentracker-cli peer forget "书房 Mac"
 ```
 
-局域网共享默认关闭：GTT 应用本身不启动对等服务，只有手动运行 `peer serve` 才会监听；默认地址是回环 `127.0.0.1:4319`。绑定任何非回环地址（包括 `0.0.0.0`）时必须使用 TLS，`--plaintext` 只允许回环地址，否则在绑定前就拒绝启动。
+局域网共享默认关闭：只有手动运行 `peer serve`，或在 Windows 应用“设置 → 局域网共享”中开启（`peer::share::Sharing`，绑定 `0.0.0.0:4319`、TLS、mDNS 通告，开关状态记在 `ui.json`，下次启动时恢复）才会监听；CLI 默认地址是回环 `127.0.0.1:4319`。应用内共享会显示本机地址、当前配对码（可换新码）与已配对的查看方（可撤销）；FFI 提供同样的 `share_start/share_stop/share_status/share_new_code/revoke` 操作。绑定任何非回环地址（包括 `0.0.0.0`）时必须使用 TLS，`--plaintext` 只允许回环地址，否则在绑定前就拒绝启动。
 
 每个账本在打开（迁移）时于 `app_state` 中生成一次稳定的 `device_id`（`peer.device_id.v1`），它也是设备维度中“本机”的键；`serve` 启动时用常规读写方式打开账本，`--name` 存为 `peer.device_name.v1`；未指定名称时依次取 `COMPUTERNAME`、`HOSTNAME`，否则为 `GTT-<device_id 前 6 位>`。此后每个数据请求都用 SQLite 只读连接与单个读事务读取同一 WAL 快照，协议读路径从不写账本。服务端的配对与授权状态不写账本，单独保存在 `peer.db`；查看方的已配对设备登记在账本 `peers` 表（见“查看方存储与同步”）。
 
@@ -82,7 +82,7 @@ TXT 记录只有四项，不含任何用量信息：
 **平台说明**：
 
 - macOS：未来的 App 需在 Info.plist 中声明 `NSLocalNetworkUsageDescription` 与 `NSBonjourServices`（`_gtt._tcp`），已加入 `macos/Resources/Info.plist` 及中英文 `InfoPlist.strings`。未获“本地网络”权限的进程发往局域网的数据（含 mDNS 组播）会被系统以 “No route to host” 拒绝，只剩回环可用；从终端运行 CLI 时，权限归属于启动它的终端类 App，需在“系统设置 › 隐私与安全性 › 本地网络”中允许。应用防火墙开启时，还需允许其接收传入连接。
-- Windows：只应为“专用”网络配置文件放行 TCP 4319 与 UDP 5353（mDNS），不要放行“公用”配置文件；安装程序暂未自动添加规则。
+- Windows：只应为“专用”网络配置文件放行 TCP 4319 与 UDP 5353（mDNS），不要放行“公用”配置文件。安装程序在规则缺失时添加一组入站规则（组名 `GlobalTokenTracker LAN sharing`，仅 `Private` 配置文件，限定 `globaltokentracker-ui.exe` 与 `globaltokentracker-cli.exe`），需要一次管理员确认；拒绝不影响安装，开启共享时 Windows 会再次询问。静默安装需加 `--firewall` 才添加。卸载时整组移除。
 
 ## 查看方存储与同步
 
