@@ -1,5 +1,9 @@
+use super::keys::{DeviceKey, peer_dir};
+use super::net::{Stream, Wire};
 use super::server::{self, ServerState};
+use super::trust::TrustStore;
 use super::*;
+use super::{client, pairing};
 use crate::Cube;
 use crate::model::{CostSource, Provenance, QuotaSnapshot, UsageEvent};
 use crate::store::{AppSummary, ShareRow, Totals};
@@ -8,7 +12,9 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 const HOUR_MS: i64 = 3_600_000;
@@ -21,18 +27,22 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        for ext in ["db", "db-wal", "db-shm"] {
-            let _ = std::fs::remove_file(self.path.with_extension(ext));
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
 
 fn fixture() -> Fixture {
-    let path = std::env::temp_dir().join(format!(
-        "gtt-peer-{}-{}.db",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
+    // One directory per fixture: the peer directory sits next to the ledger.
+    let path = std::env::temp_dir()
+        .join(format!(
+            "gtt-peer-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+        .join("ledger.db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let store = Store::open(&path).unwrap();
     let identity = ensure_identity(&store, Some("test-mac")).unwrap();
     Fixture {
@@ -365,11 +375,11 @@ fn fingerprints_track_updates_deletes_and_drive_incremental_pulls() {
             ))
             .unwrap();
     }
-    let hello: Hello =
-        serde_json::from_value(respond(&f.path, &f.identity, 1, &Request::Hello)).unwrap();
-    assert_eq!(hello.fingerprints.len(), 3);
-    assert_eq!(hello.device_id, f.identity.device_id);
-    let known = hello.fingerprints.clone();
+    let days: Days =
+        serde_json::from_value(respond(&f.path, &f.identity, 1, &Request::Days)).unwrap();
+    assert_eq!(days.fingerprints.len(), 3);
+    assert_eq!(days.device_id, f.identity.device_id);
+    let known = days.fingerprints.clone();
     let full = full_summary(&f);
     let from_full: BTreeMap<_, _> = full
         .days
@@ -505,6 +515,7 @@ fn output_never_carries_projects_sessions_or_raw_refs() {
     let mut all = String::new();
     for r in [
         Request::Hello,
+        Request::Days,
         Request::Summary(SummaryQuery::default()),
         Request::Quotas,
         Request::Sources,
@@ -563,37 +574,78 @@ fn unknown_versions_and_missing_ledgers_fail_with_fixed_codes() {
     assert!(!missing.exists(), "the read path never creates a ledger");
 }
 
-fn start_server(f: &Fixture) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+/// Start a server for `f` on an ephemeral loopback port. `tls` = with the
+/// fixture's device key (created on first use).
+fn start(f: &Fixture, tls: bool) -> (std::net::SocketAddr, Arc<ServerState>) {
+    let key = tls.then(|| DeviceKey::load_or_create(&peer_dir(&f.path)).unwrap());
+    let state =
+        Arc::new(ServerState::new(f.path.clone(), f.identity.clone(), key.as_ref()).unwrap());
+    let listener = server::bind("127.0.0.1:0", tls).unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = ServerState {
-        db: f.path.clone(),
-        identity: f.identity.clone(),
-    };
-    std::thread::spawn(move || server::serve(&listener, state));
-    addr
+    let serving = Arc::clone(&state);
+    std::thread::spawn(move || server::serve(&listener, serving));
+    (addr, state)
 }
 
 fn raw(addr: std::net::SocketAddr, request: &[u8]) -> String {
     let mut s = TcpStream::connect(addr).unwrap();
-    s.set_read_timeout(Some(std::time::Duration::from_secs(15)))
-        .unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
     let _ = s.write_all(request);
     let mut out = String::new();
     let _ = s.read_to_string(&mut out);
     out
 }
 
+/// Plaintext GET → (status, JSON body).
+fn get(addr: std::net::SocketAddr, target: &str, token: Option<&str>) -> (u16, Value) {
+    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let r = raw(
+        addr,
+        format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\n{auth}\r\n").as_bytes(),
+    );
+    let (head, body) = r.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, serde_json::from_str(body).unwrap())
+}
+
+fn code_of(v: &Value) -> Option<&str> {
+    v["error"]["code"].as_str()
+}
+
 #[test]
 fn server_serves_get_and_rejects_everything_else() {
     let f = fixture();
     fill(&f.store);
-    let addr = start_server(&f);
+    let (addr, _) = start(&f, false);
+    let token = pairing::new_token().unwrap();
+    TrustStore::open(&peer_dir(&f.path))
+        .unwrap()
+        .add_viewer("local", &token, now_ms())
+        .unwrap();
+    let tok = Some(token.as_str());
 
-    let (status, hello) = server::pull(&addr.to_string(), 1, "hello", "").unwrap();
+    // `hello` is public and minimal: identity only, nothing from the ledger.
+    let (status, hello) = get(addr, "/peer/v1/hello", None);
     assert_eq!(status, 200);
     assert_eq!(hello["device_name"], "test-mac");
-    let known = hello["fingerprints"].as_object().unwrap();
+    assert!(hello.get("fingerprints").is_none() && hello.get("schema_version").is_none());
+
+    // Everything else needs the bearer token.
+    for ep in ["days", "summary", "quotas", "sources"] {
+        let (status, v) = get(addr, &format!("/peer/v1/{ep}"), None);
+        assert_eq!((status, code_of(&v)), (401, Some("auth_required")), "{ep}");
+        let (status, v) = get(addr, &format!("/peer/v1/{ep}"), Some(&"0".repeat(64)));
+        assert_eq!((status, code_of(&v)), (401, Some("auth_invalid")), "{ep}");
+        assert_eq!(get(addr, &format!("/peer/v1/{ep}"), tok).0, 200, "{ep}");
+    }
+    let r = raw(
+        addr,
+        format!("GET /peer/v1/days HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes(),
+    );
+    assert!(r.contains("WWW-Authenticate: Bearer\r\n"), "{r}");
+
+    let (_, days) = get(addr, "/peer/v1/days", tok);
+    let known = days["fingerprints"].as_object().unwrap();
     let q = SummaryQuery {
         from: None,
         known: known
@@ -601,29 +653,29 @@ fn server_serves_get_and_rejects_everything_else() {
             .map(|(k, v)| (k.clone(), v.as_str().unwrap().into()))
             .collect(),
     };
-    let (status, s) =
-        server::pull(&format!("http://{addr}/"), 1, "summary", &q.to_query()).unwrap();
+    let (status, s) = get(addr, &format!("/peer/v1/summary?{}", q.to_query()), tok);
     assert_eq!(status, 200);
     assert_eq!(s["days"].as_array().unwrap().len(), 0);
     assert_eq!(s["unchanged"].as_u64().unwrap() as usize, known.len());
-    for ep in ["quotas", "sources"] {
-        assert_eq!(server::pull(&addr.to_string(), 1, ep, "").unwrap().0, 200);
-    }
 
-    let (status, v) = server::pull(&addr.to_string(), 2, "hello", "").unwrap();
+    let (status, v) = get(addr, "/peer/v2/hello", None);
     assert_eq!(
-        (status, v["error"]["code"].as_str()),
+        (status, code_of(&v)),
         (400, Some("unsupported_protocol_version"))
     );
-    let (status, v) = server::pull(&addr.to_string(), 1, "events", "").unwrap();
-    assert_eq!(
-        (status, v["error"]["code"].as_str()),
-        (404, Some("unknown_endpoint"))
+    let (status, v) = get(addr, "/peer/v1/events", tok);
+    assert_eq!((status, code_of(&v)), (404, Some("unknown_endpoint")));
+    let (status, v) = get(addr, "/peer/v1/summary?known=nope", tok);
+    assert_eq!((status, code_of(&v)), (400, Some("invalid_request")));
+    // Pairing never runs without TLS.
+    let r = raw(
+        addr,
+        format!("GET /peer/v1/pair?name=x HTTP/1.1\r\nHost: {addr}\r\nUpgrade: gtt-pair/1\r\n\r\n")
+            .as_bytes(),
     );
-    let (status, v) = server::pull(&addr.to_string(), 1, "summary", "known=nope").unwrap();
-    assert_eq!(
-        (status, v["error"]["code"].as_str()),
-        (400, Some("invalid_request"))
+    assert!(
+        r.starts_with("HTTP/1.1 403 ") && r.contains("tls_required"),
+        "{r}"
     );
 
     for method in ["POST", "PUT", "DELETE", "HEAD", "OPTIONS"] {
@@ -664,6 +716,346 @@ fn server_serves_get_and_rejects_everything_else() {
     // A head that never ends is cut off once it exceeds the limit too.
     let r = raw(addr, &vec![b'G'; server::MAX_HEAD + 4096]);
     assert!(r.starts_with("HTTP/1.1 431 "), "{r}");
+}
+
+#[test]
+fn plaintext_is_refused_off_loopback() {
+    assert!(server::bind("0.0.0.0:0", false).is_err());
+    assert!(server::bind("127.0.0.1:0", false).is_ok());
+    assert!(server::bind("0.0.0.0:0", true).is_ok());
+    // A plaintext state handed a non-loopback listener refuses to serve.
+    let f = fixture();
+    let state = Arc::new(ServerState::new(f.path.clone(), f.identity.clone(), None).unwrap());
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    assert!(server::serve(&listener, state).is_err());
+    // …and the client never sends plaintext (or a token) off loopback.
+    let target = client::resolve("192.0.2.1:4319").unwrap();
+    assert_eq!(
+        client::connect(target, None).err(),
+        Some("plaintext_not_allowed")
+    );
+}
+
+#[test]
+fn device_key_is_stable_and_owner_only() {
+    let f = fixture();
+    let dir = peer_dir(&f.path);
+    let a = DeviceKey::load_or_create(&dir).unwrap();
+    let b = DeviceKey::load_or_create(&dir).unwrap();
+    assert_eq!(a.fingerprint, b.fingerprint);
+    assert_eq!(a.fingerprint.len(), 64);
+    TrustStore::open(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        for file in ["device-key.der", "device-cert.der", "peer.db"] {
+            assert_eq!(mode(&dir.join(file)), 0o600, "{file}");
+        }
+    }
+}
+
+#[test]
+fn pairing_happy_path_pins_and_authorizes() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let viewer = fixture();
+    let (addr, state) = start(&server_f, true);
+    let fp = state.identity.fingerprint.clone().unwrap();
+
+    // Before pairing: only `hello`, which proves the certificate it claims.
+    let (status, hello) = client::pull(&viewer.path, &addr.to_string(), false, 1, "hello", "")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (status, hello["fingerprint"].as_str()),
+        (200, Some(fp.as_str()))
+    );
+    assert_eq!(
+        client::pull(&viewer.path, &addr.to_string(), false, 1, "summary", "").unwrap(),
+        Err("not_paired")
+    );
+
+    let code = state.issue_code().unwrap();
+    let peer = pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.fingerprint, fp);
+    assert_eq!(peer.device_name, "test-mac");
+    assert_eq!(peer.device_id, server_f.identity.device_id);
+    let viewers = TrustStore::open(&state.peer_dir)
+        .unwrap()
+        .viewers()
+        .unwrap();
+    assert_eq!(viewers.len(), 1);
+    assert_eq!(viewers[0].name, "Laptop");
+
+    // Pull by device name and by address; both use the pin and token.
+    for target in ["test-mac", &addr.to_string()] {
+        let (status, s) = client::pull(&viewer.path, target, false, 1, "summary", "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, 200, "{s}");
+        assert!(!s["days"].as_array().unwrap().is_empty());
+    }
+    let seen = TrustStore::open(&state.peer_dir)
+        .unwrap()
+        .viewers()
+        .unwrap();
+    assert!(seen[0].last_seen_at.is_some());
+
+    // Single use: the same code cannot pair a second viewer.
+    let other = fixture();
+    assert_eq!(
+        pairing::pair(&other.path, &addr.to_string(), &code, "Other").unwrap(),
+        Err("pairing_unavailable")
+    );
+
+    // The server stores only the token's hash.
+    let hash = super::trust::token_hash(&peer.token);
+    let mut stored = Vec::new();
+    for entry in std::fs::read_dir(&state.peer_dir).unwrap() {
+        stored.extend(std::fs::read(entry.unwrap().path()).unwrap());
+    }
+    let stored = String::from_utf8_lossy(&stored);
+    assert!(!stored.contains(&peer.token), "token stored in clear");
+    assert!(stored.contains(&hash));
+
+    // Forgetting the device drops pin and token.
+    let trust = TrustStore::open(&peer_dir(&viewer.path)).unwrap();
+    assert!(trust.forget("test-mac").unwrap().is_some());
+    assert_eq!(
+        client::pull(&viewer.path, "test-mac", false, 1, "summary", "").unwrap(),
+        Err("not_paired")
+    );
+}
+
+#[test]
+fn revoked_tokens_fail_immediately() {
+    let server_f = fixture();
+    let viewer = fixture();
+    let (addr, state) = start(&server_f, true);
+    let code = state.issue_code().unwrap();
+    pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        client::pull(&viewer.path, "test-mac", false, 1, "sources", "")
+            .unwrap()
+            .unwrap()
+            .0,
+        200
+    );
+    let revoked = TrustStore::open(&state.peer_dir)
+        .unwrap()
+        .revoke("Laptop", now_ms())
+        .unwrap()
+        .unwrap();
+    assert!(revoked.revoked_at.is_some());
+    let (status, v) = client::pull(&viewer.path, "test-mac", false, 1, "sources", "")
+        .unwrap()
+        .unwrap();
+    assert_eq!((status, code_of(&v)), (401, Some("auth_invalid")));
+    // Revoking again finds nothing active.
+    assert!(
+        TrustStore::open(&state.peer_dir)
+            .unwrap()
+            .revoke("Laptop", now_ms())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn wrong_code_fails_backs_off_and_is_never_retried() {
+    let server_f = fixture();
+    let viewer = fixture();
+    let (addr, state) = start(&server_f, true);
+    let code = state.issue_code().unwrap();
+    let wrong = pairing::test_support::wrong_code(&code);
+    assert_eq!(
+        pairing::pair(&viewer.path, &addr.to_string(), &wrong, "Laptop").unwrap(),
+        Err("pairing_failed")
+    );
+    assert!(
+        TrustStore::open(&state.peer_dir)
+            .unwrap()
+            .viewers()
+            .unwrap()
+            .is_empty()
+    );
+    // The viewer refuses to reuse a code that failed.
+    assert_eq!(
+        pairing::pair(&viewer.path, &addr.to_string(), &wrong, "Laptop").unwrap(),
+        Err("pairing_code_reused")
+    );
+    // The server backs off after a failure …
+    assert_eq!(
+        pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop").unwrap(),
+        Err("pairing_locked")
+    );
+    // … and the right code still works once the back-off has passed.
+    std::thread::sleep(Duration::from_millis(1100));
+    assert!(
+        pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(
+        pairing::pair(&viewer.path, &addr.to_string(), "12345", "Laptop").unwrap(),
+        Err("invalid_code")
+    );
+}
+
+#[test]
+fn codes_expire_are_single_use_and_burn_after_five_failures() {
+    let t0 = Instant::now();
+    let mut p = pairing::Pairing::default();
+    assert_eq!(p.begin(t0), Err("pairing_unavailable"));
+    let code = p.issue(t0).unwrap();
+    assert!(pairing::valid_code(&code));
+    // One run at a time.
+    assert_eq!(p.begin(t0), Ok(code.clone()));
+    assert_eq!(p.begin(t0), Err("pairing_busy"));
+    p.finish(true, t0);
+    assert_eq!(p.begin(t0), Err("pairing_unavailable"), "single use");
+
+    p.issue(t0).unwrap();
+    assert_eq!(p.begin(t0 + pairing::CODE_TTL), Err("pairing_code_expired"));
+    assert_eq!(p.begin(t0 + pairing::CODE_TTL), Err("pairing_unavailable"));
+
+    // Each failure locks for 1, 2, 4, 8, 16 s; the fifth burns the code.
+    p.issue(t0).unwrap();
+    let mut now = t0;
+    let mut waits = Vec::new();
+    for _ in 0..pairing::MAX_FAILURES {
+        assert!(p.begin(now).is_ok());
+        p.finish(false, now);
+        assert_eq!(p.begin(now), Err("pairing_locked"));
+        let mut wait = Duration::ZERO;
+        while p.locked(now + wait) {
+            wait += Duration::from_millis(250);
+        }
+        waits.push(wait.as_secs());
+        now += wait;
+    }
+    assert_eq!(waits, [1, 2, 4, 8, 16]);
+    assert_eq!(p.begin(now), Err("pairing_unavailable"), "burned");
+    // A new code starts clean.
+    p.issue(now).unwrap();
+    assert!(p.begin(now).is_ok());
+}
+
+/// Accept one TLS connection with `attacker`'s certificate and relay the
+/// pairing exchange, message for message, to the real server — what a
+/// network interceptor without the code can do at best.
+fn relay(attacker: &DeviceKey, real: std::net::SocketAddr) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = attacker.server_config().unwrap();
+    std::thread::spawn(move || {
+        let (tcp, _) = listener.accept().unwrap();
+        let conn = rustls::ServerConnection::new(config).unwrap();
+        let mut down = Wire::new(Stream::TlsServer(Box::new(rustls::StreamOwned::new(
+            conn, tcp,
+        ))));
+        let verifier = super::keys::PinVerifier::new(None);
+        let mut up = client::connect(real, Some(&verifier)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let head = down.read_until(b"\r\n\r\n", 8192, deadline).unwrap();
+        up.stream.write_all(&head).unwrap();
+        up.stream.write_all(b"\r\n\r\n").unwrap();
+        let head = up.read_until(b"\r\n\r\n", 8192, deadline).unwrap();
+        down.stream.write_all(&head).unwrap();
+        down.stream.write_all(b"\r\n\r\n").unwrap();
+        // ns0 S→V, nv0 V→S, then per round c V→S, c S→V, n V→S, n S→V.
+        let mut script = vec![true, false];
+        for _ in 0..6 {
+            script.extend([false, true, false, true]);
+        }
+        script.push(true);
+        for from_server in script {
+            let (src, dst) = if from_server {
+                (&mut up, &mut down)
+            } else {
+                (&mut down, &mut up)
+            };
+            let Ok(line) = src.read_until(b"\n", 4096, deadline) else {
+                break;
+            };
+            let _ = dst.stream.write_all(&line);
+            let _ = dst.stream.write_all(b"\n");
+            let _ = dst.stream.flush();
+        }
+        down.stream.close(0);
+        up.stream.close(0);
+    });
+    addr
+}
+
+#[test]
+fn an_interceptor_certificate_can_neither_pair_nor_pull() {
+    let server_f = fixture();
+    let viewer = fixture();
+    let attacker_f = fixture();
+    let (addr, state) = start(&server_f, true);
+    let attacker = DeviceKey::load_or_create(&peer_dir(&attacker_f.path)).unwrap();
+    assert_ne!(
+        attacker.fingerprint,
+        state.identity.fingerprint.clone().unwrap()
+    );
+
+    // A relay that terminates TLS with its own certificate cannot complete
+    // pairing even when it forwards every message faithfully.
+    let code = state.issue_code().unwrap();
+    let mitm = relay(&attacker, addr);
+    assert_eq!(
+        pairing::pair(&viewer.path, &mitm.to_string(), &code, "Laptop").unwrap(),
+        Err("pairing_failed")
+    );
+    assert!(
+        TrustStore::open(&state.peer_dir)
+            .unwrap()
+            .viewers()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        TrustStore::open(&peer_dir(&viewer.path))
+            .unwrap()
+            .peers()
+            .unwrap()
+            .is_empty()
+    );
+
+    // A device that does not know the code cannot pair either.
+    let (fake_addr, fake) = start(&attacker_f, true);
+    fake.issue_code().unwrap();
+    let code = state.issue_code().unwrap();
+    assert_eq!(
+        pairing::pair(&viewer.path, &fake_addr.to_string(), &code, "Laptop").unwrap(),
+        Err("pairing_failed")
+    );
+
+    // After a genuine pairing, a different certificate at the saved address
+    // fails closed — no request (and no token) is sent.
+    let code = state.issue_code().unwrap();
+    let mut peer = pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+        .unwrap()
+        .unwrap();
+    peer.address = fake_addr.to_string();
+    TrustStore::open(&peer_dir(&viewer.path))
+        .unwrap()
+        .save_peer(&peer)
+        .unwrap();
+    for ep in ["hello", "summary"] {
+        assert_eq!(
+            client::pull(&viewer.path, "test-mac", false, 1, ep, "").unwrap(),
+            Err("peer_fingerprint_mismatch"),
+            "{ep}"
+        );
+    }
 }
 
 #[test]

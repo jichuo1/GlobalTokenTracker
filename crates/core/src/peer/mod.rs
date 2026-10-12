@@ -15,7 +15,12 @@
 //! `MODEL_EXPR` model identity and token semantics, pinned by the
 //! equivalence tests below.
 
+pub mod client;
+pub mod keys;
+mod net;
+pub mod pairing;
 pub mod server;
+pub mod trust;
 
 use crate::coordination::{ALLOWANCE_WINDOWS, columns, finite, label, opaque};
 use crate::cube::civil_date;
@@ -35,7 +40,9 @@ pub const BUCKET_MS: i64 = 3_600_000;
 pub const DAY_MS: i64 = 86_400_000;
 /// Day key of rows without `ts_start` (they count in unbounded totals only).
 pub const UNDATED: &str = "undated";
-pub const ENDPOINTS: [&str; 4] = ["hello", "summary", "quotas", "sources"];
+/// Data endpoints; all but `hello` need a bearer token. (`pair` is the
+/// pairing upgrade, not a data endpoint.)
+pub const ENDPOINTS: [&str; 5] = ["hello", "days", "summary", "quotas", "sources"];
 /// Upper bound of `known` fingerprints one summary request may carry.
 pub const MAX_KNOWN_DAYS: usize = 4096;
 const MAX_SOURCES: usize = 128;
@@ -115,6 +122,9 @@ pub fn failure(operation: &str, code: &str) -> Value {
 pub struct Identity {
     pub device_id: String,
     pub device_name: String,
+    /// SHA-256 of the device certificate — the trust identity peers pin.
+    /// Set by the server from its [`keys::DeviceKey`].
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,9 +133,20 @@ pub struct Hello {
     pub meta: Meta,
     pub device_id: String,
     pub device_name: String,
+    /// Certificate fingerprint the server claims. Over TLS the client checks
+    /// it equals the certificate actually presented.
+    pub fingerprint: Option<String>,
+    pub endpoints: Vec<String>,
+}
+
+/// Per-day fingerprints — what a viewer compares before pulling `summary`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Days {
+    #[serde(flatten)]
+    pub meta: Meta,
+    pub device_id: String,
     pub schema_version: Option<i64>,
     pub bucket_ms: i64,
-    pub endpoints: Vec<String>,
     /// UTC day (`YYYY-MM-DD` or `undated`) → content fingerprint.
     pub fingerprints: BTreeMap<String, String>,
 }
@@ -302,6 +323,7 @@ impl SummaryQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Hello,
+    Days,
     Summary(SummaryQuery),
     Quotas,
     Sources,
@@ -311,6 +333,7 @@ impl Request {
     pub fn operation(&self) -> &'static str {
         match self {
             Self::Hello => "hello",
+            Self::Days => "days",
             Self::Summary(_) => "summary",
             Self::Quotas => "quotas",
             Self::Sources => "sources",
@@ -328,6 +351,17 @@ pub fn respond(path: &Path, identity: &Identity, version: u32, request: &Request
     }
     if let Err(error) = crate::external_interface::check(path) {
         return failure(operation, error.code());
+    }
+    if *request == Request::Hello {
+        // Unauthenticated: identity only, no ledger access.
+        return serde_json::to_value(Hello {
+            meta: Meta::new("hello"),
+            device_id: identity.device_id.clone(),
+            device_name: identity.device_name.clone(),
+            fingerprint: identity.fingerprint.clone(),
+            endpoints: ENDPOINTS.iter().map(|e| (*e).to_string()).collect(),
+        })
+        .unwrap_or_else(|_| failure(operation, "ledger_unavailable"));
     }
     if !path.is_file() {
         return failure(operation, "ledger_missing");
@@ -359,7 +393,8 @@ fn project(
         r.and_then(|v| serde_json::to_value(v).map_err(|_| "ledger_unavailable"))
     }
     Ok(match request {
-        Request::Hello => json(hello(tx, identity)?),
+        Request::Hello => Err("ledger_unavailable"),
+        Request::Days => json(days(tx, identity)?),
         Request::Summary(query) => json(summary(tx, identity, query)?),
         Request::Quotas => json(quotas(tx, identity)?),
         Request::Sources => json(sources(tx, identity)?),
@@ -401,26 +436,22 @@ const USAGE_COLUMNS: &[&str] = &[
     "duration_ms",
 ];
 
-fn hello(tx: &Connection, identity: &Identity) -> rusqlite::Result<Result<Hello, &'static str>> {
-    let mut meta = Meta::new("hello");
+fn days(tx: &Connection, identity: &Identity) -> rusqlite::Result<Result<Days, &'static str>> {
+    if !columns(tx, "usage_events", USAGE_COLUMNS)? {
+        return Ok(Err("ledger_schema_unavailable"));
+    }
+    let mut meta = Meta::new("days");
     let mut warnings = Vec::new();
-    let fingerprints = if columns(tx, "usage_events", USAGE_COLUMNS)? {
-        scan_days(tx, None, &mut warnings)?
-            .into_values()
-            .map(|d| (d.day, d.fingerprint))
-            .collect()
-    } else {
-        warnings.push("summary_schema_unavailable");
-        BTreeMap::new()
-    };
+    let fingerprints = scan_days(tx, None, &mut warnings)?
+        .into_values()
+        .map(|d| (d.day, d.fingerprint))
+        .collect();
     meta.finish(warnings);
-    Ok(Ok(Hello {
+    Ok(Ok(Days {
         meta,
         device_id: identity.device_id.clone(),
-        device_name: identity.device_name.clone(),
         schema_version: schema_version(tx)?,
         bucket_ms: BUCKET_MS,
-        endpoints: ENDPOINTS.iter().map(|e| (*e).to_string()).collect(),
         fingerprints,
     }))
 }
@@ -771,6 +802,7 @@ pub fn ensure_identity(store: &Store, name: Option<&str>) -> anyhow::Result<Iden
     Ok(Identity {
         device_id,
         device_name,
+        fingerprint: None,
     })
 }
 
@@ -802,7 +834,7 @@ fn new_device_id() -> String {
 }
 
 /// A display name: trimmed, no control characters, at most 64 characters.
-fn clean_name(name: &str) -> Option<String> {
+pub(crate) fn clean_name(name: &str) -> Option<String> {
     let name: String = name
         .trim()
         .chars()
@@ -828,7 +860,7 @@ fn valid_fingerprint(fp: &str) -> bool {
 }
 
 /// Minimal `%XX` decoding (no `+`): the query alphabet here is ASCII.
-fn percent_decode(s: &str) -> Option<String> {
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -843,6 +875,65 @@ fn percent_decode(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// `%XX`-encode everything but unreserved ASCII.
+pub(crate) fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Every fixed error code of the protocol (server and client side).
+pub const ERROR_CODES: &[&str] = &[
+    "unsupported_protocol_version",
+    "external_interface_disabled",
+    "external_interface_settings_invalid",
+    "ledger_missing",
+    "ledger_busy",
+    "ledger_unavailable",
+    "ledger_schema_unavailable",
+    "invalid_request",
+    "unknown_endpoint",
+    "method_not_allowed",
+    "request_too_large",
+    "request_timeout",
+    "host_not_allowed",
+    "server_busy",
+    "auth_required",
+    "auth_invalid",
+    "auth_unavailable",
+    "tls_required",
+    "pairing_unavailable",
+    "pairing_code_expired",
+    "pairing_busy",
+    "pairing_locked",
+    "pairing_failed",
+    "pairing_aborted",
+    "pairing_refused",
+    "pairing_code_reused",
+    "invalid_code",
+    "not_paired",
+    "ambiguous_peer",
+    "connect_failed",
+    "tls_failed",
+    "plaintext_not_allowed",
+    "peer_fingerprint_mismatch",
+    "malformed_response",
+    "unknown_viewer",
+    "ambiguous_viewer",
+    "unknown_peer",
+];
+
+/// A remote string as one of [`ERROR_CODES`] — nothing else is echoed.
+pub(crate) fn known_code(code: &str) -> Option<&'static str> {
+    ERROR_CODES.iter().copied().find(|c| *c == code)
 }
 
 #[cfg(test)]

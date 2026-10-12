@@ -1,42 +1,75 @@
 # GTT 局域网对等接口 v1
 
-版本化只读 HTTP JSON 协议 `gtt.peer` 让同一局域网内的另一台 GTT 设备拉取本机的用量聚合，与自己的数据并列显示。对等方只交换紧凑聚合，不交换原始事件。本阶段（v1 第一期）只有核心协议与 CLI，便于无界面测试；设备配对、TLS 证书固定、mDNS `_gtt._tcp` 发现与 Mac/Windows 界面属于后续阶段。
+版本化只读 HTTP JSON 协议 `gtt.peer` 让同一局域网内的另一台 GTT 设备拉取本机的用量聚合，与自己的数据并列显示。对等方只交换紧凑聚合，不交换原始事件。目前有核心协议、设备身份、配对、TLS 与撤销，以及便于无界面测试的 CLI；mDNS `_gtt._tcp` 发现与 Mac/Windows 界面属于后续阶段。
 
 ## 调用与边界
 
 ```bash
-globaltokentracker-cli peer serve                       # 默认仅 127.0.0.1:4319
-globaltokentracker-cli peer serve --bind 0.0.0.0:4319 --name "书房 Mac"
-globaltokentracker-cli peer pull 192.168.1.20 --format json
-globaltokentracker-cli peer pull 192.168.1.20:4319 --endpoint summary --from 2026-10-01
-globaltokentracker-cli peer pull 192.168.1.20 --endpoint summary --known 2026-10-11:464b3b56aee976ad,2026-10-12:d7e0afe13358b2d7
-globaltokentracker-cli peer pull 192.168.1.20 --endpoint quotas
-globaltokentracker-cli --db <账本路径> peer serve
+# 被查看的设备（服务端）
+globaltokentracker-cli peer serve                                   # 默认仅 127.0.0.1:4319，TLS
+globaltokentracker-cli peer serve --bind 192.168.1.20:4319 --name "书房 Mac"
+globaltokentracker-cli peer list                                    # 已配对的查看方（及本机配对过的设备）
+globaltokentracker-cli peer revoke <查看方 id 或名称>
+
+# 查看方
+globaltokentracker-cli peer pair 192.168.1.20:4319 408036 --name "笔记本"
+globaltokentracker-cli peer pull "书房 Mac" --endpoint summary --from 2026-10-01
+globaltokentracker-cli peer pull 192.168.1.20 --endpoint hello      # 未配对时只能读 hello
+globaltokentracker-cli peer forget "书房 Mac"
 ```
 
-局域网暴露必须显式开启：`peer serve` 默认只监听回环 `127.0.0.1:4319`，只有 `--bind` 指定非回环地址才对网络可见，此时在 stderr 打印警告。v1 没有认证与加密，能连到该地址的设备都能读取聚合；请只在可信网络中使用，配对与 TLS 见后续阶段。
+局域网共享默认关闭：GTT 应用本身不启动对等服务，只有手动运行 `peer serve` 才会监听；默认地址是回环 `127.0.0.1:4319`。绑定任何非回环地址（包括 `0.0.0.0`）时必须使用 TLS，`--plaintext` 只允许回环地址，否则在绑定前就拒绝启动。
 
-`serve` 启动时是唯一的写入点：用常规读写方式打开账本（与 GUI 相同的迁移路径），在 `app_state` 中生成一次稳定的 `device_id`（`peer.device_id.v1`，32 位十六进制随机值），`--name` 存为 `peer.device_name.v1`。此后每个请求都用 SQLite 只读连接与单个读事务读取同一 WAL 快照，协议读路径从不写账本、不创建文件。未指定名称时依次取环境变量 `COMPUTERNAME`、`HOSTNAME`，否则为 `GTT-<device_id 前 6 位>`。
+`serve` 启动时用常规读写方式打开账本，在 `app_state` 中生成一次稳定的 `device_id`（`peer.device_id.v1`），`--name` 存为 `peer.device_name.v1`；未指定名称时依次取 `COMPUTERNAME`、`HOSTNAME`，否则为 `GTT-<device_id 前 6 位>`。此后每个数据请求都用 SQLite 只读连接与单个读事务读取同一 WAL 快照，协议读路径从不写账本。配对与授权状态不写账本，单独保存在 `peer.db`（见下文）。
 
-`pull` 的 stdout 只有一个 UTF-8 JSON 文档；连接失败或参数错误返回非零与 stderr。地址可带 `http://` 前缀，省略端口时用 4319。
+CLI 的 stdout 只有一个 UTF-8 JSON 文档。客户端侧失败（未配对、指纹不符、连接失败等）输出固定码的失败文档并以非零退出；服务端返回非 200 时也以非零退出。地址可带 `https://` 前缀，省略端口时用 4319。
+
+## 安全模型
+
+**设备身份**：首次 `serve`（非 `--plaintext`）生成长期 ECDSA P-256 密钥与自签名证书，保存在数据目录下的 `peer/`：`device-key.der`、`device-cert.der`。证书 DER 的 SHA-256（64 位小写十六进制）就是设备身份。Unix 上目录为 0700、文件为 0600；Windows 上依赖用户配置文件目录的默认 ACL。
+
+**TLS**：只启用 TLS 1.3（rustls + ring）。查看方不使用 CA 或 webpki 信任库，只接受配对时固定的那张证书（比较指纹），并照常校验 TLS 1.3 握手签名，证明对方持有私钥。指纹不符时在发出任何请求、令牌之前即失败，错误码 `peer_fingerprint_mismatch`。未配对时对任意证书只读 `hello`，并核对 `hello` 声称的指纹与实际证书一致。
+
+**配对**：服务端启动时在 stderr 打印 6 位一次性配对码，按回车可重新生成。配对码有效 120 秒，成功一次即作废；每次失败（含中途断开）退避 1、2、4、8、16 秒，第 5 次失败后作废，需重新生成。同一时刻只进行一个配对。
+
+配对在同一条 TLS 连接内进行：`GET /peer/v1/pair?name=<查看方名称>`，带 `Upgrade: gtt-pair/1`，服务端以 `101 Switching Protocols` 切换为逐行 JSON 消息。配对码不会以可离线验证的形式出现在线上：如果直接发送 `HMAC(配对码, 指纹)`，中间人拿到后可在毫秒内穷举 10⁶ 个码，再分别与两端完成配对。因此采用与蓝牙 Passkey Entry 相同的逐位承诺/揭示：
+
+```text
+T = SHA-256("gtt.peer/pair/v1" ‖ 证书指纹 ‖ 查看方名称 ‖ Ns₀ ‖ Nv₀)
+第 i 轮（i = 0‥5，dᵢ 为第 i 位数字）：
+  查看方 → 服务端  Cv = HMAC(Nvᵢ, "V" ‖ T ‖ i ‖ dᵢ)   查看方先承诺
+  服务端 → 查看方  Cs = HMAC(Nsᵢ, "S" ‖ T ‖ i ‖ dᵢ)   服务端承诺
+  查看方 → 服务端  Nvᵢ    服务端用自己的 dᵢ 验证 Cv，不符即失败
+  服务端 → 查看方  Nsᵢ    查看方用自己的 dᵢ 验证 Cs，不符即失败
+六轮全部通过后：服务端 → 查看方  {token, viewer_id, device_id, device_name, fingerprint}
+```
+
+每一方都在得知对方数字之前承诺、在对方承诺之后才揭示，主动中间人每转发一位都只能猜，任何一位猜错整次配对作废，总体成功概率约 10⁻⁶。`"V"/"S"` 角色标签防止把承诺原样反射回去；`T` 把配对绑定到查看方实际看到的证书，所以即使逐条忠实转发消息、但用自己证书终止 TLS 的中继也无法完成配对。查看方会记住失败过的配对码，10 分钟内拒绝再次使用（`pairing_code_reused`），因为失败可能意味着有人在截获，此时应在服务端按回车生成新码。
+
+**令牌与授权**：配对成功后服务端生成 256 位随机持有者令牌。服务端 `peer.db` 的 `viewers` 表只存令牌的 SHA-256、查看方 id 与名称、创建时间、最后访问时间（至多每分钟更新）、撤销时间，从不保存明文；比较对所有有效记录做常数时间比较，不提前退出。查看方 `peer.db` 的 `peers` 表保存固定的证书指纹、设备 id 与名称、地址、令牌（明文，用于出示）和配对/最后拉取时间。
+
+**撤销**：`peer revoke` 设置撤销时间；服务端每个请求都重新读取 `viewers` 表，被撤销的令牌下一次请求即返回 401 `auth_invalid`，无需重启。查看方 `peer forget` 删除本地的固定指纹与令牌。
+
+**回环明文**：`--plaintext` 仅用于本机调试，不能配对（`tls_required`），数据端点仍需令牌；客户端只向回环地址发送明文请求（`plaintext_not_allowed`）。
 
 ## HTTP 约束
 
 | 项 | 规则 |
 |---|---|
-| 路由 | `GET /peer/v{N}/{hello\|summary\|quotas\|sources}`；`N≠1` 返回 400 `unsupported_protocol_version`，不打开账本 |
+| 路由 | `GET /peer/v{N}/{hello\|days\|summary\|quotas\|sources\|pair}`；`N≠1` 返回 400 `unsupported_protocol_version`，不打开账本 |
+| 认证 | 除 `hello`、`pair` 外都需要 `Authorization: Bearer <令牌>`；缺失返回 401 `auth_required`，无效或已撤销返回 401 `auth_invalid`，均带 `WWW-Authenticate: Bearer` |
 | 方法 | 仅 GET；其他方法 405 + `Allow: GET` |
-| 请求头 | 请求行与头部合计 ≤ 64 KiB，超出 431 `request_too_large`；10 秒内必须发完，否则 408 `request_timeout` |
+| 请求头 | 请求行与头部合计 ≤ 64 KiB，超出 431 `request_too_large`；含 TLS 握手须在 10 秒内发完，否则 408 `request_timeout` |
 | 请求体 | 不允许；`Content-Length≠0` 或 `Transfer-Encoding` 返回 413 |
 | Host | 必须是 IP 字面量（可带端口）或 `localhost`，否则 403 `host_not_allowed`，用于阻止网页经 DNS 重绑定读取回环服务 |
-| 并发 | 每连接一个线程，最多 16 个并发连接，超出直接 503 `server_busy` |
+| 并发 | 每连接一个线程，最多 16 个并发连接；超出时明文返回 503 `server_busy`，TLS 直接关闭连接 |
 | 连接 | 每连接一个请求，`Connection: close`，`Cache-Control: no-store` |
 
-请求层错误用 4xx/503 表示；账本层结果（繁忙、缺失、外部接口关闭等）一律 HTTP 200，由 `status` 与固定 `error.code` 判断，与协同接口一致。实现基于 `std::net`，没有 tokio/axum 或新增依赖。
+请求层错误用 4xx/503 表示，配对被拒用 403（不可用、过期、需要 TLS）或 429（正忙、退避中）。账本层结果（繁忙、缺失、外部接口关闭等）一律 HTTP 200，由 `status` 与固定 `error.code` 判断，与协同接口一致。实现基于 `std::net` 与 rustls 同步流，没有 tokio/axum。
 
 ## 输出与兼容
 
-每个响应都包含 `protocol="gtt.peer"`、整数 `protocol_version`、`gtt_version`、`operation`、毫秒 `captured_at`、`status`（`ok/partial/unavailable`）与 `warnings`。失败时附 `error: {code, retryable}`。v1 可以增加字段，客户端必须忽略未知字段；不兼容的语义变化必须提升主版本。
+每个响应都包含 `protocol="gtt.peer"`、整数 `protocol_version`、`gtt_version`、`operation`、毫秒 `captured_at`、`status`（`ok/partial/unavailable`）与 `warnings`。失败时附 `error: {code, retryable}`。v1 可以增加字段，客户端必须忽略未知字段；不兼容的语义变化必须提升主版本。（v1 尚未随正式版发布；`hello` 在加入认证时缩减为公开最小集合，日指纹移到需认证的 `days`。）
 
 | 错误码 | 含义 | 可重试 |
 |---|---|---|
@@ -45,16 +78,29 @@ globaltokentracker-cli --db <账本路径> peer serve
 | `ledger_missing` | 账本文件不存在 | 否 |
 | `ledger_busy` / `ledger_unavailable` | 锁争用（等待 750 ms）/ 打开或读取失败 | 是 |
 | `ledger_schema_unavailable` | 该端点需要的表或列不存在 | 否 |
+| `auth_required` / `auth_invalid` / `auth_unavailable` | 缺少令牌 / 令牌无效或已撤销 / 授权库不可读 | 否 / 否 / 否 |
+| `tls_required` | 在明文服务上请求配对 | 否 |
+| `pairing_unavailable` / `pairing_code_expired` / `pairing_busy` / `pairing_locked` | 没有有效配对码 / 已过期 / 另一配对进行中 / 失败后退避中 | 否 / 否 / 否 / 否 |
+| `pairing_failed` / `pairing_aborted` / `pairing_refused` | 配对码不符或疑似截获 / 交换中断 / 被拒且无具体原因 | 否 |
+| `pairing_code_reused` / `invalid_code` | 查看方拒绝重用失败过的码 / 码不是 6 位数字 | 否 |
+| `not_paired` / `ambiguous_peer` / `unknown_peer` | 目标未配对 / 名称匹配多台设备 / forget 找不到设备 | 否 |
+| `unknown_viewer` / `ambiguous_viewer` | revoke 找不到 / 名称匹配多个查看方（请用 id） | 否 |
+| `peer_fingerprint_mismatch` | 对方证书与固定指纹不符，未发送任何请求 | 否 |
+| `connect_failed` / `tls_failed` / `plaintext_not_allowed` / `malformed_response` | 连接失败 / TLS 握手失败 / 向非回环地址发明文 / 响应格式错误 | 否 |
 | `invalid_request` / `unknown_endpoint` / `method_not_allowed` / `request_too_large` / `request_timeout` / `host_not_allowed` | 请求层错误 | 否 |
 | `server_busy` | 并发连接已满 | 是 |
 
-输出中不含 SQL、路径或原始错误文本。
+输出中不含 SQL、路径或原始错误文本；客户端只回显上表中的固定码。
 
 ## 端点
 
-### `hello`
+### `hello`（公开）
 
-设备身份与每个 UTC 日的内容指纹：`device_id`、`device_name`、`schema_version`、`bucket_ms`（v1 固定 3600000）、`endpoints`，以及 `fingerprints`：`{"YYYY-MM-DD" | "undated": "16 位十六进制"}`。
+只有身份：`device_id`、`device_name`、`fingerprint`（服务端证书指纹；明文服务上未经证明）、`endpoints`。不读取账本。
+
+### `days`
+
+日指纹索引：`device_id`、`schema_version`、`bucket_ms`（v1 固定 3600000）与 `fingerprints`：`{"YYYY-MM-DD" | "undated": "16 位十六进制"}`。查看方先比较它，再按需拉取 `summary`。
 
 ### `summary`
 
@@ -85,4 +131,4 @@ UTC 小时 × app × model 聚合。查询参数（均可选）：
 
 ## 隐私
 
-只共享本机账本中的聚合。不输出提示词、会话 ID、项目名或路径、`raw_ref`、`raw_json`、账号原文、凭证与原始错误。app/model 标识可能来自不可信的会话数据，沿用协同接口的校验（长度、字符集、拒绝 URL/绝对路径/常见密钥形态）；不合规的标识替换为稳定的 `redacted-<16 位十六进制>`，数值仍计入总计，并给出 `identifier_redacted` 警告（`status=partial`）。
+只向已配对的查看方共享本机账本中的聚合。不输出提示词、会话 ID、项目名或路径、`raw_ref`、`raw_json`、账号原文、凭证与原始错误。app/model 标识可能来自不可信的会话数据，沿用协同接口的校验（长度、字符集、拒绝 URL/绝对路径/常见密钥形态）；不合规的标识替换为稳定的 `redacted-<16 位十六进制>`，数值仍计入总计，并给出 `identifier_redacted` 警告（`status=partial`）。
