@@ -89,13 +89,35 @@ final class AppModel {
     private(set) var priceError: String?
 
     // MARK: Selection (persisted)
-    var page: Page = .overview
+    var page: Page = .overview {
+        didSet {
+            if let a = Page.allCases.firstIndex(of: oldValue), let b = Page.allCases.firstIndex(of: page) {
+                pageForward = b > a
+            }
+        }
+    }
+    /// Direction of the last page change (down the sidebar = forward), for
+    /// the page transition.
+    private(set) var pageForward = true
     var range: RangeSpec {
         didSet {
             guard range != oldValue else { return }
             rangeInfo = try? Core.window(.describe(range))
             persist()
-            requestLoad(forceViews: true)
+            if deferRangeLoad {
+                // Calendar / dial picks: let the selection animation settle
+                // (~0.3 s spring) before the Overview rebuild lands on the main
+                // thread; rapid picks collapse into one load.
+                deferRangeLoad = false
+                rangeLoadTask?.cancel()
+                rangeLoadTask = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(240))
+                    guard !Task.isCancelled else { return }
+                    self?.requestLoad(forceViews: true)
+                }
+            } else {
+                requestLoad(forceViews: true)
+            }
         }
     }
     /// core's read-back of `range` (day span, hour span, "now") for the
@@ -148,9 +170,30 @@ final class AppModel {
 
     /// Apply a calendar / hour-dial / quick-range choice. core builds the
     /// window (inclusive, DST-safe, local-day/hour aligned); we only store it.
+    /// Wheel direction for the rolling range captions: down when the new
+    /// window starts earlier than the old one.
+    private(set) var rangeRollsDown = false
+    private var deferRangeLoad = false
+    private var rangeLoadTask: Task<Void, Never>?
+
     func applyWindow(_ op: Core.WindowOp) {
-        guard let info = try? Core.window(op) else { return }
-        range = info.range
+        guard let info = try? Core.window(op), info.range != range else { return }
+        rangeRollsDown = Self.startKey(info) < Self.startKey(rangeInfo)
+        deferRangeLoad = true
+        withAnimation(Motion.resolved(Motion.select)) {
+            range = info.range
+        }
+    }
+
+    /// Comparable start of a window: "YYYY-MM-DD" + two-digit first hour.
+    private static func startKey(_ info: RangeInfo?) -> String {
+        guard let info, let day = info.firstDay else { return "" }
+        return day + String(format: "%02d", info.hourSpan?.first ?? 0)
+    }
+
+    /// Re-read core's "today" / "now" (the panel may stay open past an hour).
+    func refreshRangeInfo() {
+        if let info = try? Core.window(.describe(range)), info != rangeInfo { rangeInfo = info }
     }
 
     /// The calendar popover, owned here so the toolbar's "Custom" segment can

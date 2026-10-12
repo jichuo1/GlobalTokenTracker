@@ -31,10 +31,29 @@ private extension Binding where Value == Page {
 
 /// Detail column. Each page keeps its own scroll state; table pages load
 /// their data lazily on first appearance (never during a scan).
+///
+/// Page changes slide 24 pt in the sidebar's direction while crossfading —
+/// a short offset rather than a full-width push, so a heavy page (Overview's
+/// charts) composites cheaply for the ~0.35 s both pages are on screen. The
+/// animation keys on `page`, so sidebar clicks, ⌘1–5 and in-page links
+/// ("Show All") all transition the same way.
 struct PageHost: View {
     let page: Page
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        ZStack {
+            content
+                .id(page)
+                .transition(.slideFade(from: model.pageForward ? .bottom : .top,
+                                       distance: 24, reduced: reduceMotion))
+        }
+        .clipped()
+        .animation(reduceMotion ? .easeInOut(duration: 0.15) : Motion.page, value: page)
+    }
+
+    @ViewBuilder private var content: some View {
         switch page {
         case .overview: OverviewView()
         case .detail: DetailView()

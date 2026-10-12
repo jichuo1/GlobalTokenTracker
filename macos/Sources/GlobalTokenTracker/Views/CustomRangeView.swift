@@ -43,6 +43,7 @@ struct CivilDay: Hashable, Comparable {
     }()
 }
 
+
 struct CustomRangeButton: View {
     @Environment(AppModel.self) private var model
 
@@ -58,6 +59,7 @@ struct CustomRangeButton: View {
                 ZStack(alignment: .leading) {
                     ForEach(Self.widest, id: \.self) { Text($0).hidden() }
                     Text(Self.summary(model.range, model.rangeInfo))
+                        .rollingText(down: model.rangeRollsDown)
                 }
                 .monospacedDigit()
             } icon: {
@@ -118,21 +120,27 @@ struct CustomRangeButton: View {
 
 struct CustomRangePanel: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// First click of a two-click day pick (nil = next click starts a range).
     @ViewState private var anchorDay: CivilDay?
     @ViewState private var anchorHour: Int?
+    /// Month on screen (day == 1); nil until first shown.
     @ViewState private var shownMonth: CivilDay?
-    @ViewState private var info: RangeInfo?
+    /// Direction of the last month change — drives the page slide and the
+    /// month title's roll.
+    @ViewState private var monthForward = true
 
     var body: some View {
-        let info = info ?? model.rangeInfo
+        let info = model.rangeInfo
         let today = CivilDay(info?.today) ?? CivilDay(year: 2000, month: 1, day: 1)
         let sel = selection(info)
         HStack(alignment: .top, spacing: 20) {
             MonthGrid(
-                month: shownMonth ?? CivilDay(year: (sel?.1 ?? today).year, month: (sel?.1 ?? today).month, day: 1),
+                month: shownMonth ?? Self.monthOf(sel?.1 ?? today),
+                forward: monthForward,
                 today: today,
                 selection: sel,
+                anchor: anchorDay,
                 pick: pickDay,
                 step: stepMonth
             )
@@ -146,35 +154,46 @@ struct CustomRangePanel: View {
             .frame(width: 270)
         }
         .padding(18)
-        .onAppear { refresh() }
-        .onChange(of: model.range) { _, _ in refresh() }
+        .onAppear {
+            model.refreshRangeInfo()
+            shownMonth = Self.monthOf(selection(model.rangeInfo)?.1 ?? today)
+        }
     }
 
     // MARK: Blocks
 
+    /// Headline + count as single Text views whose strings change, so the
+    /// characters roll like a wheel instead of the views swapping.
     private func summaryBlock(_ info: RangeInfo?, sel: (CivilDay, CivilDay)?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Selected Range").font(.subheadline).foregroundStyle(.secondary)
-            if let (a, b) = sel {
-                if let h = info?.hourSpan, a == b, h != [0, 23] {
-                    Text("\(a.date, format: .dateTime.year().month().day()) \(CustomRangeButton.hh(h[0])) → \(CustomRangeButton.hh(h[1] + 1))")
-                        .font(.headline)
-                    Text("\(h[1] - h[0] + 1) hours").foregroundStyle(.secondary)
-                } else {
-                    Text((a.date..<b.date.addingTimeInterval(1)).formatted(.interval.year().month().day()))
-                        .font(.headline)
-                    Text("\(info?.days ?? 1) days").foregroundStyle(.secondary)
-                }
+        let down = model.rangeRollsDown
+        var headline = String(localized: "Custom")
+        var detail = " "
+        if let (a, b) = sel {
+            if let h = info?.hourSpan, a == b, h != [0, 23] {
+                headline = "\(a.date.formatted(.dateTime.year().month().day())) \(CustomRangeButton.hh(h[0])) → \(CustomRangeButton.hh(h[1] + 1))"
+                detail = String(localized: "\(h[1] - h[0] + 1) hours")
             } else {
-                Text(model.range.title).font(.headline)
-                // Same line count as a picked window, so the first pick
-                // doesn't push the blocks below down by a line.
-                Text(verbatim: " ")
+                headline = (a.date..<b.date.addingTimeInterval(1)).formatted(.interval.year().month().day())
+                detail = String(localized: "\(info?.days ?? 1) days")
             }
+        }
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Selected Range").font(.subheadline).foregroundStyle(.secondary)
+            Group {
+                if sel == nil {
+                    Text(model.range.title)
+                } else {
+                    Text(headline).rollingText(down: down)
+                }
+            }
+            .font(.headline)
+            Text(detail).foregroundStyle(.secondary).rollingText(down: down)
             Text(anchorDay == nil ? "Click a start day, then an end day." : "Now click the other end.")
                 .font(.caption)
                 .foregroundStyle(anchorDay == nil ? Color.secondary : Color.accentColor)
                 .lineLimit(2, reservesSpace: true)
+                .contentTransition(.opacity)
+                .animation(Motion.hover, value: anchorDay)
         }
         .monospacedDigit()
         .lineLimit(1)
@@ -190,7 +209,7 @@ struct CustomRangePanel: View {
                             anchorDay = nil
                             anchorHour = nil
                             model.applyWindow(.quick(q.key))
-                            jumpToSelection()
+                            showMonth(of: selection(model.rangeInfo)?.1)
                         }
                         .buttonStyle(.glass)
                         .controlSize(.small)
@@ -206,6 +225,9 @@ struct CustomRangePanel: View {
         let partial = span.map { $0 != [0, 23] } ?? false
         // Hours after the current one are in the future when the day is today.
         let liveUntil = single == today ? (info?.nowHour ?? 23) : 23
+        let label = span.map {
+            partial ? "\(CustomRangeButton.hh($0[0])) – \(CustomRangeButton.hh($0[1] + 1))" : String(localized: "All Day")
+        } ?? "—"
         return VStack(alignment: .leading, spacing: 10) {
             Text("By Hour").font(.subheadline).foregroundStyle(.secondary)
             HStack(alignment: .center, spacing: 16) {
@@ -214,15 +236,18 @@ struct CustomRangePanel: View {
                 }
                 .frame(width: 132, height: 132)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(span.map { partial ? "\(CustomRangeButton.hh($0[0])) – \(CustomRangeButton.hh($0[1] + 1))" : String(localized: "All Day") } ?? "—")
+                    Text(label)
                         .font(.headline)
                         .monospacedDigit()
+                        .rollingText(down: model.rangeRollsDown)
                     Text(single == nil
                          ? "Select a single day to narrow it to hours."
                          : anchorHour == nil ? "Click a start hour, then an end hour." : "Now click the other end.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(3, reservesSpace: true)
+                        .contentTransition(.opacity)
+                        .animation(Motion.hover, value: anchorHour)
                     Button("All Day") {
                         anchorHour = nil
                         if let d = single { model.applyWindow(.days(first: d.key, last: d.key)) }
@@ -259,20 +284,26 @@ struct CustomRangePanel: View {
     }
 
     private func stepMonth(_ delta: Int) {
-        let base = shownMonth ?? selection(info ?? model.rangeInfo).map { CivilDay(year: $0.1.year, month: $0.1.month, day: 1) }
-            ?? CivilDay(info?.today ?? model.rangeInfo?.today) ?? CivilDay(year: 2000, month: 1, day: 1)
+        guard let base = shownMonth else { return }
         var m = base.month + delta, y = base.year
         while m < 1 { m += 12; y -= 1 }
         while m > 12 { m -= 12; y += 1 }
-        shownMonth = CivilDay(year: y, month: m, day: 1)
+        showMonth(of: CivilDay(year: y, month: m, day: 1))
     }
 
-    private func jumpToSelection() {
-        shownMonth = nil
+    /// Page the grid to `day`'s month, sliding in the direction of travel.
+    private func showMonth(of day: CivilDay?) {
+        guard let day else { return }
+        let target = Self.monthOf(day)
+        guard target != shownMonth else { return }
+        monthForward = target > (shownMonth ?? target)
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.15) : Motion.page) {
+            shownMonth = target
+        }
     }
 
-    private func refresh() {
-        info = try? Core.window(.describe(model.range))
+    private static func monthOf(_ d: CivilDay) -> CivilDay {
+        CivilDay(year: d.year, month: d.month, day: 1)
     }
 
     /// Day span of the current window: custom → core's span; presets → none
@@ -298,28 +329,32 @@ struct CustomRangePanel: View {
 
 // MARK: - Month grid
 
+/// Fixed cell geometry, so the selection layer can be laid out by arithmetic
+/// (and animate as plain frames) instead of measuring cells.
+private enum CalendarMetrics {
+    static let cellW: CGFloat = 34
+    static let cellH: CGFloat = 30
+    static let gap: CGFloat = 2
+    static let rows = 6
+    static var width: CGFloat { 7 * cellW + 6 * gap }
+    static var height: CGFloat { CGFloat(rows) * cellH + CGFloat(rows - 1) * gap }
+
+    static func origin(_ index: Int) -> CGPoint {
+        CGPoint(x: CGFloat(index % 7) * (cellW + gap), y: CGFloat(index / 7) * (cellH + gap))
+    }
+}
+
 private struct MonthGrid: View {
     let month: CivilDay  // day == 1
+    let forward: Bool
     let today: CivilDay
     let selection: (CivilDay, CivilDay)?
+    let anchor: CivilDay?
     let pick: (CivilDay) -> Void
     let step: (Int) -> Void
-
-    private static let cell: CGFloat = 34
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var cal: Calendar { CivilDay.gregorian }
-
-    /// Leading blanks + the month's days + trailing blanks: always six week
-    /// rows (as on Windows), so stepping between 5- and 6-week months never
-    /// changes the panel's height.
-    private var cells: [CivilDay?] {
-        let first = month.date
-        let lead = (cal.component(.weekday, from: first) - cal.firstWeekday + 7) % 7
-        let count = cal.range(of: .day, in: .month, for: first)?.count ?? 30
-        let days: [CivilDay?] = Array(repeating: nil, count: lead)
-            + (1...count).map { CivilDay(year: month.year, month: month.month, day: $0) }
-        return days + Array(repeating: nil, count: 42 - days.count)
-    }
 
     private var weekdaySymbols: [String] {
         let s = cal.veryShortStandaloneWeekdaySymbols
@@ -333,6 +368,8 @@ private struct MonthGrid: View {
             HStack {
                 Text(month.date, format: .dateTime.year().month(.wide))
                     .font(.headline)
+                    .monospacedDigit()
+                    .rollingText(down: !forward)
                 Spacer()
                 ControlGroup {
                     Button { step(-1) } label: { Image(systemName: "chevron.left") }
@@ -344,42 +381,139 @@ private struct MonthGrid: View {
                 .controlSize(.small)
                 .fixedSize()
             }
-            Grid(horizontalSpacing: 2, verticalSpacing: 2) {
-                GridRow {
-                    ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, s in
-                        Text(s).font(.caption).foregroundStyle(.secondary)
-                            .frame(width: Self.cell)
-                    }
-                }
-                let rows = stride(from: 0, to: cells.count, by: 7).map { Array(cells[$0..<min($0 + 7, cells.count)]) }
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    GridRow {
-                        ForEach(0..<7, id: \.self) { i in
-                            if i < row.count, let d = row[i] {
-                                DayCell(day: d, today: today, selection: selection, pick: pick)
-                                    .frame(width: Self.cell, height: Self.cell - 4)
-                            } else {
-                                Color.clear.frame(width: Self.cell, height: Self.cell - 4)
-                            }
-                        }
-                    }
+            HStack(spacing: CalendarMetrics.gap) {
+                ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, s in
+                    Text(s).font(.caption).foregroundStyle(.secondary)
+                        .frame(width: CalendarMetrics.cellW)
                 }
             }
+            // Only the day grid pages; header and weekday row stay put.
+            ZStack {
+                MonthPage(month: month, today: today, selection: selection, anchor: anchor, pick: pick)
+                    .id(month)
+                    .transition(.slideFade(from: forward ? .trailing : .leading,
+                                           distance: CalendarMetrics.width * 0.35,
+                                           reduced: reduceMotion))
+            }
+            .frame(width: CalendarMetrics.width, height: CalendarMetrics.height, alignment: .topLeading)
+            .clipped()
         }
-        .frame(width: 7 * Self.cell + 12)
+        .frame(width: CalendarMetrics.width)
     }
 }
 
+/// One month: the selection layer (row bands + two endpoint markers) under
+/// 42 fixed day cells. The layer is a handful of views with stable identity,
+/// so a new pick animates their frames — bands stretch along the rows and the
+/// markers glide to their new days — while the cells only cross-fade colour.
+private struct MonthPage: View {
+    let month: CivilDay
+    let today: CivilDay
+    let selection: (CivilDay, CivilDay)?
+    let anchor: CivilDay?
+    let pick: (CivilDay) -> Void
+
+    private var cal: Calendar { CivilDay.gregorian }
+
+    private var lead: Int {
+        (cal.component(.weekday, from: month.date) - cal.firstWeekday + 7) % 7
+    }
+
+    private var count: Int {
+        cal.range(of: .day, in: .month, for: month.date)?.count ?? 30
+    }
+
+    private func index(of d: CivilDay) -> Int { lead + d.day - 1 }
+
+    /// Selection clipped to this month, as cell indices (nil if disjoint).
+    private var span: (lo: Int, hi: Int, startIn: Bool, endIn: Bool)? {
+        guard let (a, b) = selection else { return nil }
+        let first = month, last = CivilDay(year: month.year, month: month.month, day: count)
+        guard b >= first, a <= last else { return nil }
+        let lo = a < first ? lead : index(of: a)
+        let hi = b > last ? lead + count - 1 : index(of: b)
+        return (lo, hi, a >= first, b <= last)
+    }
+
+    var body: some View {
+        let s = span
+        ZStack(alignment: .topLeading) {
+            // Row bands (6, stable ids). An uncovered row collapses to a
+            // zero-width band at the edge nearest the selection, so bands
+            // grow and shrink in reading order.
+            ForEach(0..<CalendarMetrics.rows, id: \.self) { row in
+                band(row: row, span: s)
+            }
+            // Endpoint markers glide between days; hidden ones park at the
+            // nearest month edge so they slide in from the right side.
+            marker(index: s?.lo ?? anchorIndex ?? 0, visible: s?.startIn ?? false)
+            marker(index: s?.hi ?? anchorIndex ?? 0, visible: s?.endIn ?? false)
+            // Day cells on top.
+            ForEach(0..<count, id: \.self) { i in
+                let day = CivilDay(year: month.year, month: month.month, day: i + 1)
+                let idx = index(of: day)
+                let endpoint = s.map { (idx == $0.lo && $0.startIn) || (idx == $0.hi && $0.endIn) } ?? false
+                let inside = s.map { idx >= $0.lo && idx <= $0.hi } ?? false
+                DayCell(day: day, today: today, endpoint: endpoint, inside: inside, pick: pick)
+                    .frame(width: CalendarMetrics.cellW, height: CalendarMetrics.cellH)
+                    .offset(x: CalendarMetrics.origin(idx).x, y: CalendarMetrics.origin(idx).y)
+            }
+        }
+        .frame(width: CalendarMetrics.width, height: CalendarMetrics.height, alignment: .topLeading)
+    }
+
+    private var anchorIndex: Int? {
+        guard let a = anchor, a.year == month.year, a.month == month.month else { return nil }
+        return index(of: a)
+    }
+
+    private func band(row: Int, span s: (lo: Int, hi: Int, startIn: Bool, endIn: Bool)?) -> some View {
+        let rowLo = row * 7, rowHi = row * 7 + 6
+        var x: CGFloat = 0, width: CGFloat = 0, visible = false
+        if let s {
+            let lo = max(s.lo, rowLo), hi = min(s.hi, rowHi)
+            if lo <= hi {
+                x = CalendarMetrics.origin(lo).x
+                width = CalendarMetrics.origin(hi).x - x + CalendarMetrics.cellW
+                visible = true
+            } else {
+                // Before the selection → park at the row's end; after → start.
+                x = rowHi < s.lo ? CalendarMetrics.origin(rowHi).x + CalendarMetrics.cellW : 0
+            }
+        }
+        return RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.accentColor.opacity(0.2))
+            .frame(width: width, height: CalendarMetrics.cellH)
+            .offset(x: x, y: CGFloat(row) * (CalendarMetrics.cellH + CalendarMetrics.gap))
+            .opacity(visible ? 1 : 0)
+            .allowsHitTesting(false)
+    }
+
+    private func marker(index: Int, visible: Bool) -> some View {
+        let o = CalendarMetrics.origin(index)
+        return RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.accentColor)
+            .frame(width: CalendarMetrics.cellW, height: CalendarMetrics.cellH)
+            .shadow(color: Color.accentColor.opacity(0.35), radius: 4, y: 1)
+            .scaleEffect(visible ? 1 : 0.6)
+            .opacity(visible ? 1 : 0)
+            .offset(x: o.x, y: o.y)
+            .allowsHitTesting(false)
+    }
+}
+
+/// A day: plain digits over the selection layer, with hover and press
+/// feedback. Colour changes ride the selection spring.
 private struct DayCell: View {
     let day: CivilDay
     let today: CivilDay
-    let selection: (CivilDay, CivilDay)?
+    let endpoint: Bool
+    let inside: Bool
     let pick: (CivilDay) -> Void
+    @ViewState private var hovering = false
 
     var body: some View {
         let future = day > today
-        let endpoint = selection.map { day == $0.0 || day == $0.1 } ?? false
-        let inside = selection.map { day > $0.0 && day < $0.1 } ?? false
         Button {
             pick(day)
         } label: {
@@ -389,29 +523,45 @@ private struct DayCell: View {
                 .foregroundStyle(endpoint ? Color.white : future ? Color.secondary.opacity(0.5) : Color.primary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(endpoint ? Color.accentColor : inside ? Color.accentColor.opacity(0.22) : .clear)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(hovering && !endpoint && !future ? 0.07 : 0))
                 }
                 .overlay {
                     if day == today && !endpoint {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1)
                     }
                 }
                 .contentShape(.rect)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScale())
         .disabled(future)
+        .onHover { h in
+            withAnimation(Motion.hover) { hovering = h }
+        }
         .accessibilityLabel(Text(day.date, format: .dateTime.year().month(.wide).day()))
         .accessibilityAddTraits(endpoint || inside ? .isSelected : [])
     }
 }
 
+/// Springy press: shrinks slightly while held, bounces back on release.
+private struct PressScale: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.88 : 1)
+            .animation(Motion.press, value: configuration.isPressed)
+    }
+}
+
 // MARK: - Hour dial
 
-/// 24-hour clock face (00 at the top, clockwise). The selected inclusive
-/// slot span draws as an arc; click a slot to set an end. One Canvas pass
-/// for the face, hit-testing by angle — no 24 separate views.
+/// 24-hour clock face (00 at the top, clockwise). The static face (track,
+/// ticks, labels) is drawn once and skipped on re-render; the selected arc
+/// is an animatable shape, so a new pick grows/shrinks it around the dial,
+/// the pending first click rides a rotating marker, and hovering previews
+/// the slot under the pointer.
 struct HourDial: View {
     let span: [Int]?
     let anchor: Int?
@@ -422,67 +572,135 @@ struct HourDial: View {
     var body: some View {
         GeometryReader { geo in
             let size = min(geo.size.width, geo.size.height)
-            let c = CGPoint(x: size / 2, y: size / 2)
             let ring = size / 2 - 10
-            Canvas { ctx, _ in
-                // Track
-                ctx.stroke(Path(ellipseIn: CGRect(x: c.x - ring, y: c.y - ring, width: ring * 2, height: ring * 2)),
-                           with: .color(.secondary.opacity(enabled ? 0.18 : 0.08)), lineWidth: 12)
-                // Selected arc (inclusive slots a...b)
+            ZStack {
+                DialFace(ring: ring, liveUntil: liveUntil, enabled: enabled)
+                    .equatable()
                 if enabled, let s = span, s.count == 2 {
-                    var arc = Path()
-                    arc.addArc(center: c, radius: ring,
-                               startAngle: angle(Double(s[0])), endAngle: angle(Double(s[1] + 1)),
-                               clockwise: false)
-                    ctx.stroke(arc, with: .color(.accentColor), style: StrokeStyle(lineWidth: 12, lineCap: .round))
+                    HourArc(start: Double(s[0]), end: Double(s[1] + 1), ring: ring)
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 12, lineCap: .round))
+                        .transition(.opacity)
                 }
-                // Hour ticks; future hours dimmed
-                for h in 0..<24 {
-                    let a = angle(Double(h) + 0.5).radians
-                    let r1 = ring - 12, r2 = ring - (h % 3 == 0 ? 20 : 16)
-                    var t = Path()
-                    t.move(to: CGPoint(x: c.x + cos(a) * r1, y: c.y + sin(a) * r1))
-                    t.addLine(to: CGPoint(x: c.x + cos(a) * r2, y: c.y + sin(a) * r2))
-                    let live = enabled && h <= liveUntil
-                    ctx.stroke(t, with: .color(live ? .primary.opacity(0.55) : .secondary.opacity(0.25)), lineWidth: 1)
-                }
-                // Pending first click
                 if let h = anchor {
-                    let a = angle(Double(h) + 0.5).radians
-                    let p = CGPoint(x: c.x + cos(a) * ring, y: c.y + sin(a) * ring)
-                    ctx.fill(Path(ellipseIn: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)),
-                             with: .color(.white))
-                    ctx.stroke(Path(ellipseIn: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)),
-                               with: .color(.accentColor), lineWidth: 2)
+                    // Rotating the marker (not moving it) keeps it on the ring
+                    // while it animates to a new hour.
+                    Circle()
+                        .fill(.white)
+                        .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 2))
+                        .frame(width: 11, height: 11)
+                        .offset(y: -ring)
+                        .rotationEffect(.degrees((Double(h) + 0.5) * 15))
+                        .transition(.scale.combined(with: .opacity))
                 }
+                DialHover(ring: ring, liveUntil: liveUntil, enabled: enabled, pick: pick)
             }
-            .overlay {
-                ForEach([0, 6, 12, 18], id: \.self) { h in
-                    let a = angle(Double(h)).radians
-                    Text(String(format: "%02d", h))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .position(x: c.x + cos(a) * (ring - 30), y: c.y + sin(a) * (ring - 30))
-                }
-            }
-            .contentShape(.circle)
-            .onTapGesture(coordinateSpace: .local) { p in
-                guard enabled else { return }
-                // Angle from 12 o'clock, clockwise → slot 0..23.
-                var deg = atan2(p.y - c.y, p.x - c.x) * 180 / .pi + 90
-                if deg < 0 { deg += 360 }
-                let h = min(23, Int(deg / 15))
-                if h <= liveUntil { pick(h) }
-            }
+            .frame(width: size, height: size)
             .opacity(enabled ? 1 : 0.55)
+            .animation(Motion.hover, value: enabled)
         }
         .accessibilityElement()
         .accessibilityLabel("Hour range")
         .accessibilityValue(span.map { "\($0[0]):00 to \($0[1] + 1):00" } ?? "")
     }
+}
 
-    /// Slot position → angle; 0 at 12 o'clock, 15° per hour, clockwise.
-    private func angle(_ slot: Double) -> Angle {
-        .degrees(slot * 15 - 90)
+/// Arc over hour slots [start, end) — angles animate as one pair.
+private struct HourArc: Shape {
+    var start: Double
+    var end: Double
+    let ring: CGFloat
+
+    var animatableData: AnimatablePair<Double, Double> {
+        get { AnimatablePair(start, end) }
+        set { start = newValue.first; end = newValue.second }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.addArc(center: CGPoint(x: rect.midX, y: rect.midY), radius: ring,
+                 startAngle: .degrees(start * 15 - 90), endAngle: .degrees(end * 15 - 90),
+                 clockwise: false)
+        return p
+    }
+}
+
+/// Track, ticks and hour labels — redrawn only when its inputs change.
+private struct DialFace: View, Equatable {
+    let ring: CGFloat
+    let liveUntil: Int
+    let enabled: Bool
+
+    var body: some View {
+        Canvas { ctx, size in
+            let c = CGPoint(x: size.width / 2, y: size.height / 2)
+            ctx.stroke(Path(ellipseIn: CGRect(x: c.x - ring, y: c.y - ring, width: ring * 2, height: ring * 2)),
+                       with: .color(.secondary.opacity(enabled ? 0.18 : 0.08)), lineWidth: 12)
+            for h in 0..<24 {
+                let a = Angle.degrees((Double(h) + 0.5) * 15 - 90).radians
+                let r1 = ring - 12, r2 = ring - (h % 3 == 0 ? 20 : 16)
+                var t = Path()
+                t.move(to: CGPoint(x: c.x + cos(a) * r1, y: c.y + sin(a) * r1))
+                t.addLine(to: CGPoint(x: c.x + cos(a) * r2, y: c.y + sin(a) * r2))
+                let live = enabled && h <= liveUntil
+                ctx.stroke(t, with: .color(live ? .primary.opacity(0.55) : .secondary.opacity(0.25)), lineWidth: 1)
+            }
+            for h in [0, 6, 12, 18] {
+                let a = Angle.degrees(Double(h) * 15 - 90).radians
+                let p = CGPoint(x: c.x + cos(a) * (ring - 30), y: c.y + sin(a) * (ring - 30))
+                ctx.draw(Text(String(format: "%02d", h)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary),
+                         at: p)
+            }
+        }
+    }
+}
+
+/// Pointer layer: hit-testing by angle, a ghost segment that follows the
+/// hovered slot, and its time in the dial's centre. Owns its hover state so
+/// pointer moves re-render only this layer.
+private struct DialHover: View {
+    let ring: CGFloat
+    let liveUntil: Int
+    let enabled: Bool
+    let pick: (Int) -> Void
+    @ViewState private var hovered: Int?
+
+    var body: some View {
+        GeometryReader { geo in
+            let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            ZStack {
+                if let h = hovered {
+                    HourArc(start: Double(h) + 0.15, end: Double(h) + 0.85, ring: ring)
+                        .stroke(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 12, lineCap: .round))
+                    Text(CustomRangeButton.hh(h))
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(Color.accentColor)
+                        .contentTransition(.numericText(value: Double(h)))
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .contentShape(.circle)
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let p):
+                    let h = slot(at: p, center: c)
+                    let next = enabled && h <= liveUntil ? h : nil
+                    if next != hovered { withAnimation(Motion.hover) { hovered = next } }
+                case .ended:
+                    withAnimation(Motion.hover) { hovered = nil }
+                }
+            }
+            .onTapGesture(coordinateSpace: .local) { p in
+                guard enabled else { return }
+                let h = slot(at: p, center: c)
+                if h <= liveUntil { pick(h) }
+            }
+        }
+    }
+
+    /// Angle from 12 o'clock, clockwise → slot 0..23.
+    private func slot(at p: CGPoint, center c: CGPoint) -> Int {
+        var deg = atan2(p.y - c.y, p.x - c.x) * 180 / .pi + 90
+        if deg < 0 { deg += 360 }
+        return min(23, Int(deg / 15))
     }
 }
