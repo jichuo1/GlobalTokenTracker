@@ -10,7 +10,7 @@ is not needed.
 
 ```bash
 macos/scripts/build-app.sh --universal     # target/macos/GlobalTokenTracker.app
-macos/scripts/build-dmg.sh v0.7.0          # the designed installer disk image
+macos/scripts/build-dmg.sh v0.8.0          # the designed installer disk image
 ```
 
 `build-dmg.sh` produces `target/macos/GlobalTokenTracker-<tag>-macos-universal.dmg`,
