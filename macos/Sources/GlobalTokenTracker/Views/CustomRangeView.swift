@@ -184,7 +184,7 @@ struct CustomRangePanel: View {
             }
         }
         return VStack(alignment: .leading, spacing: 4) {
-            Text("Selected Range").font(.subheadline).foregroundStyle(.secondary)
+            Text("Selected Range").scaledFont(.subheadline).foregroundStyle(.secondary)
             Group {
                 if sel == nil {
                     Text(model.range.title)
@@ -192,10 +192,10 @@ struct CustomRangePanel: View {
                     Text(headline).rollingText(down: down)
                 }
             }
-            .font(.headline)
+            .scaledFont(.headline)
             Text(detail).foregroundStyle(.secondary).rollingText(down: down)
             Text(anchorDay == nil ? "Click a start day, then an end day." : "Now click the other end.")
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(anchorDay == nil ? Color.secondary : Color.accentColor)
                 .lineLimit(2, reservesSpace: true)
                 .contentTransition(.opacity)
@@ -207,7 +207,7 @@ struct CustomRangePanel: View {
 
     private var quickBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Quick Ranges").font(.subheadline).foregroundStyle(.secondary)
+            Text("Quick Ranges").scaledFont(.subheadline).foregroundStyle(.secondary)
             GlassEffectContainer(spacing: 6) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 82), spacing: 6)], alignment: .leading, spacing: 6) {
                     ForEach(Self.quick, id: \.key) { q in
@@ -235,7 +235,7 @@ struct CustomRangePanel: View {
             partial ? "\(CustomRangeButton.hh($0[0])) – \(CustomRangeButton.hh($0[1] + 1))" : String(localized: "All Day")
         } ?? "—"
         return VStack(alignment: .leading, spacing: 10) {
-            Text("By Hour").font(.subheadline).foregroundStyle(.secondary)
+            Text("By Hour").scaledFont(.subheadline).foregroundStyle(.secondary)
             HStack(alignment: .center, spacing: 16) {
                 HourDial(span: span, anchor: anchorHour, liveUntil: liveUntil, enabled: single != nil) { h in
                     pickHour(h, day: single)
@@ -243,13 +243,13 @@ struct CustomRangePanel: View {
                 .frame(width: 132, height: 132)
                 VStack(alignment: .leading, spacing: 6) {
                     Text(label)
-                        .font(.headline)
+                        .scaledFont(.headline)
                         .monospacedDigit()
                         .rollingText(down: model.rangeRollsDown)
                     Text(single == nil
                          ? "Select a single day to narrow it to hours."
                          : anchorHour == nil ? "Click a start hour, then an end hour." : "Now click the other end.")
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(3, reservesSpace: true)
                         .contentTransition(.opacity)
@@ -373,7 +373,7 @@ private struct MonthGrid: View {
         VStack(spacing: 8) {
             HStack {
                 Text(month.date, format: .dateTime.year().month(.wide))
-                    .font(.headline)
+                    .scaledFont(.headline)
                     .monospacedDigit()
                     .rollingText(down: !forward)
                 Spacer()
@@ -389,7 +389,7 @@ private struct MonthGrid: View {
             }
             HStack(spacing: CalendarMetrics.gap) {
                 ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, s in
-                    Text(s).font(.caption).foregroundStyle(.secondary)
+                    Text(s).scaledFont(.caption).foregroundStyle(.secondary)
                         .frame(width: CalendarMetrics.cellW)
                 }
             }
@@ -637,7 +637,7 @@ private struct DialFace: View, Equatable {
     let enabled: Bool
 
     var body: some View {
-        Canvas { ctx, size in
+        Canvas(rendersAsynchronously: true) { ctx, size in
             let c = CGPoint(x: size.width / 2, y: size.height / 2)
             ctx.stroke(Path(ellipseIn: CGRect(x: c.x - ring, y: c.y - ring, width: ring * 2, height: ring * 2)),
                        with: .color(.secondary.opacity(enabled ? 0.18 : 0.08)), lineWidth: 12)
@@ -678,7 +678,7 @@ private struct DialHover: View {
                     HourArc(start: Double(h) + 0.15, end: Double(h) + 0.85, ring: ring)
                         .stroke(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 12, lineCap: .round))
                     Text(CustomRangeButton.hh(h))
-                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .scaledFont(.caption, weight: .semibold).monospacedDigit()
                         .foregroundStyle(Color.accentColor)
                         .contentTransition(.numericText(value: Double(h)))
                 }

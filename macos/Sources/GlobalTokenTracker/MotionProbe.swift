@@ -82,9 +82,49 @@ final class MotionProbe: NSObject {
                 report(name)
                 try? await Task.sleep(for: .milliseconds(900))
             }
+            // Scrolling: an animated scroll down and back up on the Overview
+            // (SwiftUI cards + charts) and the Details table (AppKit).
+            for page in [Page.overview, .detail] {
+                model.page = page
+                try? await Task.sleep(for: .milliseconds(1500))
+                guard let scroll = largestVisibleScrollView(in: view) else { continue }
+                for (dir, label) in [(1.0, "down"), (-1.0, "up")] {
+                    let clip = scroll.contentView
+                    let maxY = max(0, (scroll.documentView?.frame.height ?? 0) - clip.bounds.height)
+                    let target = dir > 0 ? min(maxY, clip.bounds.origin.y + 2400) : 0
+                    gaps.removeAll()
+                    last = 0
+                    recording = true
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 1.0
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                        clip.animator().setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: target))
+                    }
+                    try? await Task.sleep(for: .milliseconds(1150))
+                    recording = false
+                    scroll.reflectScrolledClipView(clip)
+                    report("scroll \(page.rawValue) \(label)")
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+            }
             link.invalidate()
             FileHandle.standardError.write(Data("[probe] done\n".utf8))
         }
+    }
+
+    /// The biggest on-screen, unhidden scroll view — the current page's.
+    private func largestVisibleScrollView(in root: NSView) -> NSScrollView? {
+        var best: NSScrollView?
+        func visit(_ v: NSView) {
+            if let s = v as? NSScrollView, !s.isHiddenOrHasHiddenAncestor, s.window != nil,
+               s.visibleRect.width > 300, (s.documentView?.frame.height ?? 0) > s.contentView.bounds.height {
+                if best == nil || s.visibleRect.width * s.visibleRect.height
+                    > best!.visibleRect.width * best!.visibleRect.height { best = s }
+            }
+            v.subviews.forEach(visit)
+        }
+        visit(root)
+        return best
     }
 
     @objc private func tick(_ link: CADisplayLink) {

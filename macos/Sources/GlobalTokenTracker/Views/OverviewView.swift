@@ -105,9 +105,11 @@ struct OverviewView: View {
     private func widget(_ w: OverviewWidget, vm: OverviewVM) -> some View {
         switch w {
         case .stats: StatTiles(vm: vm)
-        case .trend: TrendCard(vm: vm, series: model.trend)
-        case .share: ShareGrid(vm: vm)
-        case .apps: ToolsCard(vm: vm)
+        // Equatable on exactly what each card draws: quota polls, scan stamps
+        // and other vm changes no longer rebuild charts that didn't change.
+        case .trend: TrendCard(vm: vm, series: model.trend).equatable()
+        case .share: ShareGrid(vm: vm).equatable()
+        case .apps: ToolsCard(vm: vm).equatable()
         case .heat: HeatmapCard(days: vm.heat).equatable()
         case .quotas: QuotaStrip(rows: model.quotasRanked)
         case .unpriced: if !vm.unpriced.isEmpty { UnpricedNote(items: vm.unpriced) }
@@ -123,9 +125,9 @@ private struct CustomizeOverviewSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Customize Overview").font(.title3.bold())
+            Text("Customize Overview").scaledFont(.title3, weight: .bold)
             Text("Drag to reorder. Uncheck a card to hide it.")
-                .font(.callout).foregroundStyle(.secondary)
+                .scaledFont(.callout).foregroundStyle(.secondary)
             List {
                 ForEach(layout.all) { w in
                     Toggle(isOn: Binding(
@@ -164,11 +166,11 @@ private struct UpdateBanner: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "arrow.down.app.fill").font(.title2).foregroundStyle(.tint)
+            Image(systemName: "arrow.down.app.fill").scaledFont(.title2).foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 2) {
-                Text("New version \(info.version) is available").font(.headline)
+                Text("New version \(info.version) is available").scaledFont(.headline)
                 if let url = URL(string: info.htmlUrl) {
-                    Link("Release notes", destination: url).font(.callout)
+                    Link("Release notes", destination: url).scaledFont(.callout)
                 }
             }
             Spacer()
@@ -230,13 +232,14 @@ private struct Tile: View {
         Card {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Label { title.contentTransition(.numericText()) } icon: { Image(systemName: symbol) }
-                        .font(.subheadline)
+                    Label { title.contentTransition(.numericText()).lineLimit(1).minimumScaleFactor(0.75) }
+                        icon: { Image(systemName: symbol) }
+                        .scaledFont(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let badge {
                         Text(badge)
-                            .font(.caption2.weight(.semibold))
+                            .scaledFont(.caption2, weight: .semibold)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(.tint.opacity(0.15), in: .capsule)
                             .foregroundStyle(.tint)
@@ -244,13 +247,13 @@ private struct Tile: View {
                 }
                 .depthLayer(1)
                 Text(value)
-                    .font(.system(.title, design: .rounded, weight: .semibold))
+                    .scaledFont(.title, weight: .semibold, design: .rounded)
                     .monospacedDigit()
                     .contentTransition(.numericText(value: amount))
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .depthLayer(2)
-                detail.font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                detail.scaledFont(.caption).foregroundStyle(.secondary).monospacedDigit()
                     .contentTransition(.numericText())
                     .depthLayer(3)
             }
@@ -279,9 +282,13 @@ enum Metric: String, CaseIterable, Identifiable {
     }
 }
 
-private struct TrendCard: View {
+private struct TrendCard: View, Equatable {
     let vm: OverviewVM
     let series: TrendSeries?
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.vm.range == b.vm.range && a.series == b.series && (a.series != nil || a.vm.daily == b.vm.daily)
+    }
     @AppStorage("trendMetric") private var metric: Metric = .tokens
     /// Windows: trend_line — trailing 7-bucket moving average overlay.
     @AppStorage("trendLine") private var showAverage = false
@@ -349,6 +356,9 @@ private struct TrendCard: View {
                 }
                 .chartXSelection(value: $hovered)
                 .chartFont()
+                // Rasterise the chart in one Metal pass: page turns and the
+                // cascade then move a texture instead of re-drawing paths.
+                .drawingGroup()
                 .frame(height: 220)
                 .overlay(alignment: .topLeading) {
                     if let key = hovered, let i = indexOf[key] {
@@ -382,16 +392,16 @@ private struct TrendTooltip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption.bold())
+            Text(title).scaledFont(.caption, weight: .bold)
             Text("\(Fmt.tokensCompact(bucket.tokens)) tokens · \(Fmt.usd(bucket.costUsd))")
-                .font(.caption).monospacedDigit()
+                .scaledFont(.caption).monospacedDigit()
             if let average {
                 Text("7-pt average \(Fmt.tokensCompact(UInt64(max(0, average))))")
-                    .font(.caption).foregroundStyle(.orange)
+                    .scaledFont(.caption).foregroundStyle(.orange)
             }
             ForEach(bucket.top, id: \.name) { t in
                 Text("\(t.name)  \(Fmt.tokensCompact(t.count))")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .scaledFont(.caption2).foregroundStyle(.secondary)
             }
         }
         .padding(8)
@@ -402,8 +412,12 @@ private struct TrendTooltip: View {
 
 // MARK: - Share (four donuts: tool/model × cost/tokens)
 
-private struct ShareGrid: View {
+private struct ShareGrid: View, Equatable {
     let vm: OverviewVM
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.vm.range == b.vm.range && a.vm.byApp == b.vm.byApp && a.vm.byModel == b.vm.byModel
+    }
 
     var body: some View {
         let byToolCost = vm.byApp.map { (Fmt.app($0.app), $0.costUsd) }
@@ -452,7 +466,7 @@ private struct Donut: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.subheadline).foregroundStyle(.secondary)
+            Text(title).scaledFont(.subheadline).foregroundStyle(.secondary)
             if total <= 0 {
                 Text("No data").foregroundStyle(.tertiary).frame(maxWidth: .infinity, minHeight: 150)
             } else {
@@ -465,12 +479,13 @@ private struct Donut: View {
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $selectedAngle)
                 .chartFont()
+                .drawingGroup()
                 .chartBackground { _ in
                     VStack(spacing: 2) {
                         Text(selected?.name ?? String(localized: "Total"))
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .scaledFont(.caption).foregroundStyle(.secondary).lineLimit(1)
                         Text(format(selected?.costUsd ?? total))
-                            .font(.headline).monospacedDigit()
+                            .scaledFont(.headline).monospacedDigit()
                             .contentTransition(.numericText(value: selected?.costUsd ?? total))
                     }
                     .frame(maxWidth: 90)
@@ -485,7 +500,7 @@ private struct Donut: View {
                                 .foregroundStyle(.secondary).monospacedDigit()
                                 .contentTransition(.numericText(value: s.costUsd / total))
                         }
-                        .font(.caption)
+                        .scaledFont(.caption)
                     }
                 }
             }
@@ -495,8 +510,12 @@ private struct Donut: View {
 
 // MARK: - Per-tool
 
-private struct ToolsCard: View {
+private struct ToolsCard: View, Equatable {
     let vm: OverviewVM
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.vm.range == b.vm.range && a.vm.byApp == b.vm.byApp
+    }
 
     var body: some View {
         let top = Array(vm.byApp.prefix(8))
@@ -516,7 +535,7 @@ private struct ToolsCard: View {
                                     .foregroundStyle(.secondary).monospacedDigit()
                                     .contentTransition(.numericText(value: Double(a.tokens)))
                             }
-                            .font(.callout)
+                            .scaledFont(.callout)
                             ProgressView(value: Double(a.tokens), total: Double(maxTokens)).tint(.accentColor)
                         }
                     }
@@ -571,13 +590,13 @@ private struct HeatmapCard: View, Equatable {
                 .frame(height: 7 * 15 + 18)
             HStack(spacing: 4) {
                 Spacer()
-                Text("Less").font(.caption2).foregroundStyle(.secondary)
+                Text("Less").scaledFont(.caption2).foregroundStyle(.secondary)
                 ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { t in
                     RoundedRectangle(cornerRadius: 2)
                         .fill(t == 0 ? Color.secondary.opacity(0.12) : Color.accentColor.opacity(0.18 + 0.82 * t))
                         .frame(width: 10, height: 10)
                 }
-                Text("More").font(.caption2).foregroundStyle(.secondary)
+                Text("More").scaledFont(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -639,7 +658,8 @@ private struct HeatmapGrid: View {
         GeometryReader { geo in
             let cell = min(15, max(6, geo.size.width / Double(max(lay.weeks, 1))))
             let gap = max(2, cell * 0.18)
-            Canvas { ctx, _ in
+            // Drawn on a background thread; the main thread only commits.
+            Canvas(rendersAsynchronously: true) { ctx, _ in
                 for c in lay.cells {
                     let rect = CGRect(x: Double(c.week) * cell, y: Double(c.row) * cell,
                                       width: cell - gap, height: cell - gap)
@@ -679,12 +699,12 @@ private struct HeatHoverLayer: View {
                 if let d = hover {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(Fmt.bucketDate(d.date)?.formatted(date: .complete, time: .omitted) ?? d.date)
-                            .font(.caption.bold())
+                            .scaledFont(.caption, weight: .bold)
                         Text("\(Fmt.tokensCompact(d.tokens)) tokens · \(Fmt.usd(d.costUsd)) · \(Fmt.count(d.events)) requests")
-                            .font(.caption).monospacedDigit()
+                            .scaledFont(.caption).monospacedDigit()
                         if d.durationMs > 0 {
                             Text("Duration \(Fmt.duration(ms: d.durationMs))")
-                                .font(.caption).foregroundStyle(.secondary)
+                                .scaledFont(.caption).foregroundStyle(.secondary)
                         }
                     }
                     .padding(8)
@@ -716,7 +736,7 @@ private struct QuotaStrip: View {
                 }
                 if rows.count > Self.maxRows {
                     Text("\(rows.count - Self.maxRows) more · see the Quota page")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .scaledFont(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -747,13 +767,13 @@ struct QuotaMeter: View {
                     Pill(text: Fmt.percent(pct), tint: Self.tint(pct))
                 }
             }
-            .font(.callout)
+            .scaledFont(.callout)
             .depthLayer(1)
             if let pct = row.usedPercent {
                 ProgressView(value: min(max(pct, 0), 100), total: 100).tint(Self.tint(pct))
                     .depthLayer(2)
             }
-            Text(meta).font(.caption).foregroundStyle(.secondary).help(metaExact)
+            Text(meta).scaledFont(.caption).foregroundStyle(.secondary).help(metaExact)
                 .contentTransition(.numericText())
                 .depthLayer(3)
         }
@@ -795,7 +815,7 @@ struct Pill: View {
 
     var body: some View {
         Text(text)
-            .font(.caption2.weight(.semibold))
+            .scaledFont(.caption2, weight: .semibold)
             .monospacedDigit()
             .lineLimit(1)
             .padding(.horizontal, 6).padding(.vertical, 2)
@@ -811,11 +831,11 @@ private struct UnpricedNote: View {
         Card {
             Label {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Unpriced Models").font(.headline)
+                    Text("Unpriced Models").scaledFont(.headline)
                     Text(items.map { "\($0.name)×\(Fmt.count($0.count))" }.joined(separator: ", "))
-                        .font(.callout).foregroundStyle(.secondary)
+                        .scaledFont(.callout).foregroundStyle(.secondary)
                     Text("Their usage is counted, but no cost is guessed.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .scaledFont(.caption).foregroundStyle(.secondary)
                 }
             } icon: {
                 Image(systemName: "questionmark.diamond").foregroundStyle(.orange)

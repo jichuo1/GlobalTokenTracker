@@ -14,14 +14,17 @@ struct DetailView: View {
     var body: some View {
         Table(model.detailRows, selection: $selection) {
             TableColumn("Time") { r in
-                Text(Fmt.shortTimestamp(r.tsStart)).monospacedDigit()
-                    .help(Fmt.timestamp(r.tsStart))
+                Text(RowText.of(r).time).monospacedDigit()
+                    .help(RowText.of(r).timeLong)
                     // Infinite scroll: the last visible row asks for the next page.
                     // Deferred a run-loop turn — mutating the rows while
                     // NSTableView is laying out cells is a reentrant delegate
                     // operation (AppKit warns now, will assert later).
+                    // Prefetch: ask for the next page while ~60 rows remain, so
+                    // it has arrived by the time the scroll reaches the end
+                    // (fetching at the last row hitched mid-scroll).
                     .onAppear {
-                        guard r.id == model.detailRows.last?.id else { return }
+                        guard model.isNearDetailEnd(r.id, within: 60) else { return }
                         Task { @MainActor in model.loadMoreDetail() }
                     }
             }
@@ -95,7 +98,7 @@ struct DetailView: View {
                 Spacer()
                 Text("≈ estimated · ↺ provider-reported").foregroundStyle(.tertiary)
             }
-            .font(.caption)
+            .scaledFont(.caption)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -319,7 +322,7 @@ struct PricesView: View {
             }
             Spacer()
         }
-        .font(.caption)
+        .scaledFont(.caption)
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -372,5 +375,33 @@ private struct OnArrival: View {
                 try? await Task.sleep(for: .milliseconds(Motion.settleMs))
                 if !Task.isCancelled { action() }
             }
+    }
+}
+
+/// Formatted strings for one detail row, built once and cached: the table
+/// re-evaluates visible cells on every update and while scrolling, and date
+/// formatting was redone for each of them each time.
+final class RowText: NSObject, @unchecked Sendable {
+    let time: String
+    let timeLong: String
+
+    private init(_ r: EventRow) {
+        time = Fmt.shortTimestamp(r.tsStart)
+        timeLong = Fmt.timestamp(r.tsStart)
+    }
+
+    // NSCache is internally synchronized (thread-safe by documentation).
+    nonisolated(unsafe) private static let cache: NSCache<NSString, RowText> = {
+        let c = NSCache<NSString, RowText>()
+        c.countLimit = 6000
+        return c
+    }()
+
+    static func of(_ r: EventRow) -> RowText {
+        let key = r.id as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        let made = RowText(r)
+        cache.setObject(made, forKey: key)
+        return made
     }
 }

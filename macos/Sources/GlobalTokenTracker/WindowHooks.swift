@@ -11,6 +11,7 @@ struct MainWindowHook: NSViewRepresentable {
 
     private final class HookView: NSView {
         private var observer: NSObjectProtocol?
+        private var occlusion: NSObjectProtocol?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -21,15 +22,27 @@ struct MainWindowHook: NSViewRepresentable {
             observer = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification, object: window, queue: .main
             ) { _ in
-                MainActor.assumeIsolated { CloseAction.windowClosed() }
+                MainActor.assumeIsolated {
+                    AppModel.shared.windowVisible = false
+                    CloseAction.windowClosed()
+                }
+            }
+            occlusion = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+            ) { [weak window] _ in
+                MainActor.assumeIsolated {
+                    AppModel.shared.windowVisible = window?.occlusionState.contains(.visible) ?? false
+                }
             }
         }
 
         override func viewWillMove(toWindow newWindow: NSWindow?) {
             super.viewWillMove(toWindow: newWindow)
-            if newWindow == nil, let observer {
-                NotificationCenter.default.removeObserver(observer)
-                self.observer = nil
+            if newWindow == nil {
+                if let observer { NotificationCenter.default.removeObserver(observer) }
+                if let occlusion { NotificationCenter.default.removeObserver(occlusion) }
+                observer = nil
+                occlusion = nil
             }
         }
     }
@@ -92,12 +105,15 @@ private struct AppTint: ViewModifier {
 
 private struct ChartFont: ViewModifier {
     @AppStorage(Prefs.chartFontKey) private var family = ""
+    @Environment(\.textScale) private var scale
 
+    /// Axis/label text follows both the chart font and the text size.
     func body(content: Content) -> some View {
+        let size = (NSFont.smallSystemFontSize * scale).rounded()
         if family.isEmpty {
-            content
+            content.font(.system(size: size))
         } else {
-            content.font(.custom(family, size: NSFont.smallSystemFontSize))
+            content.font(.custom(family, size: size))
         }
     }
 }
