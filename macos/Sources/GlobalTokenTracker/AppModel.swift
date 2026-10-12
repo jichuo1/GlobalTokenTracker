@@ -307,6 +307,7 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
+        watchScrolling()
         Task {
             info = try? await Core.info()
             externalInterface = try? await Core.externalInterface(set: nil)
@@ -332,6 +333,20 @@ final class AppModel {
                     "[sync] \(d.name) ok=\(d.ok) err=\(d.errorCode ?? "-") changed=\(d.daysChanged)"
                 }
                 FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n[sync] done \(Date.now.timeIntervalSince(t0))s\n").utf8))
+            }
+            // Developer probe: a background refresh during a (simulated)
+            // live scroll waits for the scroll to end.
+            if ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_GATE"] != nil {
+                try? await Task.sleep(for: .seconds(3))
+                let sv = NSScrollView()
+                NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: sv)
+                FileHandle.standardError.write(Data("[gate] scroll started, refreshing\n".utf8))
+                requestLoad(scan: true)
+                try? await Task.sleep(for: .seconds(1))
+                NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: sv)
+                FileHandle.standardError.write(Data("[gate] scroll ended\n".utf8))
+                try? await Task.sleep(for: .seconds(1))
+                FileHandle.standardError.write(Data("[gate] done\n".utf8))
             }
             // Developer probe: one scan at launch, results logged.
             if ProcessInfo.processInfo.environment["GTT_PROBE_DISCOVER"] != nil {
@@ -380,6 +395,41 @@ final class AppModel {
         Task { await runLoad(req) }
     }
 
+    // MARK: Scrolling
+
+    /// Live scrolls in progress (trackpad / wheel, momentum included), from
+    /// AppKit's notifications — every SwiftUI scroll view and table here is
+    /// an NSScrollView. Not observed by views.
+    @ObservationIgnored private var liveScrolls = 0
+    @ObservationIgnored private var scrollEndedAt = Date.distantPast
+    @ObservationIgnored private var scrollObservers: [NSObjectProtocol] = []
+
+    private func watchScrolling() {
+        let center = NotificationCenter.default
+        scrollObservers = [
+            center.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.liveScrolls += 1 }
+            },
+            center.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.liveScrolls = max(0, self.liveScrolls - 1)
+                    self.scrollEndedAt = .now
+                }
+            },
+        ]
+    }
+
+    /// Until no scroll has moved for a moment (at most 3 s, so data is never
+    /// held back for long).
+    private func scrollIdle() async {
+        let deadline = Date.now.addingTimeInterval(3)
+        while Date.now < deadline,
+              liveScrolls > 0 || Date.now.timeIntervalSince(scrollEndedAt) < 0.35 {
+            try? await Task.sleep(for: .milliseconds(80))
+        }
+    }
+
     private func runLoad(_ req: LoadRequest) async {
         isLoading = true
         isScanning = req.scan
@@ -398,6 +448,17 @@ final class AppModel {
             // morph. Periodic refreshes stay instant (no motion while idle).
             let animate = animateNextData && r.vm != nil
             if animate { animateNextData = false }
+            // A background refresh (file watcher / timer) lands after the
+            // user stops scrolling: new figures re-render the cards and
+            // charts on the main thread, which hitched a scroll in progress.
+            // Changes the user asked for (range, filters) apply at once.
+            if !animate {
+                let held = Date.now
+                await scrollIdle()
+                if ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_GATE"] != nil {
+                    FileHandle.standardError.write(Data("[gate] refresh held \(Int(Date.now.timeIntervalSince(held) * 1000)) ms\n".utf8))
+                }
+            }
             withAnimation(animate ? Motion.resolved(Motion.select) : nil) {
                 if let vm = r.vm, vm != self.vm { self.vm = vm }
                 if let t = r.trend, t != trend { trend = t }

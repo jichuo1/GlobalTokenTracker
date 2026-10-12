@@ -53,8 +53,9 @@ final class MotionProbe: NSObject {
             let link = view.displayLink(target: self, selector: #selector(tick(_:)))
             link.add(to: .main, forMode: .common)
             self.link = link
+            let scrollOnly = ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_ALL"] != nil
             let tour = Page.allCases + Page.allCases.reversed()
-            let order = tour + tour + [.overview]
+            let order = scrollOnly ? [] : tour + tour + [.overview]
             var prev = model.page
             for page in order where page != prev {
                 gaps.removeAll()
@@ -77,7 +78,7 @@ final class MotionProbe: NSObject {
                 ("jump sources → overview", [(.overview, 0)]),
                 ("interrupt → prices ↩ detail", [(.prices, 0), (.detail, 180)]),
             ]
-            for (name, steps) in jumps {
+            for (name, steps) in scrollOnly ? [] : jumps {
                 gaps.removeAll()
                 last = 0
                 recording = true
@@ -92,7 +93,9 @@ final class MotionProbe: NSObject {
             }
             // Scrolling: an animated scroll down and back up on the Overview
             // (SwiftUI cards + charts) and the Details table (AppKit).
-            for page in [Page.overview, .detail] {
+            let scrollPages = ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_ALL"] != nil
+                ? Page.allCases : [Page.overview, .detail]
+            for page in scrollPages {
                 model.page = page
                 try? await Task.sleep(for: .milliseconds(1500))
                 guard let scroll = largestVisibleScrollView(in: view) else { continue }
