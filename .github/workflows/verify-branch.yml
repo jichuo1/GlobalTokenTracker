@@ -1,0 +1,208 @@
+name: Verify branch
+
+# Verify-only: the same build / test / clippy / package checks the release
+# workflows run, for work branches before they are merged. Never publishes,
+# tags or reads secrets; the release workflows (main only) stay the gate
+# for anything shipped.
+on:
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Windows runners default stdout to cp1252; printing Chinese warnings would
+  # raise UnicodeEncodeError in the Python helpers.
+  PYTHONUTF8: "1"
+
+jobs:
+  windows:
+    name: Windows build, test, clippy and package-check
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Resolve source-controlled build identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/release-templates/validate_build.py \
+            --cargo-toml Cargo.toml \
+            --channel alpha \
+            --release-tag "" \
+            --github-output "$GITHUB_OUTPUT"
+          {
+            echo "### Verify source"
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Subject: $(git log -1 --format=%s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # Named gates that do not short-circuit each other: one run reports
+      # every failure.
+      - name: Build workspace (debug)
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --workspace --all-targets
+
+      - name: Unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace
+
+      - name: Clippy (deny warnings)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Release build
+        id: release
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --workspace
+
+      - name: Validate installer packaging
+        id: package
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          installer\package.ps1
+          $exe = Get-Item "dist\GlobalTokenTracker-Setup-${{ steps.identity.outputs.version_name }}-win-x64.exe"
+          if ($exe.Length -lt 1MB) { throw "installer suspiciously small: $($exe.Length)" }
+          "installer_size=$($exe.Length)" >> "$env:GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned installer (testing only)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-installer-${{ github.sha }}
+          path: dist/GlobalTokenTracker-Setup-*-win-x64.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  macos:
+    name: macOS app and disk image
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Resolve source-controlled build identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/release-templates/validate_build.py \
+            --cargo-toml Cargo.toml \
+            --channel alpha \
+            --release-tag "" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # The Windows job never compiles cfg(target_os = "macos") code.
+      - name: Test and lint portable crates on macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi
+          cargo clippy -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi \
+            --all-targets -- -D warnings
+
+      # Ad-hoc signed: no signing identity or notarization secrets here.
+      - name: Build universal app and disk image
+        id: dmg
+        shell: bash
+        env:
+          VERSION_NAME: ${{ steps.identity.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION_NAME"
+          macos/scripts/build-app.sh --universal
+          macos/scripts/build-dmg.sh "$tag"
+          dmg="GlobalTokenTracker-${tag}-macos-universal.dmg"
+          test -s "target/macos/$dmg"
+          echo "dmg_filename=$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Verify disk image contents
+        shell: bash
+        env:
+          DMG: target/macos/${{ steps.dmg.outputs.dmg_filename }}
+        run: |
+          set -euo pipefail
+          size=$(stat -f%z "$DMG")
+          if (( size < 1048576 )); then echo "disk image suspiciously small: $size"; exit 1; fi
+          mount="$(hdiutil attach -readonly -nobrowse -noautoopen "$DMG" | awk -F'\t' '/\/Volumes\//{print $NF}')"
+          trap 'hdiutil detach -quiet "$mount" || true' EXIT
+          app="$mount/GlobalTokenTracker.app"
+          lipo "$app/Contents/MacOS/GlobalTokenTracker" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict --verbose=1 "$app"
+          test "$(readlink "$mount/Applications")" = /Applications
+          test -s "$mount/.background.tiff"
+          test -s "$mount/.DS_Store"
+
+      - name: Upload unsigned disk image (testing only)
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-dmg-${{ github.sha }}
+          path: target/macos/${{ steps.dmg.outputs.dmg_filename }}
+          if-no-files-found: error
+          retention-days: 3
