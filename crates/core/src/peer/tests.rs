@@ -765,15 +765,32 @@ fn pairing_happy_path_pins_and_authorizes() {
     let fp = state.identity.fingerprint.clone().unwrap();
 
     // Before pairing: only `hello`, which proves the certificate it claims.
-    let (status, hello) = client::pull(&viewer.path, &addr.to_string(), false, 1, "hello", "")
-        .unwrap()
-        .unwrap();
+    let (status, hello) = client::pull(
+        &viewer.path,
+        &addr.to_string(),
+        false,
+        false,
+        1,
+        "hello",
+        "",
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         (status, hello["fingerprint"].as_str()),
         (200, Some(fp.as_str()))
     );
     assert_eq!(
-        client::pull(&viewer.path, &addr.to_string(), false, 1, "summary", "").unwrap(),
+        client::pull(
+            &viewer.path,
+            &addr.to_string(),
+            false,
+            false,
+            1,
+            "summary",
+            ""
+        )
+        .unwrap(),
         Err("not_paired")
     );
 
@@ -793,7 +810,7 @@ fn pairing_happy_path_pins_and_authorizes() {
 
     // Pull by device name and by address; both use the pin and token.
     for target in ["test-mac", &addr.to_string()] {
-        let (status, s) = client::pull(&viewer.path, target, false, 1, "summary", "")
+        let (status, s) = client::pull(&viewer.path, target, false, false, 1, "summary", "")
             .unwrap()
             .unwrap();
         assert_eq!(status, 200, "{s}");
@@ -826,7 +843,7 @@ fn pairing_happy_path_pins_and_authorizes() {
     let trust = TrustStore::open(&peer_dir(&viewer.path)).unwrap();
     assert!(trust.forget("test-mac").unwrap().is_some());
     assert_eq!(
-        client::pull(&viewer.path, "test-mac", false, 1, "summary", "").unwrap(),
+        client::pull(&viewer.path, "test-mac", false, false, 1, "summary", "").unwrap(),
         Err("not_paired")
     );
 }
@@ -841,7 +858,7 @@ fn revoked_tokens_fail_immediately() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        client::pull(&viewer.path, "test-mac", false, 1, "sources", "")
+        client::pull(&viewer.path, "test-mac", false, false, 1, "sources", "")
             .unwrap()
             .unwrap()
             .0,
@@ -853,7 +870,7 @@ fn revoked_tokens_fail_immediately() {
         .unwrap()
         .unwrap();
     assert!(revoked.revoked_at.is_some());
-    let (status, v) = client::pull(&viewer.path, "test-mac", false, 1, "sources", "")
+    let (status, v) = client::pull(&viewer.path, "test-mac", false, false, 1, "sources", "")
         .unwrap()
         .unwrap();
     assert_eq!((status, code_of(&v)), (401, Some("auth_invalid")));
@@ -1051,7 +1068,7 @@ fn an_interceptor_certificate_can_neither_pair_nor_pull() {
         .unwrap();
     for ep in ["hello", "summary"] {
         assert_eq!(
-            client::pull(&viewer.path, "test-mac", false, 1, ep, "").unwrap(),
+            client::pull(&viewer.path, "test-mac", false, false, 1, ep, "").unwrap(),
             Err("peer_fingerprint_mismatch"),
             "{ep}"
         );
@@ -1081,4 +1098,266 @@ fn allowed_hosts_are_ip_literals_or_localhost() {
     ] {
         assert!(!allowed_host(bad), "{bad}");
     }
+}
+
+// ── discovery ─────────────────────────────────────────────────────────────
+
+use super::discovery::{self, Sighting, Txt};
+
+fn txt(id: char, name: &str, fp: char) -> Txt {
+    Txt {
+        protocol_version: 1,
+        device_id: id.to_string().repeat(32),
+        name: name.into(),
+        fingerprint_prefix: fp.to_string().repeat(16),
+    }
+}
+
+fn decode(pairs: &[(&str, &str)]) -> Result<Txt, &'static str> {
+    let map: BTreeMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    Txt::decode(|k| map.get(k).cloned())
+}
+
+#[test]
+fn txt_round_trips_and_rejects_untrusted_values() {
+    let t = txt('a', "书房 Mac", 'b');
+    let encoded = t.encode();
+    let keys: Vec<&str> = encoded.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["v", "id", "name", "fp"], "nothing usage-related");
+    let map: BTreeMap<String, String> = encoded.into_iter().collect();
+    assert_eq!(Txt::decode(|k| map.get(k).cloned()), Ok(t.clone()));
+
+    let id = "a".repeat(32);
+    let fp = "b".repeat(16);
+    let ok =
+        |v: &str, i: &str, n: &str, f: &str| decode(&[("v", v), ("id", i), ("name", n), ("fp", f)]);
+    assert!(ok("1", &id, "x", &fp).is_ok());
+    assert_eq!(ok("0", &id, "x", &fp), Err("txt_invalid_version"));
+    assert_eq!(ok("one", &id, "x", &fp), Err("txt_invalid_version"));
+    assert_eq!(
+        ok("1", &"A".repeat(32), "x", &fp),
+        Err("txt_invalid_device_id")
+    );
+    assert_eq!(
+        ok("1", &"a".repeat(31), "x", &fp),
+        Err("txt_invalid_device_id")
+    );
+    assert_eq!(ok("1", &id, " \u{7} ", &fp), Err("txt_invalid_name"));
+    assert_eq!(
+        ok("1", &id, "x", &"b".repeat(64)),
+        Err("txt_invalid_fingerprint")
+    );
+    assert_eq!(
+        ok("1", &id, "x", "zzzzzzzzzzzzzzzz"),
+        Err("txt_invalid_fingerprint")
+    );
+    assert_eq!(decode(&[("v", "1")]), Err("txt_invalid_device_id"));
+
+    // Long multi-byte names are cut on a character boundary to fit a TXT string.
+    let long = txt('a', &"名".repeat(80), 'b');
+    let name = long.encode().remove(2).1;
+    assert!(name.len() <= 200 && name.chars().all(|c| c == '名'));
+    assert!(
+        Txt::for_identity(&Identity {
+            device_id: id.clone(),
+            device_name: "x".into(),
+            fingerprint: None
+        })
+        .is_none()
+    );
+}
+
+fn sock(s: &str) -> std::net::SocketAddr {
+    s.parse().unwrap()
+}
+
+fn peer_row(id: char, fp: &str) -> super::trust::Peer {
+    super::trust::Peer {
+        fingerprint: fp.into(),
+        device_id: id.to_string().repeat(32),
+        device_name: "paired".into(),
+        address: "192.0.2.9:4319".into(),
+        token: "t".repeat(64),
+        paired_at: 0,
+        last_pulled_at: None,
+    }
+}
+
+#[test]
+fn browse_answers_merge_across_interfaces_and_flag_mismatches() {
+    let a = txt('a', "Studio", 'b');
+    let sightings = vec![
+        // The same device answers once per interface and family.
+        Sighting {
+            addresses: vec![sock("[fe80::1%4]:4319"), sock("192.168.1.20:4319")],
+            txt: Ok(a.clone()),
+        },
+        Sighting {
+            addresses: vec![sock("192.168.1.20:4319"), sock("[2001:db8::20]:4319")],
+            txt: Ok(a.clone()),
+        },
+        Sighting {
+            addresses: vec![sock("10.0.0.5:4319")],
+            txt: Ok(txt('c', "Attic", 'd')),
+        },
+        Sighting {
+            addresses: vec![sock("10.0.0.6:4319")],
+            txt: Ok(txt('e', "Shed", 'f')),
+        },
+        Sighting {
+            addresses: vec![sock("10.0.0.6:4319")],
+            txt: Ok(txt('e', "Shed", '0')),
+        },
+        Sighting {
+            addresses: vec![sock("10.0.0.7:4319")],
+            txt: Err("txt_invalid_device_id"),
+        },
+    ];
+    let peers = vec![
+        peer_row('a', &"b".repeat(64)),
+        peer_row('c', &"9".repeat(64)),
+    ];
+    let (found, invalid) = discovery::merge(&sightings, &peers);
+    assert_eq!(invalid, 1);
+    let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Attic", "Shed", "Shed", "Studio"]);
+    let studio = &found[3];
+    assert_eq!(
+        studio.addresses,
+        [
+            "192.168.1.20:4319",
+            "[2001:db8::20]:4319",
+            "[fe80::1%4]:4319"
+        ],
+        "deduplicated, IPv4 first, link-local last with its scope"
+    );
+    assert_eq!(studio.port, 4319);
+    assert!(studio.paired && studio.warnings.is_empty());
+    // Paired, but the advertised prefix is not the pinned certificate's.
+    assert!(found[0].paired);
+    assert_eq!(found[0].warnings, ["fingerprint_mismatch"]);
+    // Two certificates claim one device id: both listed, both flagged.
+    for shed in &found[1..3] {
+        assert!(!shed.paired);
+        assert_eq!(shed.warnings, ["duplicate_device_id"]);
+    }
+    assert_ne!(found[1].fingerprint_prefix, found[2].fingerprint_prefix);
+}
+
+#[test]
+fn addresses_parse_with_default_ports_ipv6_and_scopes() {
+    let r = |s: &str| client::resolve(s);
+    assert_eq!(r("127.0.0.1"), Ok(sock("127.0.0.1:4319")));
+    assert_eq!(r("https://127.0.0.1:9/"), Ok(sock("127.0.0.1:9")));
+    assert_eq!(r("::1"), Ok(sock("[::1]:4319")));
+    assert_eq!(r("[::1]"), Ok(sock("[::1]:4319")));
+    assert_eq!(r("[::1]:7"), Ok(sock("[::1]:7")));
+    assert_eq!(r("[fe80::1%4]:7"), Ok(sock("[fe80::1%4]:7")));
+    // Interface names resolve to the numeric scope.
+    let lo = if cfg!(target_os = "macos") {
+        "lo0"
+    } else {
+        "lo"
+    };
+    if cfg!(unix) {
+        let a = r(&format!("fe80::1%{lo}")).unwrap();
+        let std::net::SocketAddr::V6(v6) = a else {
+            panic!("{a}")
+        };
+        assert!(v6.scope_id() != 0 && v6.port() == 4319, "{a}");
+        assert_eq!(r(&format!("[fe80::1%{lo}]:5")).unwrap().port(), 5);
+    }
+    for bad in ["", "[::1", "[::1]x", "127.0.0.1:port", ":4319"] {
+        assert!(r(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn paired_devices_are_refound_by_device_id_before_the_saved_address() {
+    let server_f = fixture();
+    let viewer = fixture();
+    let attacker_f = fixture();
+    let (addr, state) = start(&server_f, true);
+    let (fake_addr, _) = start(&attacker_f, true);
+    let code = state.issue_code().unwrap();
+    let mut peer = pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        discovery::candidates(&[addr], &addr.to_string()),
+        [addr.to_string()]
+    );
+    assert_eq!(
+        discovery::candidates(&[fake_addr], "192.0.2.1:1"),
+        [fake_addr.to_string(), "192.0.2.1:1".to_string()]
+    );
+
+    // DHCP moved the device: the saved address is dead, mDNS knows the new one.
+    peer.address = "127.0.0.1:9".into();
+    let trust = TrustStore::open(&peer_dir(&viewer.path)).unwrap();
+    trust.save_peer(&peer).unwrap();
+    let id = server_f.identity.device_id.clone();
+    let asked = std::cell::RefCell::new(Vec::new());
+    let locate = |device_id: &str, _: &str| {
+        asked.borrow_mut().push(device_id.to_string());
+        vec![addr]
+    };
+    let (status, _) = client::pull_via(&viewer.path, "test-mac", false, &locate, 1, "sources", "")
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(*asked.borrow(), [id]);
+    // The working address is remembered.
+    assert_eq!(
+        trust.find_peer("test-mac").unwrap().unwrap().address,
+        addr.to_string()
+    );
+
+    // A different device answering on mDNS is skipped (pin check) and the
+    // saved address still works.
+    let liar = |_: &str, _: &str| vec![fake_addr];
+    let (status, _) = client::pull_via(&viewer.path, "test-mac", false, &liar, 1, "sources", "")
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(
+        trust.find_peer("test-mac").unwrap().unwrap().address,
+        addr.to_string()
+    );
+    // Only an impostor anywhere → fail closed with the mismatch.
+    trust
+        .save_peer(&super::trust::Peer {
+            address: fake_addr.to_string(),
+            ..peer
+        })
+        .unwrap();
+    assert_eq!(
+        client::pull_via(&viewer.path, "test-mac", false, &liar, 1, "sources", "").unwrap(),
+        Err("peer_fingerprint_mismatch")
+    );
+}
+
+/// Real multicast: advertise and browse on this host. Needs a network
+/// interface with multicast (and, on macOS, local-network access).
+#[test]
+#[ignore = "needs multicast networking"]
+fn advertisement_is_discoverable_and_withdrawn() {
+    let t = txt('7', "mdns-it", '8');
+    let ad = discovery::Advertisement::start(&t, sock("0.0.0.0:47399")).unwrap();
+    let id = t.device_id.clone();
+    let seen = discovery::browse(Duration::from_secs(5), |s| {
+        s.txt.as_ref().is_ok_and(|x| x.device_id == id)
+    })
+    .unwrap();
+    let (found, _) = discovery::merge(&seen, &[]);
+    let me = found
+        .iter()
+        .find(|f| f.device_id == t.device_id)
+        .expect("advertised");
+    assert_eq!((me.name.as_str(), me.port), ("mdns-it", 47399));
+    assert!(!me.addresses.is_empty());
+    ad.withdraw();
 }

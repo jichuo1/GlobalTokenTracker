@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use globaltokentracker_core::Store;
 use globaltokentracker_core::peer::{
-    self, SummaryQuery, client,
+    self, SummaryQuery, client, discovery,
     keys::{DeviceKey, peer_dir},
     pairing,
     server::{self, ServerState},
@@ -10,7 +10,8 @@ use globaltokentracker_core::peer::{
 };
 use serde_json::{Value, json};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -26,10 +27,24 @@ pub enum Command {
         /// No TLS (loopback addresses only; pairing is then unavailable).
         #[arg(long)]
         plaintext: bool,
+        /// Do not advertise `_gtt._tcp` on mDNS (LAN binds advertise by default).
+        #[arg(long)]
+        no_advertise: bool,
+    },
+    /// Browse the local network for GTT devices (mDNS `_gtt._tcp`). Results
+    /// are hints: pairing and pulls still verify the pinned certificate.
+    Discover {
+        /// Seconds to listen for answers.
+        #[arg(long, default_value_t = 3)]
+        timeout: u64,
+        #[arg(long, default_value = "json", value_parser = ["json"])]
+        format: String,
     },
     /// Pair with a device using the 6-digit code it shows; pins its certificate.
     Pair {
-        /// Device address: host[:port] (default port 4319).
+        /// Device address: host[:port], IPv4 or IPv6 (`[fe80::1%en0]:4319` for
+        /// link-local); the port defaults to 4319. Use an address from
+        /// `peer discover`, or type it when mDNS is blocked.
         addr: String,
         /// The one-time code printed by `peer serve`.
         code: String,
@@ -53,6 +68,9 @@ pub enum Command {
         /// Talk to a `--plaintext` server (loopback addresses only).
         #[arg(long)]
         plaintext: bool,
+        /// Skip the mDNS lookup of a paired device's current address.
+        #[arg(long)]
+        no_discover: bool,
         #[arg(long, default_value = "json", value_parser = ["json"])]
         format: String,
         #[arg(long, default_value_t = peer::PROTOCOL_VERSION)]
@@ -83,7 +101,16 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
             bind,
             name,
             plaintext,
-        } => serve(db, bind, name.as_deref(), *plaintext),
+            no_advertise,
+        } => serve(db, bind, name.as_deref(), *plaintext, !*no_advertise),
+        Command::Discover { timeout, .. } => {
+            let (found, invalid) =
+                discovery::discover(db, Duration::from_secs((*timeout).clamp(1, 60)))?;
+            print(
+                &json!({"protocol": peer::PROTOCOL, "operation": "discover", "status": "ok",
+                "service": discovery::SERVICE_TYPE, "devices": found, "invalid_answers": invalid}),
+            )
+        }
         Command::Pair { addr, code, name } => {
             let name = name.clone().unwrap_or_else(default_name);
             match pairing::pair(db, addr, code.trim(), &name)? {
@@ -98,6 +125,7 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
             from,
             known,
             plaintext,
+            no_discover,
             protocol_version,
             ..
         } => {
@@ -117,7 +145,15 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
             } else {
                 String::new()
             };
-            match client::pull(db, target, *plaintext, *protocol_version, endpoint, &query)? {
+            match client::pull(
+                db,
+                target,
+                *plaintext,
+                !*no_discover,
+                *protocol_version,
+                endpoint,
+                &query,
+            )? {
                 Ok((status, body)) => {
                     print(&body)?;
                     if status != 200 {
@@ -165,7 +201,13 @@ fn default_name() -> String {
         .unwrap_or_else(|| "viewer".into())
 }
 
-fn serve(db: &Path, bind: &str, name: Option<&str>, plaintext: bool) -> Result<()> {
+fn serve(
+    db: &Path,
+    bind: &str,
+    name: Option<&str>,
+    plaintext: bool,
+    advertise: bool,
+) -> Result<()> {
     // Refuse a plaintext non-loopback bind before touching anything.
     let listener = server::bind(bind, !plaintext)?;
     // The only ledger write: create the device id (and save --name) on the
@@ -210,6 +252,29 @@ fn serve(db: &Path, bind: &str, name: Option<&str>, plaintext: bool) -> Result<(
     } else {
         eprintln!("peer: plaintext loopback — pairing unavailable");
     }
+    // Advertise only LAN TLS servers; withdraw (mDNS goodbye) on Ctrl-C/SIGTERM.
+    let advert = Arc::new(Mutex::new(None));
+    if advertise && !plaintext && !local.ip().is_loopback() {
+        let txt = discovery::Txt::for_identity(&state.identity).context("peer: no fingerprint")?;
+        match discovery::Advertisement::start(&txt, local) {
+            Ok(ad) => {
+                eprintln!("peer: advertising {} on mDNS", discovery::SERVICE_TYPE);
+                *advert.lock().map_err(|_| anyhow::anyhow!("poisoned"))? = Some(ad);
+            }
+            Err(e) => {
+                eprintln!("peer: mDNS advertisement unavailable ({e:#}); add this device by IP")
+            }
+        }
+    }
+    let on_exit = Arc::clone(&advert);
+    ctrlc::set_handler(move || {
+        if let Some(ad) = on_exit.lock().ok().and_then(|mut a| a.take()) {
+            ad.withdraw();
+            eprintln!("peer: mDNS advertisement withdrawn");
+        }
+        std::process::exit(0);
+    })
+    .context("peer: install signal handler")?;
     server::serve(&listener, state)
 }
 
@@ -217,10 +282,15 @@ fn show_code(state: &ServerState, local: std::net::SocketAddr) -> Result<()> {
     let code = state.issue_code()?;
     eprintln!(
         "peer: pairing code {} {} — valid {} s, single use. On the viewer: \
-         globaltokentracker-cli peer pair {local} {code}",
+         globaltokentracker-cli peer pair {} {code}",
         &code[..3],
         &code[3..],
-        pairing::CODE_TTL.as_secs()
+        pairing::CODE_TTL.as_secs(),
+        if local.ip().is_unspecified() {
+            format!("<this device's IP>:{}", local.port())
+        } else {
+            local.to_string()
+        }
     );
     Ok(())
 }

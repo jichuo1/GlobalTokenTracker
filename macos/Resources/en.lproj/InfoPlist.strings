@@ -1,0 +1,2 @@
+/* Local Network privacy prompt (LAN multi-device viewing, _gtt._tcp). */
+"NSLocalNetworkUsageDescription" = "GlobalTokenTracker finds and connects to your other devices running GlobalTokenTracker on this network so you can view their token usage side by side. Only paired devices can read usage totals.";

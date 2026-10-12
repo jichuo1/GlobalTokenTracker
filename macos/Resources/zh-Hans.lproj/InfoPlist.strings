@@ -1,0 +1,2 @@
+/* 本地网络隐私提示（局域网多设备查看，_gtt._tcp）。 */
+"NSLocalNetworkUsageDescription" = "GlobalTokenTracker 会在此网络中查找并连接你其他运行 GlobalTokenTracker 的设备，以便并列查看各设备的 Token 用量。只有已配对的设备才能读取用量汇总。";

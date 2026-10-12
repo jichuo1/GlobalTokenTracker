@@ -16,6 +16,7 @@
 //! equivalence tests below.
 
 pub mod client;
+pub mod discovery;
 pub mod keys;
 mod net;
 pub mod pairing;

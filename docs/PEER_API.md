@@ -1,20 +1,23 @@
 # GTT 局域网对等接口 v1
 
-版本化只读 HTTP JSON 协议 `gtt.peer` 让同一局域网内的另一台 GTT 设备拉取本机的用量聚合，与自己的数据并列显示。对等方只交换紧凑聚合，不交换原始事件。目前有核心协议、设备身份、配对、TLS 与撤销，以及便于无界面测试的 CLI；mDNS `_gtt._tcp` 发现与 Mac/Windows 界面属于后续阶段。
+版本化只读 HTTP JSON 协议 `gtt.peer` 让同一局域网内的另一台 GTT 设备拉取本机的用量聚合，与自己的数据并列显示。对等方只交换紧凑聚合，不交换原始事件。目前有核心协议、设备身份、配对、TLS、撤销、mDNS `_gtt._tcp` 发现与按 IP 手动添加，以及便于无界面测试的 CLI；Mac/Windows 界面属于后续阶段。
 
 ## 调用与边界
 
 ```bash
 # 被查看的设备（服务端）
 globaltokentracker-cli peer serve                                   # 默认仅 127.0.0.1:4319，TLS
-globaltokentracker-cli peer serve --bind 192.168.1.20:4319 --name "书房 Mac"
+globaltokentracker-cli peer serve --bind 192.168.1.20:4319 --name "书房 Mac"   # 同时在 mDNS 上通告
+globaltokentracker-cli peer serve --bind 0.0.0.0:4319 --no-advertise         # 不通告，只能按 IP 添加
 globaltokentracker-cli peer list                                    # 已配对的查看方（及本机配对过的设备）
 globaltokentracker-cli peer revoke <查看方 id 或名称>
 
 # 查看方
+globaltokentracker-cli peer discover --timeout 3 --format json                # 列出网络中的 GTT 设备
 globaltokentracker-cli peer pair 192.168.1.20:4319 408036 --name "笔记本"
 globaltokentracker-cli peer pull "书房 Mac" --endpoint summary --from 2026-10-01
 globaltokentracker-cli peer pull 192.168.1.20 --endpoint hello      # 未配对时只能读 hello
+globaltokentracker-cli peer pull "书房 Mac" --endpoint days --no-discover   # 跳过 mDNS，直接用上次地址
 globaltokentracker-cli peer forget "书房 Mac"
 ```
 
@@ -22,7 +25,7 @@ globaltokentracker-cli peer forget "书房 Mac"
 
 `serve` 启动时用常规读写方式打开账本，在 `app_state` 中生成一次稳定的 `device_id`（`peer.device_id.v1`），`--name` 存为 `peer.device_name.v1`；未指定名称时依次取 `COMPUTERNAME`、`HOSTNAME`，否则为 `GTT-<device_id 前 6 位>`。此后每个数据请求都用 SQLite 只读连接与单个读事务读取同一 WAL 快照，协议读路径从不写账本。配对与授权状态不写账本，单独保存在 `peer.db`（见下文）。
 
-CLI 的 stdout 只有一个 UTF-8 JSON 文档。客户端侧失败（未配对、指纹不符、连接失败等）输出固定码的失败文档并以非零退出；服务端返回非 200 时也以非零退出。地址可带 `https://` 前缀，省略端口时用 4319。
+CLI 的 stdout 只有一个 UTF-8 JSON 文档。客户端侧失败（未配对、指纹不符、连接失败等）输出固定码的失败文档并以非零退出；服务端返回非 200 时也以非零退出。地址可带 `https://` 前缀，省略端口时用 4319；格式见下文“按 IP 添加”。
 
 ## 安全模型
 
@@ -51,6 +54,35 @@ T = SHA-256("gtt.peer/pair/v1" ‖ 证书指纹 ‖ 查看方名称 ‖ Ns₀ �
 **撤销**：`peer revoke` 设置撤销时间；服务端每个请求都重新读取 `viewers` 表，被撤销的令牌下一次请求即返回 401 `auth_invalid`，无需重启。查看方 `peer forget` 删除本地的固定指纹与令牌。
 
 **回环明文**：`--plaintext` 仅用于本机调试，不能配对（`tls_required`），数据端点仍需令牌；客户端只向回环地址发送明文请求（`plaintext_not_allowed`）。
+
+## 发现与按 IP 添加
+
+**通告**：`peer serve` 绑定非回环地址（TLS）时，在 mDNS 上通告 `_gtt._tcp`，直到进程退出；Ctrl-C 或 SIGTERM 时先发送 mDNS goodbye 撤回通告再退出。`--no-advertise` 关闭通告。绑定具体地址时只通告该地址；绑定 `0.0.0.0`/`::` 时通告本机该协议族的地址。实现使用纯 Rust 的 `mdns-sd`（自带守护线程，不需要异步运行时）。
+
+TXT 记录只有四项，不含任何用量信息：
+
+| 键 | 内容 |
+|---|---|
+| `v` | 协议版本 |
+| `id` | `device_id`（32 位十六进制） |
+| `name` | 显示名称（截断到 200 字节以内） |
+| `fp` | 证书指纹前 16 位十六进制 |
+
+**浏览**：`peer discover [--timeout 秒]` 输出 `devices` 列表，每项含 `device_id`、`name`、`protocol_version`、`addresses`（IPv4 在前，其次全局 IPv6，最后带 scope id 的链路本地 IPv6，可直接用于 `peer pair`）、`port`、`fingerprint_prefix`、`paired` 与 `warnings`，另有 `invalid_answers`（TXT 不合规而被忽略的应答数）。同一设备在多个网卡、多个协议族上的应答按 (`device_id`, 指纹前缀) 合并去重。警告：
+
+- `fingerprint_mismatch`：已配对，但通告的指纹前缀不是已固定的证书；拉取会因固定指纹不符而失败。
+- `duplicate_device_id`：两张证书声称同一个 `device_id`（例如账本被复制到另一台机器），分别列出。
+
+**发现只是提示**：配对仍由配对码交换建立信任，拉取仍校验完整的固定指纹；mDNS 应答本身不被信任。
+
+**地址变化**：对已配对设备按名称、id 或指纹拉取时，先在 mDNS 上按 `device_id` 查找（约 1.5 秒，且只接受指纹前缀与固定指纹一致的应答），再回退到上次成功的地址；每个候选地址都校验固定指纹，成功后保存新地址。`--no-discover` 跳过 mDNS。直接给出地址时按给出的地址连接。
+
+**按 IP 添加**：mDNS 被拦截时（访客 Wi-Fi、VLAN、客户端隔离、企业网络）直接用地址配对：`host[:port]`、IPv4、IPv6（裸地址或 `[地址]:端口`），链路本地 IPv6 需带 scope id，如 `fe80::1%en0` 或 `[fe80::1%en0]:4319`（也可用接口序号）。省略端口时用 4319。
+
+**平台说明**：
+
+- macOS：未来的 App 需在 Info.plist 中声明 `NSLocalNetworkUsageDescription` 与 `NSBonjourServices`（`_gtt._tcp`），已加入 `macos/Resources/Info.plist` 及中英文 `InfoPlist.strings`。未获“本地网络”权限的进程发往局域网的数据（含 mDNS 组播）会被系统以 “No route to host” 拒绝，只剩回环可用；从终端运行 CLI 时，权限归属于启动它的终端类 App，需在“系统设置 › 隐私与安全性 › 本地网络”中允许。应用防火墙开启时，还需允许其接收传入连接。
+- Windows：只应为“专用”网络配置文件放行 TCP 4319 与 UDP 5353（mDNS），不要放行“公用”配置文件；安装程序暂未自动添加规则。
 
 ## HTTP 约束
 
@@ -86,7 +118,7 @@ T = SHA-256("gtt.peer/pair/v1" ‖ 证书指纹 ‖ 查看方名称 ‖ Ns₀ �
 | `not_paired` / `ambiguous_peer` / `unknown_peer` | 目标未配对 / 名称匹配多台设备 / forget 找不到设备 | 否 |
 | `unknown_viewer` / `ambiguous_viewer` | revoke 找不到 / 名称匹配多个查看方（请用 id） | 否 |
 | `peer_fingerprint_mismatch` | 对方证书与固定指纹不符，未发送任何请求 | 否 |
-| `connect_failed` / `tls_failed` / `plaintext_not_allowed` / `malformed_response` | 连接失败 / TLS 握手失败 / 向非回环地址发明文 / 响应格式错误 | 否 |
+| `connect_failed` / `tls_failed` / `plaintext_not_allowed` / `malformed_response` | 连接失败（含所有候选地址均不可达）/ TLS 握手失败 / 向非回环地址发明文 / 响应格式错误 | 否 |
 | `invalid_request` / `unknown_endpoint` / `method_not_allowed` / `request_too_large` / `request_timeout` / `host_not_allowed` | 请求层错误 | 否 |
 | `server_busy` | 并发连接已满 | 是 |
 

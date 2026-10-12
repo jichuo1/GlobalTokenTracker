@@ -4,7 +4,7 @@
 use super::keys::{PinVerifier, peer_dir};
 use super::net::{IO_TIMEOUT, Stream, Wire};
 use super::server::DEFAULT_PORT;
-use super::trust::TrustStore;
+use super::trust::{Peer, TrustStore};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, StreamOwned};
 use serde_json::Value;
@@ -19,23 +19,34 @@ const READ_DEADLINE: Duration = Duration::from_secs(60);
 const MAX_RESPONSE: usize = 256 << 20;
 
 /// `host[:port]` (optionally `http(s)://`-prefixed) → one socket address.
+/// Hosts may be names, IPv4, or IPv6 — bare (`fe80::1%en0`) or bracketed
+/// (`[fe80::1%en0]:4319`), link-local with a scope id (interface name or
+/// index). The port defaults to [`DEFAULT_PORT`].
 pub(crate) fn resolve(addr: &str) -> Result<SocketAddr, &'static str> {
     let addr = addr
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/');
-    let with_port = if addr.parse::<SocketAddr>().is_ok()
-        || addr
-            .rsplit_once(':')
-            .is_some_and(|(h, p)| p.parse::<u16>().is_ok() && !h.contains(':'))
-    {
-        addr.to_string()
-    } else if addr.contains(':') && !addr.starts_with('[') {
-        format!("[{addr}]:{DEFAULT_PORT}")
+    let (host, port) = if let Some(rest) = addr.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']').ok_or("connect_failed")?;
+        let port = match tail.strip_prefix(':') {
+            Some(p) => p.parse::<u16>().map_err(|_| "connect_failed")?,
+            None if tail.is_empty() => DEFAULT_PORT,
+            None => return Err("connect_failed"),
+        };
+        (host, port)
+    } else if addr.matches(':').count() >= 2 {
+        // A bare IPv6 address cannot carry a port.
+        (addr, DEFAULT_PORT)
+    } else if let Some((host, port)) = addr.rsplit_once(':') {
+        (host, port.parse::<u16>().map_err(|_| "connect_failed")?)
     } else {
-        format!("{addr}:{DEFAULT_PORT}")
+        (addr, DEFAULT_PORT)
     };
-    with_port
+    if host.is_empty() {
+        return Err("connect_failed");
+    }
+    (host, port)
         .to_socket_addrs()
         .ok()
         .and_then(|mut a| a.next())
@@ -108,36 +119,84 @@ pub type PullOutcome = Result<(u16, Value), &'static str>;
 /// name or saved address) or a bare address. Paired devices are reached over
 /// TLS with their pinned fingerprint and bearer token; an unpaired address
 /// allows `hello` only. `plaintext` is honoured for loopback addresses only.
+///
+/// With `rediscover`, a paired device named by id/name is first looked up on
+/// mDNS by device id (its address may have changed), then tried at its last
+/// known address. Every candidate is pin-verified; a newly working address
+/// is saved.
 pub fn pull(
     db: &Path,
     target: &str,
     plaintext: bool,
+    rediscover: bool,
+    version: u32,
+    endpoint: &str,
+    query: &str,
+) -> anyhow::Result<PullOutcome> {
+    let locate = |device_id: &str, fingerprint: &str| {
+        if rediscover && !plaintext {
+            super::discovery::locate(device_id, fingerprint, super::discovery::LOCATE_TIMEOUT)
+        } else {
+            Vec::new()
+        }
+    };
+    pull_via(db, target, plaintext, &locate, version, endpoint, query)
+}
+
+/// [`pull`] with the mDNS lookup supplied by the caller (tests).
+pub(crate) fn pull_via(
+    db: &Path,
+    target: &str,
+    plaintext: bool,
+    locate: &dyn Fn(&str, &str) -> Vec<SocketAddr>,
     version: u32,
     endpoint: &str,
     query: &str,
 ) -> anyhow::Result<PullOutcome> {
     let trust = TrustStore::open(&peer_dir(db))?;
-    let peer = match trust.find_peer(target) {
+    let found = match trust.find_peer(target) {
         Ok(found) => found,
         Err(e) if e.is::<super::trust::Ambiguous>() => return Ok(Err("ambiguous_peer")),
         Err(e) => return Err(e),
     };
-    let address = peer.as_ref().map_or(target, |p| p.address.as_str());
-    let addr = match resolve(address) {
-        Ok(a) => a,
-        Err(code) => return Ok(Err(code)),
+    // An explicit address is used as given; a paired device may move.
+    let (peer, candidates) = if let Some(peer) = found {
+        let located = locate(&peer.device_id, &peer.fingerprint);
+        let candidates: Vec<SocketAddr> = super::discovery::candidates(&located, &peer.address)
+            .iter()
+            .filter_map(|c| resolve(c).ok())
+            .collect();
+        (Some(peer), candidates)
+    } else {
+        let addr = match resolve(target) {
+            Ok(a) => a,
+            Err(code) => return Ok(Err(code)),
+        };
+        match trust.find_peer(&addr.to_string()) {
+            Ok(peer) => (peer, vec![addr]),
+            Err(_) => return Ok(Err("ambiguous_peer")),
+        }
     };
-    let peer = peer.or(match trust.find_peer(&addr.to_string()) {
-        Ok(found) => found,
-        Err(_) => return Ok(Err("ambiguous_peer")),
-    });
     if endpoint != "hello" && peer.is_none() {
         return Ok(Err("not_paired"));
     }
-    let verifier = PinVerifier::new(peer.as_ref().map(|p| p.fingerprint.as_str()));
-    let mut wire = match connect(addr, (!plaintext).then_some(&verifier)) {
-        Ok(w) => w,
-        Err(code) => return Ok(Err(code)),
+    let pin = peer.as_ref().map(|p| p.fingerprint.as_str());
+    let mut failure = "connect_failed";
+    let mut connected = None;
+    for addr in candidates {
+        let verifier = PinVerifier::new(pin);
+        match connect(addr, (!plaintext).then_some(&verifier)) {
+            Ok(wire) => {
+                connected = Some((addr, wire, verifier));
+                break;
+            }
+            // A mismatch anywhere is the most important thing to report.
+            Err(code) if failure != "peer_fingerprint_mismatch" => failure = code,
+            Err(_) => {}
+        }
+    }
+    let Some((addr, mut wire, verifier)) = connected else {
+        return Ok(Err(failure));
     };
     let query = if query.is_empty() {
         String::new()
@@ -162,6 +221,13 @@ pub fn pull(
         result = Err("peer_fingerprint_mismatch");
     }
     if let (Ok((200, _)), Some(p)) = (&result, &peer) {
+        let address = addr.to_string();
+        if address != p.address && !plaintext {
+            trust.save_peer(&Peer {
+                address,
+                ..p.clone()
+            })?;
+        }
         trust.touch_peer(&p.fingerprint, crate::store::now_ms())?;
     }
     Ok(result)
