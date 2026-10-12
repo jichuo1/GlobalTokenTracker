@@ -24,7 +24,7 @@
 
 ## Overview
 
-GlobalTokenTracker (current version 0.8.0, Windows and macOS) unifies local usage stats from AI coding tools: token counts, estimated USD cost from a live price book, subscription quota/credit balances, latency and model distribution. It incrementally scans on-disk logs **read-only** into a local SQLite ledger — nothing is uploaded.
+GlobalTokenTracker (current version 0.8.1, Windows and macOS) unifies local usage stats from AI coding tools: token counts, estimated USD cost from a live price book, subscription quota/credit balances, latency and model distribution. It incrementally scans on-disk logs **read-only** into a local SQLite ledger — nothing is uploaded.
 
 The Windows UI is native WinUI 3 (Rust + windows-reactor); the macOS app is native SwiftUI. Both run the same Rust core (adapters, pricing, ledger), so the same logs give the same numbers on either platform. Built for small binaries, fast cold start and stable tray/menu-bar residency.
 
@@ -111,7 +111,7 @@ macOS (Rust + Swift 6.2+; the Command Line Tools are enough):
 
 ```bash
 macos/scripts/build-app.sh --universal            # target/macos/GlobalTokenTracker.app
-macos/scripts/build-dmg.sh v0.8.0                 # installer disk image
+macos/scripts/build-dmg.sh v0.8.1                 # installer disk image
 cargo build --release -p globaltokentracker-cli   # CLI
 ```
 

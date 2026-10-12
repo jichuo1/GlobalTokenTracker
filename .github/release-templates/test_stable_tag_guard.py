@@ -10,7 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TAG = "v0.8.0"
+TAG = "v0.8.1"
 
 
 class StableTagGuardTests(unittest.TestCase):
