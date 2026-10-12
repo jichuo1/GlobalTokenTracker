@@ -196,20 +196,20 @@ private struct StatTiles: View {
         let rl = Text(vm.range.title)
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 16)], spacing: 16) {
             Tile(title: Text("\(rl) Tokens"), symbol: "number",
-                 value: Fmt.tokensExact(vm.span.tokens),
+                 value: Fmt.tokensExact(vm.span.tokens), amount: Double(vm.span.tokens),
                  detail: Text("Events \(Fmt.count(vm.span.events))"))
                 .cascade(0)
             Tile(title: Text("\(rl) Est. Cost"), symbol: "dollarsign",
-                 value: Fmt.usd(vm.span.costUsd),
+                 value: Fmt.usd(vm.span.costUsd), amount: vm.span.costUsd,
                  detail: Text("All time \(Fmt.usd(vm.all.costUsd))"),
                  badge: "Estimated")
                 .cascade(1)
             Tile(title: Text("\(rl) Cache Read"), symbol: "memorychip",
-                 value: Fmt.tokensExact(vm.span.cacheReadTokens),
+                 value: Fmt.tokensExact(vm.span.cacheReadTokens), amount: Double(vm.span.cacheReadTokens),
                  detail: Text("Input \(Fmt.tokensExact(vm.span.inputTokens))"))
                 .cascade(2)
             Tile(title: Text("\(rl) Events"), symbol: "arrow.left.arrow.right",
-                 value: Fmt.count(vm.span.events),
+                 value: Fmt.count(vm.span.events), amount: Double(vm.span.events),
                  detail: Text("Active \(Fmt.duration(ms: vm.span.activeMs))"))
                 .cascade(3)
         }
@@ -220,6 +220,9 @@ private struct Tile: View {
     let title: Text
     let symbol: String
     let value: String
+    /// The figure as a number: digits roll up when it grows, down when it
+    /// shrinks (range / filter changes animate the new data in).
+    let amount: Double
     let detail: Text
     var badge: LocalizedStringKey?
 
@@ -227,7 +230,7 @@ private struct Tile: View {
         Card {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Label { title } icon: { Image(systemName: symbol) }
+                    Label { title.contentTransition(.numericText()) } icon: { Image(systemName: symbol) }
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -239,13 +242,17 @@ private struct Tile: View {
                             .foregroundStyle(.tint)
                     }
                 }
+                .depthLayer(1)
                 Text(value)
                     .font(.system(.title, design: .rounded, weight: .semibold))
                     .monospacedDigit()
-                    .contentTransition(.numericText())
+                    .contentTransition(.numericText(value: amount))
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
+                    .depthLayer(2)
                 detail.font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    .contentTransition(.numericText())
+                    .depthLayer(3)
             }
         }
     }
@@ -464,6 +471,7 @@ private struct Donut: View {
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         Text(format(selected?.costUsd ?? total))
                             .font(.headline).monospacedDigit()
+                            .contentTransition(.numericText(value: selected?.costUsd ?? total))
                     }
                     .frame(maxWidth: 90)
                 }
@@ -475,6 +483,7 @@ private struct Donut: View {
                             Spacer(minLength: 8)
                             Text(Fmt.percent(s.costUsd / total * 100))
                                 .foregroundStyle(.secondary).monospacedDigit()
+                                .contentTransition(.numericText(value: s.costUsd / total))
                         }
                         .font(.caption)
                     }
@@ -501,9 +510,11 @@ private struct ToolsCard: View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Text("\(Fmt.app(a.app))  ·  \(Fmt.count(a.events)) events").fontWeight(.medium)
+                                    .contentTransition(.numericText(value: Double(a.events)))
                                 Spacer()
                                 Text("\(Fmt.tokensExact(a.tokens)) tokens · \(Fmt.usd(a.costUsd))")
                                     .foregroundStyle(.secondary).monospacedDigit()
+                                    .contentTransition(.numericText(value: Double(a.tokens)))
                             }
                             .font(.callout)
                             ProgressView(value: Double(a.tokens), total: Double(maxTokens)).tint(.accentColor)
@@ -737,10 +748,14 @@ struct QuotaMeter: View {
                 }
             }
             .font(.callout)
+            .depthLayer(1)
             if let pct = row.usedPercent {
                 ProgressView(value: min(max(pct, 0), 100), total: 100).tint(Self.tint(pct))
+                    .depthLayer(2)
             }
             Text(meta).font(.caption).foregroundStyle(.secondary).help(metaExact)
+                .contentTransition(.numericText())
+                .depthLayer(3)
         }
     }
 

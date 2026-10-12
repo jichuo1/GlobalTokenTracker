@@ -115,7 +115,10 @@ struct DrumRoll: ViewModifier, Animatable {
             .rotation3DEffect(.degrees(angle), axis: (x: 1, y: 0, z: 0), anchor: .center, perspective: 0.2)
             .scaleEffect(scale)
             .offset(y: -radius * sin(a) * scale)
-            .opacity(1 - 0.6 * t * t)
+            // Reaches ~0 exactly at the parked angle: the previous page used
+            // to stay 40% visible at the window edge until the turn fully
+            // settled — an unfinished seam. 0.001 (not 0) keeps its layers.
+            .opacity(max(0.001, 1 - t * t))
     }
 }
 
@@ -167,7 +170,7 @@ private struct Cascade: ViewModifier {
         if reduceMotion || ProbeFlags.noCascade {
             content
         } else {
-            content.keyframeAnimator(initialValue: Pose(), trigger: turn.id) { view, pose in
+            content.environment(\.cascadeIndex, index).keyframeAnimator(initialValue: Pose(), trigger: turn.id) { view, pose in
                 // transformEffect, not offset: a render-time translation, so
                 // hosted AppKit views (tables) aren't re-framed every frame —
                 // that re-laid them out mid-turn (and tripped NSTableView's
@@ -285,5 +288,74 @@ struct SeamGlass: View, Animatable {
         let z = apo * (1 - cos(a)) + s * half * sin(a)  // depth, away = +
         let camera = apo * 2.4
         return CGFloat(half + y * camera / (camera + max(z, -camera * 0.5)))
+    }
+}
+
+// MARK: - Depth layers (text parallax inside a component)
+
+private struct CascadeIndexKey: EnvironmentKey {
+    static let defaultValue = 0
+}
+
+extension EnvironmentValues {
+    /// The enclosing component's cascade position (set by `.cascade(_:)`), so
+    /// its depth layers release in step with it.
+    var cascadeIndex: Int {
+        get { self[CascadeIndexKey.self] }
+        set { self[CascadeIndexKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// A layer inside a cascading component, `depth` levels "behind" its
+    /// surface: on a page turn it trails the component by a little more
+    /// distance and time per level, so a card's label, figure and caption
+    /// slide past each other instead of moving as one flat sheet. Same
+    /// render-only transform as the cascade; idle pages aren't touched.
+    func depthLayer(_ depth: Int) -> some View { modifier(DepthLayer(depth: depth)) }
+}
+
+private struct DepthLayer: ViewModifier {
+    let depth: Int
+    @Environment(PageTurnState.self) private var state: PageTurnState?
+    @Environment(\.cascadeIndex) private var index
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    struct Pose {
+        var y: CGFloat = 0
+        var opacity: Double = 1
+    }
+
+    func body(content: Content) -> some View {
+        if reduceMotion || ProbeFlags.noCascade {
+            content
+        } else {
+            let turn = state?.turn ?? PageTurn()
+            content.keyframeAnimator(initialValue: Pose(), trigger: turn.id) { view, pose in
+                view.transformEffect(CGAffineTransform(translationX: 0, y: pose.y)).opacity(pose.opacity)
+            } keyframes: { _ in
+                let d = Double(depth)
+                let step = Double(min(index, 10))
+                let dir: CGFloat = turn.forward ? 1 : -1
+                let incoming = turn.role == .incoming
+                let outgoing = turn.role == .outgoing
+                let y0: CGFloat = incoming ? dir * CGFloat(depth) * 11 : 0
+                let y1: CGFloat = outgoing ? -dir * CGFloat(depth) * 9 : 0
+                let hold = incoming ? step * Motion.cascadeStep + d * 0.024
+                    : outgoing ? step * Motion.cascadeStep * 0.6 : 0
+                let moving = incoming || outgoing
+                KeyframeTrack(\.y) {
+                    LinearKeyframe(y0, duration: 0.001)
+                    LinearKeyframe(y0, duration: hold)
+                    SpringKeyframe(y1, duration: moving ? 0.6 + d * 0.06 : 0.001,
+                                   spring: Spring(response: 0.44 + d * 0.07, dampingRatio: 0.8))
+                }
+                KeyframeTrack(\.opacity) {
+                    LinearKeyframe(incoming ? 0 : 1, duration: 0.001)
+                    LinearKeyframe(incoming ? 0 : 1, duration: hold)
+                    CubicKeyframe(outgoing ? 0.25 : 1, duration: moving ? 0.28 + d * 0.05 : 0.001)
+                }
+            }
+        }
     }
 }

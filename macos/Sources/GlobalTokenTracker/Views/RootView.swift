@@ -440,11 +440,15 @@ struct Card<Content: View>: View {
             if let title {
                 HStack {
                     Text(title).font(.headline)
+                        .contentTransition(.numericText())
                     Spacer()
                     trailing
                 }
+                .depthLayer(1)
+                content.depthLayer(2)
+            } else {
+                content
             }
-            content
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .topLeading)

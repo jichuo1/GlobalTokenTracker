@@ -117,6 +117,7 @@ final class AppModel {
         didSet {
             guard range != oldValue else { return }
             rangeInfo = try? Core.window(.describe(range))
+            animateNextData = true
             persist()
             if deferRangeLoad {
                 // Calendar / dial picks: let the selection animation settle
@@ -138,10 +139,10 @@ final class AppModel {
     /// calendar and hour dial.
     private(set) var rangeInfo: RangeInfo?
     var appFilter: Set<String>? {
-        didSet { persist(); requestLoad(forceViews: true, resetDetail: true) }
+        didSet { animateNextData = true; persist(); requestLoad(forceViews: true, resetDetail: true) }
     }
     var modelFilter: Set<String>? {
-        didSet { persist(); requestLoad(forceViews: true, resetDetail: true) }
+        didSet { animateNextData = true; persist(); requestLoad(forceViews: true, resetDetail: true) }
     }
     var refreshSeconds: Int {
         didSet { persist(); armRefresh() }
@@ -188,6 +189,8 @@ final class AppModel {
     /// window starts earlier than the old one.
     private(set) var rangeRollsDown = false
     private var deferRangeLoad = false
+    /// The next fresh data was requested by a range / filter change.
+    private var animateNextData = false
     private var rangeLoadTask: Task<Void, Never>?
 
     func applyWindow(_ op: Core.WindowOp) {
@@ -315,9 +318,16 @@ final class AppModel {
                 lastScanMs = r.scanMs
                 lastScanAt = .now
             }
-            if let vm = r.vm, vm != self.vm { self.vm = vm }
-            if let t = r.trend, t != trend { trend = t }
-            if let q = r.quotasRanked, q != quotasRanked { quotasRanked = q }
+            // Data a range / filter change asked for arrives animated: the
+            // Overview's figures roll to their new values and the charts
+            // morph. Periodic refreshes stay instant (no motion while idle).
+            let animate = animateNextData && r.vm != nil
+            if animate { animateNextData = false }
+            withAnimation(animate ? Motion.resolved(Motion.select) : nil) {
+                if let vm = r.vm, vm != self.vm { self.vm = vm }
+                if let t = r.trend, t != trend { trend = t }
+                if let q = r.quotasRanked, q != quotasRanked { quotasRanked = q }
+            }
             if let d = r.detail {
                 mergeDetail(d)
             }
