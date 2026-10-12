@@ -219,9 +219,18 @@ enum ToolbarProbe {
             while model.isLoading { try? await Task.sleep(for: .milliseconds(250)) }
             guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else { return }
             NSApp.activate()
-            window.setFrame(NSRect(x: 100, y: (NSScreen.main?.frame.height ?? 1000) - 100 - 780, width: 1180, height: 780),
+            let env = ProcessInfo.processInfo.environment
+            let width = env["GTT_TOOLBAR_WIDTH"].flatMap(Double.init) ?? 1180
+            window.setFrame(NSRect(x: 100, y: (NSScreen.main?.frame.height ?? 1000) - 100 - 780, width: width, height: 780),
                             display: true)
             window.makeKeyAndOrderFront(nil)
+            // Still shot of one page's title bar instead of the run below.
+            if let page = env["GTT_TOOLBAR_PAGE"].flatMap(Page.init(rawValue:)) {
+                model.page = page
+                try? await Task.sleep(for: .seconds(2))
+                log("shot")
+                return
+            }
             log("ready")
             try? await Task.sleep(for: .seconds(2))
             log("burst fast")

@@ -149,5 +149,16 @@ extension RangeSpec {
         }
     }
 
+    /// `title` as a plain string (for views that take `String`).
+    var titleText: String {
+        switch key {
+        case "today": String(localized: "Today")
+        case "week": String(localized: "7 Days")
+        case "month": String(localized: "30 Days")
+        case "all": String(localized: "All Time")
+        default: String(localized: "Custom")
+        }
+    }
+
     var isHourly: Bool { key == "today" }
 }

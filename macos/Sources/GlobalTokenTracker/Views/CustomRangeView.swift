@@ -47,6 +47,7 @@ struct CivilDay: Hashable, Comparable {
 
 struct CustomRangeButton: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.chromeDensity) private var density
 
     var body: some View {
         @Bindable var model = model
@@ -57,16 +58,21 @@ struct CustomRangeButton: View {
                 // Fixed width: the label used to resize with every pick
                 // ("Oct 3 – 9" vs "Sep 28 – Oct 12"), which moved the button
                 // and re-anchored the popover, so the panel slid sideways.
-                Text(Self.summary(model.range, model.rangeInfo))
-                    .monospacedDigit()
-                    .rollingText(down: model.rangeRollsDown)
-                    .frame(width: Self.captionWidth, alignment: .center)
+                // Short of room the button is just the calendar icon.
+                if density == .full {
+                    Text(Self.summary(model.range, model.rangeInfo))
+                        .monospacedDigit()
+                        .rollingText(down: model.rangeRollsDown)
+                        .frame(width: Self.captionWidth, alignment: .center)
+                }
             } icon: {
                 Image(systemName: "calendar")
             }
             .labelStyle(.titleAndIcon)
         }
-        .help("Pick a custom date or hour range")
+        .help(density == .full
+              ? Text("Pick a custom date or hour range")
+              : Text(verbatim: Self.summary(model.range, model.rangeInfo)))
         .popover(isPresented: $model.rangePopoverShown, arrowEdge: .bottom) {
             CustomRangePanel()
                 .environment(model)

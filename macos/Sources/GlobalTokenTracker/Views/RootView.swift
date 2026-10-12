@@ -39,7 +39,15 @@ private struct CurrentPageDeck: View {
 
     var body: some View {
         PageDeck(page: model.page)
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { model.chromeWidth = $0 }
+            // Delivered after the layout pass that measured it: a toolbar
+            // item resized during AppKit's own layout is never re-measured
+            // (it stayed too wide and moved to the » overflow menu).
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
+                DispatchQueue.main.async {
+                    model.chromeWidth = w
+                    ChromeFader.remeasure()
+                }
+            }
     }
 }
 
@@ -261,12 +269,18 @@ struct DrumGeometry {
     }
 }
 
-/// Two items that never change (see Chrome.swift): their contents follow
-/// `model.toolbarPage`, so the toolbar is never rebuilt by a page turn.
+/// One item that page turns never change (see Chrome.swift): its contents
+/// follow `model.toolbarPage`; its width follows the window.
 struct MainToolbar: ToolbarContent {
+    @Environment(AppModel.self) private var model
+
     var body: some ToolbarContent {
+        // Reading the width here makes SwiftUI update the toolbar item when
+        // the window resizes; AppKit only re-measures an item then, and keeps
+        // one that grew too wide in the » overflow menu otherwise.
+        let width = model.chromeWidth.rounded()
         ToolbarItem(placement: .navigation) {
-            ChromeBar()
+            ChromeBar(width: width)
         }
         .sharedBackgroundVisibility(.hidden)
     }
@@ -277,6 +291,7 @@ struct MainToolbar: ToolbarContent {
 /// it's attached to (and the pages now stay mounted).
 struct PriceSearchField: View {
     @Binding var text: String
+    @Environment(\.chromeDensity) private var density
 
     var body: some View {
         HStack(spacing: 4) {
@@ -294,7 +309,7 @@ struct PriceSearchField: View {
             }
         }
         .padding(.horizontal, 12)
-        .frame(width: 260, height: 32)
+        .frame(width: density <= .labeled ? 260 : density == .compact ? 200 : 150, height: 32)
         .glassEffect(.regular.interactive(), in: .capsule)
     }
 }

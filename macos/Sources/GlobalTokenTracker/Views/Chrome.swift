@@ -21,9 +21,13 @@ extension Page {
 /// clicks and are skipped by accessibility.
 private struct ChromeFade: ViewModifier {
     let shown: Bool
+    /// Hidden controls take no width, so the row's layout is exactly what
+    /// is visible (the content still exists, overflowing invisibly).
+    let collapse: Bool
 
     func body(content: Content) -> some View {
         content
+            .frame(width: collapse && !shown ? 0 : nil, alignment: .leading)
             .opacity(shown ? 1 : 0)
             .allowsHitTesting(shown)
             .accessibilityHidden(!shown)
@@ -31,8 +35,36 @@ private struct ChromeFade: ViewModifier {
 }
 
 extension View {
-    fileprivate func chromeFade(_ shown: Bool) -> some View {
-        modifier(ChromeFade(shown: shown))
+    fileprivate func chromeFade(_ shown: Bool, collapse: Bool = true) -> some View {
+        modifier(ChromeFade(shown: shown, collapse: collapse))
+    }
+}
+
+/// How much room the title-bar row has: `ChromeBar` tries each in turn and
+/// keeps the first that fits, so a narrow window (or a long Devices filter)
+/// condenses the row instead of overlapping it.
+enum ChromeDensity: Comparable, CaseIterable {
+    /// Labels on every button, the calendar's range caption.
+    case full
+    /// Labels, but the calendar button is just its icon.
+    case labeled
+    /// Filter buttons show their icon (and counts) only.
+    case compact
+    /// Also no page title, narrower search.
+    case minimal
+    /// The range segments fold into one button with a choice panel.
+    case tiny
+}
+
+// A classic key: the @Entry macro needs Xcode's macro plugins.
+private struct ChromeDensityKey: EnvironmentKey {
+    static let defaultValue = ChromeDensity.full
+}
+
+extension EnvironmentValues {
+    var chromeDensity: ChromeDensity {
+        get { self[ChromeDensityKey.self] }
+        set { self[ChromeDensityKey.self] = newValue }
     }
 }
 
@@ -75,19 +107,30 @@ private struct ChromeButtonBody: View {
 /// rather than to its content: a page turn changes what is inside it, never
 /// its width, so AppKit never re-lays out the toolbar mid-turn.
 struct ChromeBar: View {
-    @Environment(AppModel.self) private var model
+    let width: CGFloat
 
     var body: some View {
-        HStack(spacing: 12) {
-            LeadingChrome()
-            Spacer(minLength: 0)
-            TrailingChrome()
+        ViewThatFits(in: .horizontal) {
+            ForEach(ChromeDensity.allCases, id: \.self) { row($0) }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         // Inset from the sidebar edge and the window's rounded corner.
         .padding(.leading, 12)
         .padding(.trailing, 4)
-        .frame(width: max(240, model.chromeWidth - 28))
+        // A little short of the column: AppKit lays the toolbar out before
+        // SwiftUI sees a narrower window, and an item that is too wide for
+        // even one pass is moved into the » overflow menu.
+        .frame(width: max(240, width - 44))
         .background(ChromeHostFinder())
+    }
+
+    private func row(_ density: ChromeDensity) -> some View {
+        HStack(spacing: 12) {
+            LeadingChrome()
+            Spacer(minLength: 12)
+            TrailingChrome()
+        }
+        .environment(\.chromeDensity, density)
     }
 }
 
@@ -100,6 +143,35 @@ struct ChromeBar: View {
 @MainActor
 enum ChromeFader {
     fileprivate static weak var host: NSView?
+    /// The window the row lives in. Kept separately: while the item sits in
+    /// the » overflow menu, AppKit detaches its view from the window.
+    fileprivate static weak var window: NSWindow?
+
+    /// Make AppKit re-measure the toolbar item after the row's width
+    /// changed. SwiftUI updates the item's size, but the toolbar doesn't lay
+    /// itself out again — an item that was too wide for a moment stayed in
+    /// the » overflow menu. Re-assigning the size is what makes it relayout.
+    static func remeasure() {
+        // After SwiftUI has applied the new width to the hosting view.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard let host, let toolbar = (host.window ?? window)?.toolbar,
+                  let item = toolbar.items.first(where: { $0.view.map(host.isDescendant(of:)) ?? false })
+            else { return }
+            let size = host.fittingSize
+            guard size.width > 0 else { return }
+            // Even when SwiftUI already set this size the toolbar hasn't
+            // acted on it: a real change is what makes it lay out again.
+            // minSize/maxSize are deprecated in favour of constraints, yet
+            // setting them is the one thing that triggers that layout; set
+            // through KVC to keep the build warning-free.
+            func set(_ s: NSSize) {
+                item.setValue(NSValue(size: s), forKey: "minSize")
+                item.setValue(NSValue(size: s), forKey: "maxSize")
+            }
+            set(NSSize(width: size.width - 1, height: size.height))
+            set(size)
+        }
+    }
 
     static func crossfade(duration: Double, _ change: () -> Void) {
         var tx = Transaction()
@@ -137,6 +209,7 @@ private struct ChromeHostFinder: NSViewRepresentable {
                 probe = p.superview
             }
             ChromeFader.host = host
+            ChromeFader.window = v.window
         }
         return v
     }
@@ -148,17 +221,15 @@ private struct ChromeHostFinder: NSViewRepresentable {
 
 struct LeadingChrome: View {
     @Environment(AppModel.self) private var model
-    @ViewState private var barWidth: CGFloat = 0
+    @Environment(\.chromeDensity) private var density
 
     var body: some View {
         let page = model.toolbarPage
-        ZStack(alignment: .leading) {
+        HStack(spacing: 0) {
             RangeBar(dimmed: page == .detail)
                 .fixedSize()
-                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
                 .chromeFade(page.usesRange)
-            // Every title mounted; the current one shows. The stack sits
-            // beside the range bar, or at the leading edge without it.
+            // Every title mounted; the current one shows and takes room.
             ZStack(alignment: .leading) {
                 ForEach(Page.allCases) { p in
                     PageTitle(page: p)
@@ -166,7 +237,8 @@ struct LeadingChrome: View {
                         .chromeFade(p == page)
                 }
             }
-            .offset(x: page.usesRange ? barWidth + 12 : 0)
+            .padding(.leading, page.usesRange ? 12 : 0)
+            .chromeFade(density < .minimal)
         }
     }
 }
@@ -176,10 +248,15 @@ struct LeadingChrome: View {
 private struct RangeBar: View {
     let dimmed: Bool
     @Environment(AppModel.self) private var model
+    @Environment(\.chromeDensity) private var density
 
     var body: some View {
         HStack(spacing: 8) {
-            RangeSegments()
+            if density == .tiny {
+                RangeMenuButton()
+            } else {
+                RangeSegments()
+            }
             CustomRangeButton()
                 .buttonStyle(ChromeButtonStyle())
                 .task {
@@ -263,6 +340,48 @@ private struct RangeSegments: View {
     }
 }
 
+/// The range segments folded into one button for narrow windows: the
+/// current range, opening a choice panel like the other title-bar panels.
+private struct RangeMenuButton: View {
+    @Environment(AppModel.self) private var model
+    @ViewState private var shown = false
+
+    var body: some View {
+        Button {
+            shown.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Text(model.range.key == "custom" ? LocalizedStringKey("Custom") : model.range.title)
+                    .contentTransition(.opacity)
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(shown ? 180 : 0))
+            }
+        }
+        .buttonStyle(ChromeButtonStyle())
+        .animation(Motion.resolved(Motion.select), value: shown)
+        .help("Statistics window")
+        .popover(isPresented: $shown, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Statistics window").scaledFont(.subheadline).foregroundStyle(.secondary)
+                VStack(spacing: 2) {
+                    ForEach(RangeSpec.presets, id: \.key) { r in
+                        ChoiceRow(title: r.titleText, on: model.range.key == r.key, radio: true) {
+                            model.selectPreset(r.key)
+                        }
+                    }
+                    ChoiceRow(title: String(localized: "Custom"), on: model.range.key == "custom", radio: true) {
+                        shown = false
+                        model.pickCustomRange()
+                    }
+                }
+            }
+            .padding(18)
+            .frame(width: 240)
+        }
+    }
+}
+
 /// Page title (and the Overview's UTC offset).
 private struct PageTitle: View {
     let page: Page
@@ -291,14 +410,14 @@ struct TrailingChrome: View {
     var body: some View {
         let page = model.toolbarPage
         HStack(spacing: 8) {
-            // Each page's actions, all mounted, right-aligned over each other.
-            ZStack(alignment: .trailing) {
-                HStack(spacing: 8) {
-                    CustomizeButton()
-                        .chromeFade(page == .overview)
-                    FilterButtons(detail: page == .detail)
-                        .chromeFade(page.usesRange)
-                }
+            // Each page's actions, all mounted; only the current page's take
+            // room in the row.
+            HStack(spacing: 0) {
+                CustomizeButton()
+                    .padding(.trailing, 8)
+                    .chromeFade(page == .overview)
+                FilterButtons(detail: page == .detail)
+                    .chromeFade(page.usesRange)
                 PriceActions()
                     .chromeFade(page == .prices)
             }
@@ -357,6 +476,7 @@ private struct FilterButton: View {
     let setAll: (Bool) -> Void
     /// nil = everything on; 0 = a deliberately empty view.
     let selected: Int?
+    @Environment(\.chromeDensity) private var density
     @ViewState private var shown = false
 
     var body: some View {
@@ -365,8 +485,11 @@ private struct FilterButton: View {
         } label: {
             Label {
                 // "Tools 12/15" when narrowed — the WinUI "已选 12/15" summary.
+                // Short of room: the icon, plus "12/15" when narrowed.
                 Group {
-                    if let n = selected {
+                    if density > .labeled {
+                        if let n = selected { Text(verbatim: "\(n)/\(items.count)") }
+                    } else if let n = selected {
                         Text("\(Text(title)) \(n)/\(items.count)")
                     } else {
                         Text(title)
