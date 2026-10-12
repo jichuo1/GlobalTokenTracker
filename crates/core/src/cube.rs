@@ -609,7 +609,7 @@ pub(crate) fn blank_heat(start: i32, today: i32) -> Vec<HeatDay> {
 }
 
 /// Days since 1970-01-01 → "YYYY-MM-DD" (proleptic Gregorian).
-fn civil_date(days: i64) -> String {
+pub(crate) fn civil_date(days: i64) -> String {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

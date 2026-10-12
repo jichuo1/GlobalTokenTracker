@@ -7,6 +7,7 @@ use globaltokentracker_core::{Engine, Store, store::default_db_path};
 use tabled::{Table, Tabled};
 
 mod coordination;
+mod peer;
 
 #[derive(Parser)]
 #[command(
@@ -32,6 +33,11 @@ enum Cmd {
         format: String,
         #[arg(long, default_value_t = 1, global = true)]
         protocol_version: u32,
+    },
+    /// LAN peer protocol (gtt.peer v1): serve this ledger read-only or pull a peer.
+    Peer {
+        #[command(subcommand)]
+        command: peer::Command,
     },
     /// Incremental scan of all sources (or one: claude|codex|opencode|zcode).
     Scan { source: Option<String> },
@@ -107,6 +113,11 @@ fn main() -> Result<()> {
     {
         return coordination::run(cli.db.as_deref(), command, *protocol_version);
     }
+    // `peer pull` prints exactly one JSON document; `serve` logs to stderr.
+    if let Cmd::Peer { command } = &cli.cmd {
+        let db = cli.db.clone().unwrap_or_else(default_db_path);
+        return peer::run(&db, command);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -119,6 +130,7 @@ fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Coordination { .. } => unreachable!("coordination dispatched above"),
+        Cmd::Peer { .. } => unreachable!("peer dispatched above"),
         Cmd::Scan { source } => {
             let t = std::time::Instant::now();
             let r = match source.as_deref() {

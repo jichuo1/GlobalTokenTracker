@@ -12,7 +12,7 @@ use std::time::Duration;
 pub const PROTOCOL_VERSION: u32 = 1;
 const LEASE_KEY: &str = "coordination.refresh.lease.v1";
 const COOLDOWN_KEY: &str = "coordination.refresh.last.v1";
-const ALLOWANCE_WINDOWS: &[&str] = &[
+pub(crate) const ALLOWANCE_WINDOWS: &[&str] = &[
     "5h_block",
     "weekly",
     "monthly",
@@ -102,7 +102,7 @@ pub fn capabilities() -> Value {
 
 // Model/provider identifiers may originate in untrusted session data. Do not
 // export URLs, absolute paths, control characters or arbitrarily large labels.
-fn label(value: &str) -> Option<String> {
+pub(crate) fn label(value: &str) -> Option<String> {
     if value.is_empty()
         || value.len() > 128
         || value.contains("://")
@@ -127,14 +127,14 @@ fn label(value: &str) -> Option<String> {
     }
 }
 
-fn opaque(value: &str) -> String {
+pub(crate) fn opaque(value: &str) -> String {
     Sha256::digest(value.as_bytes())[..8]
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
 }
 
-fn finite(value: Option<f64>) -> Option<f64> {
+pub(crate) fn finite(value: Option<f64>) -> Option<f64> {
     value.filter(|v| v.is_finite() && *v >= 0.0)
 }
 
@@ -169,7 +169,7 @@ pub fn snapshot(path: &Path, options: &SnapshotOptions) -> Value {
     }
 }
 
-fn columns(conn: &Connection, table: &str, expected: &[&str]) -> rusqlite::Result<bool> {
+pub(crate) fn columns(conn: &Connection, table: &str, expected: &[&str]) -> rusqlite::Result<bool> {
     // Only internal literal table names reach this helper.
     let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let names = statement

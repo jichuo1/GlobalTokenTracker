@@ -12,6 +12,7 @@ pub mod external_interface;
 pub mod model;
 pub mod normalize;
 pub mod otel;
+pub mod peer;
 pub mod power;
 pub mod pricing;
 pub mod quota;
