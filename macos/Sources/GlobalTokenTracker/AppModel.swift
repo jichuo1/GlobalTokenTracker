@@ -42,6 +42,11 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// Window title while the page is showing.
+    var windowTitle: LocalizedStringKey {
+        self == .prices ? "Prices ($/1M tokens)" : title
+    }
+
     var symbol: String {
         switch self {
         case .overview: "chart.bar.xaxis"
@@ -75,6 +80,10 @@ final class AppModel {
     /// Banner dismissed for this session (Windows: DismissUpdateBanner).
     var updateBannerDismissed = false
 
+    /// Overview's "Customize Overview…" sheet (toolbar button lives at the
+    /// window level so mounted-but-hidden pages add no toolbar items).
+    var customizingOverview = false
+
     /// Prices page search — filtered by core (`filter_prices`).
     var priceQuery = "" { didSet { loadPrices() } }
     var priceDisputedOnly = false { didSet { loadPrices() } }
@@ -99,6 +108,11 @@ final class AppModel {
     /// Direction of the last page change (down the sidebar = forward), for
     /// the page transition.
     private(set) var pageForward = true
+    /// The page the window chrome (toolbar items, title) shows. Follows
+    /// `page` only once a page turn has finished: reconfiguring NSToolbar and
+    /// the title re-lays out the window (measured 50–130 ms), which froze the
+    /// drum for its first frames; a stall while nothing moves is invisible.
+    var chromePage: Page = .overview
     var range: RangeSpec {
         didSet {
             guard range != oldValue else { return }

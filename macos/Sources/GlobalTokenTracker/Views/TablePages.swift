@@ -92,8 +92,8 @@ struct DetailView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(.bar)
+            .cascade(1)
         }
-        .navigationTitle("Details")
     }
 
     private func num(_ n: UInt64, secondary: Bool = false) -> some View {
@@ -153,15 +153,16 @@ struct QuotaView: View {
         Group {
             if let groups = model.vm?.quotaGroups, !groups.isEmpty {
                 Form {
-                    ForEach(groups) { g in
+                    ForEach(Array(groups.enumerated()), id: \.element.id) { gi, g in
                         Section(isExpanded: Binding(
                             get: { !collapsed.contains(g.app) },
                             set: { open in
                                 if open { collapsed.remove(g.app) } else { collapsed.insert(g.app) }
                             }
                         )) {
-                            ForEach(g.rows) { q in
+                            ForEach(Array(g.rows.enumerated()), id: \.element.id) { ri, q in
                                 QuotaMeter(row: q).padding(.vertical, 4)
+                                    .cascade(gi * 2 + ri)
                             }
                         } header: {
                             HStack {
@@ -180,7 +181,6 @@ struct QuotaView: View {
                            message: "Quota windows appear here once Codex or Cursor credentials are found on this Mac.")
             }
         }
-        .navigationTitle("Quota")
     }
 }
 
@@ -232,8 +232,13 @@ struct SourcesView: View {
             }
         }
         .overlay { if model.sources == nil { ProgressView() } }
-        .task { model.loadSources() }
-        .navigationTitle("Sources")
+        // After the page turn settles: new rows landing mid-transition make
+        // NSTableView re-lay out under the 3D transform and drop frames.
+        .task {
+            try? await Task.sleep(for: .milliseconds(Motion.settleMs))
+            model.loadSources()
+        }
+        .background(OnArrival(page: .sources) { model.loadSources() })
     }
 
     private func icon(_ r: Row) -> String {
@@ -270,32 +275,17 @@ struct PricesView: View {
             }
             .width(min: 70, ideal: 90)
         }
-        .searchable(text: $model.priceQuery, placement: .toolbar, prompt: "Search models, e.g. opus 4.6 or gpt mini")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Toggle(isOn: $model.priceDisputedOnly) {
-                    Label("Disputed Only", systemImage: "exclamationmark.bubble")
-                }
-                .help("Only models the price sources disagree on")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.refreshPrices()
-                } label: {
-                    Label("Update Prices", systemImage: "arrow.down.circle")
-                }
-                .disabled(model.isRefreshingPrices)
-                .help("Download the latest prices from every source")
-            }
-        }
         .overlay {
             if model.prices != nil && rows.isEmpty {
                 EmptyState(title: "No Matching Models", symbol: "magnifyingglass")
             }
         }
-        .safeAreaInset(edge: .bottom) { footer(shown: rows.count) }
-        .task { model.loadPrices(reload: true) }
-        .navigationTitle("Prices ($/1M tokens)")
+        .safeAreaInset(edge: .bottom) { footer(shown: rows.count).cascade(1) }
+        .task {
+            try? await Task.sleep(for: .milliseconds(Motion.settleMs))
+            model.loadPrices(reload: true)
+        }
+        .background(OnArrival(page: .prices) { model.loadPrices(reload: true) })
     }
 
     private func footer(shown: Int) -> some View {
@@ -352,5 +342,26 @@ struct PricesView: View {
             lines.append("\(mark) \(q.source)  \(detail)\(alias)")
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// Runs `action` each time the deck turns *to* `page`, once the turn has
+/// settled. A separate zero-size view so that only it depends on
+/// `model.page`: when the page's own body read it, every page change
+/// re-evaluated (and re-diffed) its table — 5,000 rows on Prices — at the
+/// start of every turn, even turns that didn't involve that page.
+private struct OnArrival: View {
+    let page: Page
+    let action: () -> Void
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .task(id: model.page == page) {
+                guard model.page == page else { return }
+                try? await Task.sleep(for: .milliseconds(Motion.settleMs))
+                if !Task.isCancelled { action() }
+            }
     }
 }

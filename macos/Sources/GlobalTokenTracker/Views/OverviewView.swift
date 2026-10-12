@@ -63,7 +63,6 @@ struct OverviewLayout: Codable, Equatable {
 struct OverviewView: View {
     @Environment(AppModel.self) private var model
     @ViewState private var layout = OverviewLayout.load()
-    @ViewState private var customizing = false
 
     var body: some View {
         Group {
@@ -71,10 +70,17 @@ struct OverviewView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         if case .available(let u) = model.updateState, !model.updateBannerDismissed {
-                            UpdateBanner(info: u)
+                            UpdateBanner(info: u).cascade(0)
                         }
-                        ForEach(layout.visible) { w in
-                            widget(w, vm: vm)
+                        // Chain reaction on page turns: each card on its own
+                        // spring, released in layout order. The stat tiles
+                        // cascade individually inside their grid.
+                        ForEach(Array(layout.visible.enumerated()), id: \.element) { i, w in
+                            if w == .stats {
+                                widget(w, vm: vm)
+                            } else {
+                                widget(w, vm: vm).cascade(i + 1)
+                            }
                         }
                     }
                     .padding(20)
@@ -88,19 +94,8 @@ struct OverviewView: View {
                 ProgressView("Loading ledger…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle("Overview")
-        .navigationSubtitle(model.vm.map { "UTC\($0.tzOffset)" } ?? "")
-        .toolbar {
-            ToolbarItem(placement: .secondaryAction) {
-                Button {
-                    customizing = true
-                } label: {
-                    Label("Customize Overview…", systemImage: "slider.horizontal.3")
-                }
-                .help("Reorder or hide overview cards")
-            }
-        }
-        .sheet(isPresented: $customizing) {
+        .sheet(isPresented: Binding(get: { model.customizingOverview },
+                                    set: { model.customizingOverview = $0 })) {
             CustomizeOverviewSheet(layout: $layout)
         }
         .onChange(of: layout) { _, l in l.save() }
@@ -113,7 +108,7 @@ struct OverviewView: View {
         case .trend: TrendCard(vm: vm, series: model.trend)
         case .share: ShareGrid(vm: vm)
         case .apps: ToolsCard(vm: vm)
-        case .heat: HeatmapCard(days: vm.heat)
+        case .heat: HeatmapCard(days: vm.heat).equatable()
         case .quotas: QuotaStrip(rows: model.quotasRanked)
         case .unpriced: if !vm.unpriced.isEmpty { UnpricedNote(items: vm.unpriced) }
         }
@@ -203,16 +198,20 @@ private struct StatTiles: View {
             Tile(title: Text("\(rl) Tokens"), symbol: "number",
                  value: Fmt.tokensExact(vm.span.tokens),
                  detail: Text("Events \(Fmt.count(vm.span.events))"))
+                .cascade(0)
             Tile(title: Text("\(rl) Est. Cost"), symbol: "dollarsign",
                  value: Fmt.usd(vm.span.costUsd),
                  detail: Text("All time \(Fmt.usd(vm.all.costUsd))"),
                  badge: "Estimated")
+                .cascade(1)
             Tile(title: Text("\(rl) Cache Read"), symbol: "memorychip",
                  value: Fmt.tokensExact(vm.span.cacheReadTokens),
                  detail: Text("Input \(Fmt.tokensExact(vm.span.inputTokens))"))
+                .cascade(2)
             Tile(title: Text("\(rl) Events"), symbol: "arrow.left.arrow.right",
                  value: Fmt.count(vm.span.events),
                  detail: Text("Active \(Fmt.duration(ms: vm.span.activeMs))"))
+                .cascade(3)
         }
     }
 }
@@ -295,6 +294,10 @@ private struct TrendCard: View {
     var body: some View {
         let buckets = series?.buckets ?? vm.daily
         let avg = series?.avg ?? []
+        // One formatted label per bucket per render (marks, selection and
+        // hover all reuse it) instead of re-parsing dates per mark/hover.
+        let labels = buckets.map { label($0.date) }
+        let indexOf = Dictionary(labels.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         Card(title: title, trailing: AnyView(
             HStack(spacing: 10) {
                 Toggle("7-pt Average", isOn: $showAverage)
@@ -315,15 +318,15 @@ private struct TrendCard: View {
                     .frame(maxWidth: .infinity, minHeight: 200)
             } else {
                 Chart {
-                    ForEach(buckets) { b in
-                        BarMark(x: .value("Bucket", label(b.date)), y: .value("Value", value(b)))
+                    ForEach(Array(buckets.enumerated()), id: \.element.id) { i, b in
+                        BarMark(x: .value("Bucket", labels[i]), y: .value("Value", value(b)))
                             .foregroundStyle(Color.accentColor.gradient)
-                            .opacity(hovered == nil || hovered == label(b.date) ? 1 : 0.45)
+                            .opacity(hovered == nil || hovered == labels[i] ? 1 : 0.45)
                             .cornerRadius(3)
                     }
                     if showAverage && metric == .tokens && avg.count == buckets.count {
-                        ForEach(Array(zip(buckets, avg)), id: \.0.id) { b, a in
-                            LineMark(x: .value("Bucket", label(b.date)), y: .value("Average", a))
+                        ForEach(Array(avg.enumerated()), id: \.offset) { i, a in
+                            LineMark(x: .value("Bucket", labels[i]), y: .value("Average", a))
                                 .foregroundStyle(.orange)
                                 .lineStyle(StrokeStyle(lineWidth: 2))
                                 .interpolationMethod(.monotone)
@@ -341,7 +344,7 @@ private struct TrendCard: View {
                 .chartFont()
                 .frame(height: 220)
                 .overlay(alignment: .topLeading) {
-                    if let key = hovered, let i = buckets.firstIndex(where: { label($0.date) == key }) {
+                    if let key = hovered, let i = indexOf[key] {
                         TrendTooltip(bucket: buckets[i], title: key,
                                      average: showAverage && i < avg.count ? avg[i] : nil)
                     }
@@ -536,9 +539,13 @@ enum HeatMetric: String, CaseIterable, Identifiable {
     }
 }
 
-private struct HeatmapCard: View {
+/// Equatable: the heatmap is a fixed one-year window, so a range change (the
+/// common reload) leaves `days` untouched and the card skips re-rendering.
+private struct HeatmapCard: View, Equatable {
     let days: [HeatDay]
     @AppStorage("heatMetric") private var metric: HeatMetric = .tokens
+
+    nonisolated static func == (a: Self, b: Self) -> Bool { a.days == b.days }
 
     var body: some View {
         Card(title: "Activity", trailing: AnyView(
@@ -580,16 +587,32 @@ private struct HeatmapGrid: View {
         var value: Double
     }
 
-    private func layout() -> (cells: [Cell], weeks: Int, scale: Double) {
-        let cal = Calendar.current
-        guard let first = days.first.flatMap({ Fmt.bucketDate($0.date) }) else { return ([], 0, 1) }
-        let lead = (cal.component(.weekday, from: first) - cal.firstWeekday + 7) % 7
+    struct Layout {
+        var cells: [Cell]
+        /// week * 7 + row → index into `cells` (hover lookup is O(1)).
+        var slots: [Int: Int]
+        var weeks: Int
+        var scale: Double
+    }
+
+    /// Pure integer calendar math (no DateFormatter): ~365 cells in well
+    /// under a millisecond, so this never stalls a page turn.
+    private func layout() -> Layout {
+        guard let first = days.first.flatMap({ Fmt.epochDay($0.date) }) else {
+            return Layout(cells: [], slots: [:], weeks: 0, scale: 1)
+        }
+        // 1970-01-01 was a Thursday; Calendar.firstWeekday: 1 = Sunday.
+        let weekdaySun0 = (first % 7 + 7 + 4) % 7
+        let lead = (weekdaySun0 - (Calendar.current.firstWeekday - 1) + 7) % 7
         var cells: [Cell] = []
         cells.reserveCapacity(days.count)
+        var slots: [Int: Int] = [:]
+        slots.reserveCapacity(days.count)
         var weeks = 0
         for d in days {
-            guard let date = Fmt.bucketDate(d.date) else { continue }
-            let slot = (cal.dateComponents([.day], from: first, to: date).day ?? 0) + lead
+            guard let e = Fmt.epochDay(d.date) else { continue }
+            let slot = e - first + lead
+            slots[slot] = cells.count
             cells.append(Cell(day: d, week: slot / 7, row: slot % 7, value: metric.value(d)))
             weeks = max(weeks, slot / 7 + 1)
         }
@@ -597,7 +620,7 @@ private struct HeatmapGrid: View {
         // other day out to the palest tint.
         let sorted = cells.map(\.value).filter { $0 > 0 }.sorted()
         let p95 = sorted.isEmpty ? 1 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
-        return (cells, weeks, max(p95, .leastNonzeroMagnitude))
+        return Layout(cells: cells, slots: slots, weeks: weeks, scale: max(p95, .leastNonzeroMagnitude))
     }
 
     var body: some View {
@@ -615,13 +638,13 @@ private struct HeatmapGrid: View {
                     ctx.fill(Path(roundedRect: rect, cornerRadius: max(1.5, cell * 0.2)), with: shade)
                 }
             }
-            .overlay { HeatHoverLayer(cells: lay.cells, cell: cell, width: geo.size.width) }
+            .overlay { HeatHoverLayer(layout: lay, cell: cell, width: geo.size.width) }
         }
     }
 }
 
 private struct HeatHoverLayer: View {
-    let cells: [HeatmapGrid.Cell]
+    let layout: HeatmapGrid.Layout
     let cell: Double
     let width: Double
     @ViewState private var hover: HeatDay?
@@ -634,7 +657,7 @@ private struct HeatHoverLayer: View {
                 switch phase {
                 case .active(let p):
                     let w = Int(p.x / cell), r = Int(p.y / cell)
-                    let hit = cells.first { $0.week == w && $0.row == r }?.day
+                    let hit = (0..<7).contains(r) ? layout.slots[w * 7 + r].map { layout.cells[$0].day } : nil
                     if hit != hover { hover = hit }
                     point = p
                 case .ended:
