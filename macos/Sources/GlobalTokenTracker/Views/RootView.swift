@@ -94,6 +94,10 @@ struct PageDeck: View {
     @ViewState private var height: CGFloat = 700
     @ViewState private var pendingTurn: Task<Void, Never>?
     @ViewState private var toolbarTurn: Task<Void, Never>?
+    @ViewState private var chromeTask: Task<Void, Never>?
+    /// The page VoiceOver sees. Switched with the deferred bookkeeping:
+    /// swapping two large pages' accessibility trees cost frames mid-settle.
+    @ViewState private var accessible: Page = .overview
 
     var body: some View {
         let geo = DrumGeometry(height: height)
@@ -107,7 +111,7 @@ struct PageDeck: View {
                                            radius: geo.radius, span: geo.span))
                         .environment(turnStates[p])
                         .allowsHitTesting(p == settled)
-                        .accessibilityHidden(p != settled)
+                        .accessibilityHidden(p != accessible)
                 }
             }
         }
@@ -125,6 +129,7 @@ struct PageDeck: View {
         .onAppear {
             target = page
             settled = page
+            accessible = page
             position = Double(Self.index(page))
             model.chromePage = page
             model.toolbarPage = page
@@ -199,15 +204,37 @@ struct PageDeck: View {
         // cursor rects every frame; nothing is clickable mid-turn.
         NSApp.keyWindow?.disableCursorRects()
         let anim = reduceMotion ? Animation.easeInOut(duration: 0.15) : spring.animation
-        withAnimation(anim, completionCriteria: .removed) {
+        let started = Date.now
+        // Interaction follows the drum's *logical* completion — the moment
+        // it has visibly arrived. Waiting for the spring to be removed (its
+        // imperceptible tail settling) kept the page unclickable for ~0.9 s
+        // after a turn and ~1.7 s after a jump, and AppKit drops clicks
+        // made meanwhile.
+        withAnimation(anim, completionCriteria: ProbeFlags.lateSettle ? .removed : .logicallyComplete) {
             position = Double(Self.index(new))
         } completion: {
+            if MotionProbe.enabled {
+                FileHandle.standardError.write(Data("[turn] \(from.rawValue) → \(new.rawValue) interactive after \(Int(Date.now.timeIntervalSince(started) * 1000)) ms\n".utf8))
+            }
             // A later click may have re-targeted the drum; only the final
-            // destination switches chrome, interaction and accessibility.
+            // destination becomes interactive.
             guard target == new else { return }
             settled = new
-            if !ProbeFlags.noChrome { model.chromePage = new }
-            if ProbeFlags.noToolbarMotion { model.toolbarPage = new }
+            settleChrome(for: new)
+        }
+    }
+
+    /// Window bookkeeping nobody sees — the window title (it re-lays out
+    /// the toolbar, 50–130 ms), scroller styling and cursor rects — once the
+    /// spring's tail has died out too, so it never costs a moving frame.
+    private func settleChrome(for page: Page) {
+        chromeTask?.cancel()
+        chromeTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(reduceMotion || ProbeFlags.lateSettle ? 0 : 450))
+            guard !Task.isCancelled, target == page else { return }
+            accessible = page
+            if !ProbeFlags.noChrome { model.chromePage = page }
+            if ProbeFlags.noToolbarMotion { model.toolbarPage = page }
             ScrollerStyle.apply()
             if let w = NSApp.keyWindow, let v = w.contentView {
                 w.enableCursorRects()

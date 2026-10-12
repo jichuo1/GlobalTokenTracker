@@ -20,6 +20,9 @@ enum ProbeFlags {
     static let panel = env["GTT_PROBE_PANEL"]
     /// Title-bar controls switch after the turn instead of with it (A/B).
     static let noToolbarMotion = env["GTT_PROBE_NO_TOOLBAR_MOTION"] != nil
+    /// Pages become interactive when the spring is removed, not when it is
+    /// logically complete (the old behaviour, for A/B).
+    static let lateSettle = env["GTT_PROBE_LATE_SETTLE"] != nil
 }
 
 @MainActor
@@ -58,7 +61,7 @@ final class MotionProbe: NSObject {
                 last = 0
                 recording = true
                 model.page = page
-                try? await Task.sleep(for: .milliseconds(700))
+                try? await Task.sleep(for: .milliseconds(Int(ProcessInfo.processInfo.environment["GTT_PROBE_WINDOW_MS"] ?? "") ?? 700))
                 recording = false
                 report("\(prev.rawValue) → \(page.rawValue)")
                 prev = page
