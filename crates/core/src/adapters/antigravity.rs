@@ -611,7 +611,10 @@ fn file_mtime_ms(path: &Path) -> i64 {
 /// (RFC 8089; macOS APIs emit it) — never a UNC share.
 fn file_uri_to_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
-    let rest = rest.strip_prefix("localhost").filter(|r| r.starts_with('/')).unwrap_or(rest);
+    let rest = rest
+        .strip_prefix("localhost")
+        .filter(|r| r.starts_with('/'))
+        .unwrap_or(rest);
     let decoded = percent_decode(rest);
     let b = decoded.as_bytes();
     let path = if b.first() == Some(&b'/') {

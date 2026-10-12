@@ -222,7 +222,11 @@ impl Range {
         let midnight = first
             .tomorrow()
             .map_or(i64::MAX, |d| local_day_start_in(tz, d));
-        let end = if end_ms >= midnight { 23 } else { hour(end_ms - 1) };
+        let end = if end_ms >= midnight {
+            23
+        } else {
+            hour(end_ms - 1)
+        };
         Some((hour(start_ms), end))
     }
 }
@@ -273,7 +277,9 @@ impl QuickRange {
             ),
             Self::ThisMonth => (today.first_of_month(), today),
             Self::LastMonth => {
-                let last = today.first_of_month().saturating_sub(jiff::Span::new().days(1));
+                let last = today
+                    .first_of_month()
+                    .saturating_sub(jiff::Span::new().days(1));
                 (last.first_of_month(), last)
             }
             Self::Last90Days => (back(89), today),
@@ -775,22 +781,41 @@ mod tests {
         let utc = TimeZone::UTC;
         let d = date(2026, 10, 12);
         let r = Range::custom_days_in(&utc, date(2026, 10, 3), date(2026, 10, 9));
-        assert_eq!(r.custom_day_span_in(&utc), Some((date(2026, 10, 3), date(2026, 10, 9))));
-        assert_eq!(r.hour_span_in(&utc), None, "multi-day windows have no hour span");
+        assert_eq!(
+            r.custom_day_span_in(&utc),
+            Some((date(2026, 10, 3), date(2026, 10, 9)))
+        );
+        assert_eq!(
+            r.hour_span_in(&utc),
+            None,
+            "multi-day windows have no hour span"
+        );
 
         let r = Range::custom_hours_in(&utc, d, 18, 9);
         assert_eq!(r.custom_day_span_in(&utc), Some((d, d)));
         assert_eq!(r.hour_span_in(&utc), Some((9, 18)));
-        assert_eq!(Range::custom_days_in(&utc, d, d).hour_span_in(&utc), Some((0, 23)));
-        assert_eq!(Range::custom_hours_in(&utc, d, 23, 23).hour_span_in(&utc), Some((23, 23)));
+        assert_eq!(
+            Range::custom_days_in(&utc, d, d).hour_span_in(&utc),
+            Some((0, 23))
+        );
+        assert_eq!(
+            Range::custom_hours_in(&utc, d, 23, 23).hour_span_in(&utc),
+            Some((23, 23))
+        );
         assert_eq!(Range::Week.custom_day_span_in(&utc), None);
         assert_eq!(Range::Today.hour_span_in(&utc), None);
 
         // DST fall-back day in New York: the 25-hour day still reads 0..=23.
         let ny = TimeZone::get("America/New_York").unwrap();
         let fall = date(2026, 11, 1);
-        assert_eq!(Range::custom_days_in(&ny, fall, fall).hour_span_in(&ny), Some((0, 23)));
-        assert_eq!(Range::custom_hours_in(&ny, fall, 1, 3).hour_span_in(&ny), Some((1, 3)));
+        assert_eq!(
+            Range::custom_days_in(&ny, fall, fall).hour_span_in(&ny),
+            Some((0, 23))
+        );
+        assert_eq!(
+            Range::custom_hours_in(&ny, fall, 1, 3).hour_span_in(&ny),
+            Some((1, 3))
+        );
     }
 
     #[test]
@@ -812,17 +837,26 @@ mod tests {
             q("live-high", Some(80.0), None),
         ];
         let order: Vec<String> = rank_quotas(&rows, 100).into_iter().map(|r| r.app).collect();
-        assert_eq!(order, ["live-high", "live-low", "live-unknown", "expired-high"]);
+        assert_eq!(
+            order,
+            ["live-high", "live-low", "live-unknown", "expired-high"]
+        );
     }
 
     #[test]
     fn quick_ranges_are_monday_first_and_inclusive() {
         let thu = date(2026, 10, 15);
         let days = |q: QuickRange| q.days_on(thu);
-        assert_eq!(days(QuickRange::Yesterday), (date(2026, 10, 14), date(2026, 10, 14)));
+        assert_eq!(
+            days(QuickRange::Yesterday),
+            (date(2026, 10, 14), date(2026, 10, 14))
+        );
         assert_eq!(days(QuickRange::ThisWeek), (date(2026, 10, 12), thu));
         assert_eq!(days(QuickRange::ThisMonth), (date(2026, 10, 1), thu));
-        assert_eq!(days(QuickRange::LastMonth), (date(2026, 9, 1), date(2026, 9, 30)));
+        assert_eq!(
+            days(QuickRange::LastMonth),
+            (date(2026, 9, 1), date(2026, 9, 30))
+        );
         assert_eq!(days(QuickRange::Last90Days), (date(2026, 7, 18), thu));
         // Monday itself starts the week; January's "last month" crosses the year.
         let mon = date(2026, 10, 12);

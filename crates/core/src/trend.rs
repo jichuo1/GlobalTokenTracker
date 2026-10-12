@@ -105,8 +105,7 @@ mod tests {
     fn drawn_caps_at_sixty_with_full_history_average() {
         let dates: Vec<String> = (0..70)
             .map(|i| {
-                let d = jiff::civil::date(2026, 1, 1)
-                    .saturating_add(jiff::Span::new().days(i));
+                let d = jiff::civil::date(2026, 1, 1).saturating_add(jiff::Span::new().days(i));
                 d.to_string()
             })
             .collect();

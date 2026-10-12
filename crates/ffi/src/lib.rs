@@ -113,7 +113,9 @@ fn range_op(req: WindowOp) -> Result<Value, String> {
         WindowOp::Quick { key } => QuickRange::from_key(&key)
             .ok_or_else(|| format!("unknown quick range {key:?}"))?
             .range(),
-        WindowOp::Describe { range } => Range::from_config(&range.key, range.start_ms, range.end_ms),
+        WindowOp::Describe { range } => {
+            Range::from_config(&range.key, range.start_ms, range.end_ms)
+        }
     };
     let now = jiff::Zoned::now();
     let span = r.custom_day_span();
@@ -202,7 +204,12 @@ fn load(req: LoadReq) -> Result<Value, String> {
 fn detail_page(req: PageReq) -> Result<Value, String> {
     let limit = req.limit.unwrap_or(DETAIL_PAGE_SIZE).clamp(1, 5000);
     let rows = open()?
-        .events_page(limit, req.offset.max(0), req.apps.as_deref(), req.models.as_deref())
+        .events_page(
+            limit,
+            req.offset.max(0),
+            req.apps.as_deref(),
+            req.models.as_deref(),
+        )
         .map_err(|e| e.to_string())?;
     Ok(json!({ "rows": rows }))
 }
@@ -221,7 +228,10 @@ fn prices(req: PricesReq) -> Result<Value, String> {
     if req.reload || cache.is_none() {
         let store = open()?;
         let rows = store.price_rows(5000).map_err(|e| e.to_string())?;
-        *cache = Some((Arc::new(rows), pricing::last_live_sync(&store).unwrap_or(None)));
+        *cache = Some((
+            Arc::new(rows),
+            pricing::last_live_sync(&store).unwrap_or(None),
+        ));
     }
     let (all, synced_at) = cache.clone().ok_or("price table unavailable")?;
     drop(cache);
@@ -367,7 +377,9 @@ fn arg<T: for<'de> Deserialize<'de> + Default>(p: *const c_char) -> Result<T, St
     if p.is_null() {
         return Ok(T::default());
     }
-    let s = unsafe { CStr::from_ptr(p) }.to_str().map_err(|e| e.to_string())?;
+    let s = unsafe { CStr::from_ptr(p) }
+        .to_str()
+        .map_err(|e| e.to_string())?;
     if s.trim().is_empty() {
         return Ok(T::default());
     }
@@ -424,7 +436,9 @@ pub unsafe extern "C" fn gtt_download_update(channel: *const c_char) -> *mut c_c
         let ch = if channel.is_null() {
             "stable".to_string()
         } else {
-            unsafe { CStr::from_ptr(channel) }.to_string_lossy().into_owned()
+            unsafe { CStr::from_ptr(channel) }
+                .to_string_lossy()
+                .into_owned()
         };
         download_update(&ch)
     })
@@ -458,7 +472,9 @@ pub unsafe extern "C" fn gtt_check_update(channel: *const c_char) -> *mut c_char
         let ch = if channel.is_null() {
             "stable".to_string()
         } else {
-            unsafe { CStr::from_ptr(channel) }.to_string_lossy().into_owned()
+            unsafe { CStr::from_ptr(channel) }
+                .to_string_lossy()
+                .into_owned()
         };
         check_update(&ch)
     })
@@ -474,7 +490,9 @@ pub unsafe extern "C" fn gtt_range(req_json: *const c_char) -> *mut c_char {
         if req_json.is_null() {
             return Err("gtt_range needs a request".into());
         }
-        let s = unsafe { CStr::from_ptr(req_json) }.to_str().map_err(|e| e.to_string())?;
+        let s = unsafe { CStr::from_ptr(req_json) }
+            .to_str()
+            .map_err(|e| e.to_string())?;
         range_op(serde_json::from_str(s).map_err(|e| format!("bad request: {e}"))?)
     })
 }
@@ -535,7 +553,8 @@ mod tests {
         assert_eq!(v["data"]["hour_span"], json!([9, 18]));
         assert_eq!(v["data"]["days"], 1);
         assert_eq!(v["data"]["hourly"], true);
-        let req = CString::new(r#"{"op":"days","first":"2026-10-09","last":"2026-10-03"}"#).unwrap();
+        let req =
+            CString::new(r#"{"op":"days","first":"2026-10-09","last":"2026-10-03"}"#).unwrap();
         let v = call(unsafe { gtt_range(req.as_ptr()) });
         assert_eq!(v["data"]["first_day"], "2026-10-03");
         assert_eq!(v["data"]["days"], 7);
@@ -550,7 +569,13 @@ mod tests {
         assert_eq!(v["ok"], true, "{v}");
         // A never-scanned ledger has no seed prices yet; only the shape matters.
         assert!(v["data"]["total"].is_u64());
-        assert!(v["data"]["rows"].as_array().unwrap().iter().all(|r| r["disputed"] == true));
+        assert!(
+            v["data"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["disputed"] == true)
+        );
         assert!(v["data"]["vm"].is_null());
         let req = CString::new(r#"{"range":{"key":"week"},"rebuild":true}"#).unwrap();
         let v = call(unsafe { gtt_load(req.as_ptr()) });
