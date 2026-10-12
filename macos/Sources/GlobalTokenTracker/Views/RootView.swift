@@ -221,6 +221,7 @@ struct PageDeck: View {
         case .quota: QuotaView()
         case .sources: SourcesView()
         case .prices: PricesView()
+        case .settings: SettingsView()
         }
     }
 }
@@ -430,7 +431,7 @@ struct SidebarStatus: View {
                 }
             }
         }
-        .font(.caption)
+        .scaledFont(.caption)
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
@@ -450,7 +451,7 @@ struct Card<Content: View>: View {
         VStack(alignment: .leading, spacing: 12) {
             if let title {
                 HStack {
-                    Text(title).font(.headline)
+                    Text(title).scaledFont(.headline)
                         .contentTransition(.numericText())
                     Spacer()
                     trailing

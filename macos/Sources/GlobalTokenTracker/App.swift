@@ -18,22 +18,18 @@ struct GlobalTokenTrackerApp: App {
                 .environment(model)
                 .frame(minWidth: 820, minHeight: 560)
                 .appTint()
+                .appTextScale()
                 .background(MainWindowHook())
         }
         .defaultSize(width: 1180, height: 780)
         .windowToolbarStyle(.unified)
         .commands { AppCommands(model: model) }
 
-        Settings {
-            SettingsView()
-                .environment(model)
-                .appTint()
-        }
-
         MenuBarExtra {
             MenuBarPanel()
                 .environment(model)
                 .appTint()
+                .appTextScale()
         } label: {
             MenuBarLabel(model: model)
         }
@@ -95,6 +91,8 @@ enum Prefs {
     static let languageKey = "appLanguage"
     /// close_action: "" ask | "menubar" (Windows "tray") | "quit"
     static let closeActionKey = "closeAction"
+    /// Body text size in points (Windows: theme font size), 11–17.
+    static let textSizeKey = "textSize"
 
     /// The WinUI accent palette (pages.rs ACCENT_OPTIONS).
     static let accents: [(hex: String, name: String)] = [
@@ -186,6 +184,15 @@ struct AppCommands: Commands {
     var body: some Commands {
         SidebarCommands()
         CommandGroup(replacing: .newItem) {}
+        // Settings is a page of the main window (as on Windows); ⌘, goes there.
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                model.page = .settings
+                openWindow(id: "main")
+                NSApp.activate()
+            }
+            .keyboardShortcut(",")
+        }
         // Page switching + refresh live in the standard View menu.
         CommandGroup(before: .sidebar) {
             Button("Refresh Now") { model.manualRefresh() }

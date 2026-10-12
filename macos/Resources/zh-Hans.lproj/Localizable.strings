@@ -295,3 +295,8 @@
 "It can keep tracking from the menu bar, or quit completely." = "可以在菜单栏中继续统计，也可以完全退出。";
 "Keep in Menu Bar" = "保留在菜单栏";
 "Remember my choice" = "记住我的选择";
+
+/* Settings page + text size */
+"Settings" = "设置";
+"Text size" = "界面字号";
+"Base size for all text; headings and captions scale with it" = "所有文字的基准字号；标题和说明文字随之缩放";

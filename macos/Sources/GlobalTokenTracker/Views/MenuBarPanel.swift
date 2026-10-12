@@ -21,18 +21,17 @@ struct MenuBarLabel: View {
 struct MenuBarPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Today").font(.headline)
+                Text("Today").scaledFont(.headline)
                 Spacer()
                 if model.isScanning {
                     ProgressView().controlSize(.small)
                 } else if let at = model.lastScanAt {
                     Text(at, format: .relative(presentation: .named))
-                        .font(.caption).foregroundStyle(.secondary)
+                        .scaledFont(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -75,7 +74,8 @@ struct MenuBarPanel: View {
                     .disabled(model.isScanning)
                     Spacer()
                     Button {
-                        openSettings()
+                        model.page = .settings
+                        openWindow(id: "main")
                         NSApp.activate()
                     } label: {
                         Image(systemName: "gearshape")
@@ -108,9 +108,9 @@ private struct MenuMetric: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(title).scaledFont(.caption).foregroundStyle(.secondary)
             Text(value)
-                .font(.system(.title3, design: .rounded, weight: .semibold))
+                .scaledFont(.title3, weight: .semibold, design: .rounded)
                 .monospacedDigit()
                 .contentTransition(.numericText())
         }

@@ -5,20 +5,23 @@
 import AppKit
 import SwiftUI
 
+/// The Settings page (sidebar + ⌘,) — the WinUI shell's settings page: one
+/// grouped form with General, Appearance, Data and Updates.
 struct SettingsView: View {
     var body: some View {
-        TabView {
-            Tab("General", systemImage: "gearshape") { GeneralSettings() }
-            Tab("Appearance", systemImage: "paintpalette") { AppearanceSettings() }
-            Tab("Data", systemImage: "cylinder.split.1x2") { DataSettings() }
-            Tab("Updates", systemImage: "arrow.down.app") { UpdateSettings() }
+        Form {
+            GeneralSettings()
+            AppearanceSettings()
+            DataSettings()
+            UpdateSettings()
         }
-        .scenePadding()
-        .frame(width: 540)
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(.windowBackground)
     }
 }
 
-private struct GeneralSettings: View {
+struct GeneralSettings: View {
     @Environment(AppModel.self) private var model
     @AppStorage(Prefs.showInDockKey) private var showInDock = true
     @AppStorage("menuBarShowsCost") private var menuBarShowsCost = true
@@ -30,7 +33,7 @@ private struct GeneralSettings: View {
 
     var body: some View {
         @Bindable var model = model
-        Form {
+        Group {
             Section {
                 Toggle("Open at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, on in
@@ -43,7 +46,7 @@ private struct GeneralSettings: View {
                         }
                     }
                 if let loginError {
-                    Text(loginError).font(.caption).foregroundStyle(.red)
+                    Text(loginError).scaledFont(.caption).foregroundStyle(.red)
                 }
                 Toggle("Show in Dock", isOn: $showInDock)
                     .onChange(of: showInDock) { _, _ in Prefs.applyDockVisibility() }
@@ -53,6 +56,8 @@ private struct GeneralSettings: View {
                     Text("Keep running in the menu bar").tag("menubar")
                     Text("Quit").tag("quit")
                 }
+            } header: {
+                Text("General")
             } footer: {
                 Text("Opened at login, GlobalTokenTracker starts in the menu bar without a window.")
             }
@@ -84,20 +89,20 @@ private struct GeneralSettings: View {
                 }
             }
         }
-        .formStyle(.grouped)
     }
 }
 
-private struct AppearanceSettings: View {
+struct AppearanceSettings: View {
     @AppStorage(Prefs.themeKey) private var theme = "system"
     @AppStorage(Prefs.accentKey) private var accent = ""
     @AppStorage(Prefs.chartFontKey) private var chartFont = ""
+    @AppStorage(Prefs.textSizeKey) private var textSize = Typography.defaultSize
 
     private static let fonts: [String] = NSFontManager.shared.availableFontFamilies.sorted()
 
     var body: some View {
-        Form {
-            Section {
+        Group {
+            Section("Appearance") {
                 Picker("Theme", selection: $theme) {
                     Text("System").tag("system")
                     Text("Light").tag("light")
@@ -105,6 +110,17 @@ private struct AppearanceSettings: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: theme) { _, _ in Prefs.applyTheme() }
+                LabeledContent("Text size") {
+                    HStack(spacing: 10) {
+                        Text("A").font(.system(size: 11))
+                        Slider(value: $textSize, in: Typography.range, step: 1)
+                            .frame(width: 180)
+                        Text("A").font(.system(size: 17))
+                        Text("\(Int(textSize)) pt").monospacedDigit().foregroundStyle(.secondary)
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+                .help("Base size for all text; headings and captions scale with it")
                 Picker("Accent color", selection: $accent) {
                     Text("System").tag("")
                     ForEach(Prefs.accents, id: \.hex) { a in
@@ -127,15 +143,14 @@ private struct AppearanceSettings: View {
                 Text("Applies to chart text only; the interface follows the system font.")
             }
         }
-        .formStyle(.grouped)
     }
 }
 
-private struct DataSettings: View {
+struct DataSettings: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Form {
+        Group {
             Section("Ledger") {
                 LabeledContent("Location") {
                     Text(model.info?.dbPath ?? "—")
@@ -182,17 +197,16 @@ private struct DataSettings: View {
                 Text("Usage is read locally from each tool's own logs. Nothing leaves this Mac except price, quota and update lookups.")
             }
         }
-        .formStyle(.grouped)
     }
 }
 
-private struct UpdateSettings: View {
+struct UpdateSettings: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         @Bindable var model = model
-        Form {
-            Section {
+        Group {
+            Section("Updates") {
                 LabeledContent("Current version", value: model.info?.version ?? "—")
                 Picker("Update channel", selection: $model.updateChannel) {
                     Text("Stable").tag("stable")
@@ -200,10 +214,10 @@ private struct UpdateSettings: View {
                 }
                 if model.updateChannel == "alpha" {
                     Text("Preview builds contain features that aren't released yet and may be unstable.")
-                        .font(.caption).foregroundStyle(.orange)
+                        .scaledFont(.caption).foregroundStyle(.orange)
                 }
                 Toggle("Check for updates automatically", isOn: $model.updateAuto)
-                Text("At launch and every 24 hours.").font(.caption).foregroundStyle(.secondary)
+                Text("At launch and every 24 hours.").scaledFont(.caption).foregroundStyle(.secondary)
             }
             Section {
                 HStack {
@@ -213,7 +227,6 @@ private struct UpdateSettings: View {
                 }
             }
         }
-        .formStyle(.grouped)
     }
 
     @ViewBuilder private var status: some View {
@@ -224,7 +237,7 @@ private struct UpdateSettings: View {
         case .available(let u):
             VStack(alignment: .leading) {
                 Text("New version \(u.version) is available").fontWeight(.medium)
-                if let url = URL(string: u.htmlUrl) { Link("Release notes", destination: url).font(.caption) }
+                if let url = URL(string: u.htmlUrl) { Link("Release notes", destination: url).scaledFont(.caption) }
             }
         case .downloading: HStack { ProgressView().controlSize(.small); Text("Downloading and verifying…") }
         case .downloaded(let u):

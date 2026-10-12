@@ -29,7 +29,7 @@ enum UpdateState: Equatable {
 }
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
-    case overview, detail, quota, sources, prices
+    case overview, detail, quota, sources, prices, settings
     var id: String { rawValue }
 
     var title: LocalizedStringKey {
@@ -39,6 +39,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .quota: "Quota"
         case .sources: "Sources"
         case .prices: "Prices"
+        case .settings: "Settings"
         }
     }
 
@@ -54,6 +55,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .quota: "gauge.with.dots.needle.67percent"
         case .sources: "externaldrive.connected.to.line.below"
         case .prices: "dollarsign.circle"
+        case .settings: "gearshape"
         }
     }
 }
@@ -83,6 +85,15 @@ final class AppModel {
     /// Overview's "Customize Overview…" sheet (toolbar button lives at the
     /// window level so mounted-but-hidden pages add no toolbar items).
     var customizingOverview = false
+
+    /// Main window on screen and not fully covered (NSWindow occlusion);
+    /// background rescans relax while it's hidden.
+    var windowVisible = true {
+        didSet {
+            // Coming back into view: catch up at once instead of waiting.
+            if windowVisible && !oldValue && started { requestLoad(scan: true) }
+        }
+    }
 
     /// Prices page search — filtered by core (`filter_prices`).
     var priceQuery = "" { didSet { loadPrices() } }
@@ -350,6 +361,20 @@ final class AppModel {
         if !fresh.isEmpty { detailRows.insert(contentsOf: fresh, at: 0) }
     }
 
+    /// Index of each loaded detail row (for prefetch distance), rebuilt
+    /// lazily when the rows change.
+    private var detailIndex: [String: Int] = [:]
+    private var detailIndexCount = -1
+
+    func isNearDetailEnd(_ id: String, within n: Int) -> Bool {
+        if detailIndexCount != detailRows.count || detailIndex.count != detailRows.count {
+            detailIndex = Dictionary(detailRows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
+            detailIndexCount = detailRows.count
+        }
+        guard let i = detailIndex[id] else { return false }
+        return i >= detailRows.count - n
+    }
+
     /// Infinite-scroll page for the details table.
     func loadMoreDetail() {
         guard !detailLoadingMore, UInt64(detailRows.count) < detailTotal else { return }
@@ -464,9 +489,14 @@ final class AppModel {
         let secs = UInt64(refreshSeconds)
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                // 10% tolerance lets the OS coalesce our wakeups with others'.
+                // Relaxed while nobody can see the window or the Mac is in
+                // Low Power Mode: half the rescans, and a wide tolerance so
+                // macOS can coalesce our wakeups with other work.
+                let relaxed = self.map { !$0.windowVisible } ?? false
+                    || ProcessInfo.processInfo.isLowPowerModeEnabled
+                let interval = relaxed ? secs * 2 : secs
                 try? await Task.sleep(
-                    for: .seconds(secs), tolerance: .seconds(max(1, secs / 10)))
+                    for: .seconds(interval), tolerance: .seconds(max(1, interval / (relaxed ? 4 : 10))))
                 guard !Task.isCancelled else { return }
                 self?.requestLoad(scan: true)
             }
