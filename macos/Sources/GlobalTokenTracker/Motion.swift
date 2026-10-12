@@ -12,6 +12,13 @@ enum Motion {
     static let page = Animation.spring(response: 0.38, dampingFraction: 0.9)
     /// Drum page turn — long enough to read as a rotation, no bounce.
     static let drum = Animation.spring(response: 0.5, dampingFraction: 0.94)
+    /// Keyframe durations are never 0: a zero-length keyframe (the first
+    /// component's hold, index 0 × step) interpolates by dividing by zero,
+    /// and the NaN pose left the first stat tile's text displaced and stuck.
+    static func span(_ seconds: Double) -> Double {
+        seconds.isFinite ? max(0.001, seconds) : 0.001
+    }
+
     /// Delay between consecutive components in a page-turn cascade.
     static let cascadeStep = 0.035
     /// Hover feedback.
@@ -175,18 +182,19 @@ private struct Cascade: ViewModifier {
                 // hosted AppKit views (tables) aren't re-framed every frame —
                 // that re-laid them out mid-turn (and tripped NSTableView's
                 // reentrancy warning).
-                view.transformEffect(CGAffineTransform(translationX: 0, y: pose.y)).opacity(pose.opacity)
+                view.transformEffect(CGAffineTransform(translationX: 0, y: pose.y.isFinite ? pose.y : 0))
+                    .opacity(pose.opacity.isFinite ? pose.opacity : 1)
             } keyframes: { _ in
                 let k = plan()
                 KeyframeTrack(\.y) {
                     LinearKeyframe(k.y0, duration: 0.001)
-                    LinearKeyframe(k.y0, duration: k.hold)
-                    SpringKeyframe(k.y1, duration: k.duration, spring: k.spring)
+                    LinearKeyframe(k.y0, duration: Motion.span(k.hold))
+                    SpringKeyframe(k.y1, duration: Motion.span(k.duration), spring: k.spring)
                 }
                 KeyframeTrack(\.opacity) {
                     LinearKeyframe(k.o0, duration: 0.001)
-                    LinearKeyframe(k.o0, duration: k.hold)
-                    CubicKeyframe(k.o1, duration: k.fade)
+                    LinearKeyframe(k.o0, duration: Motion.span(k.hold))
+                    CubicKeyframe(k.o1, duration: Motion.span(k.fade))
                 }
             }
         }
@@ -332,7 +340,8 @@ private struct DepthLayer: ViewModifier {
         } else {
             let turn = state?.turn ?? PageTurn()
             content.keyframeAnimator(initialValue: Pose(), trigger: turn.id) { view, pose in
-                view.transformEffect(CGAffineTransform(translationX: 0, y: pose.y)).opacity(pose.opacity)
+                view.transformEffect(CGAffineTransform(translationX: 0, y: pose.y.isFinite ? pose.y : 0))
+                    .opacity(pose.opacity.isFinite ? pose.opacity : 1)
             } keyframes: { _ in
                 let d = Double(depth)
                 let step = Double(min(index, 10))
@@ -346,13 +355,13 @@ private struct DepthLayer: ViewModifier {
                 let moving = incoming || outgoing
                 KeyframeTrack(\.y) {
                     LinearKeyframe(y0, duration: 0.001)
-                    LinearKeyframe(y0, duration: hold)
+                    LinearKeyframe(y0, duration: Motion.span(hold))
                     SpringKeyframe(y1, duration: moving ? 0.6 + d * 0.06 : 0.001,
                                    spring: Spring(response: 0.44 + d * 0.07, dampingRatio: 0.8))
                 }
                 KeyframeTrack(\.opacity) {
                     LinearKeyframe(incoming ? 0 : 1, duration: 0.001)
-                    LinearKeyframe(incoming ? 0 : 1, duration: hold)
+                    LinearKeyframe(incoming ? 0 : 1, duration: Motion.span(hold))
                     CubicKeyframe(outgoing ? 0.25 : 1, duration: moving ? 0.28 + d * 0.05 : 0.001)
                 }
             }
