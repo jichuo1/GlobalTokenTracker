@@ -237,10 +237,12 @@ globaltokentracker-cli peer revoke 笔记本
 globaltokentracker-cli peer discover                                      # 列出网络中的设备
 globaltokentracker-cli peer pair 192.168.1.20:4319 408036 --name 笔记本
 globaltokentracker-cli peer pull "书房 Mac" --endpoint summary
+globaltokentracker-cli peer sync                                          # 把已配对设备的聚合同步进本机账本
+globaltokentracker-cli report week --device all                           # 本机 + 各设备合计与分设备明细
 globaltokentracker-cli peer forget "书房 Mac"
 ```
 
-目前通过 CLI 使用（输出 JSON），图形界面中的多设备视图即将推出。协议与安全模型详见 [docs/PEER_API.md](docs/PEER_API.md)。
+目前通过 CLI 使用（输出 JSON）。同步来的数据单独存放（不写入本机事件表、也不会再共享出去），在统计中作为“设备”维度与本机并列，额度按账号取最新、不相加；图形界面中的多设备视图即将推出。协议与安全模型详见 [docs/PEER_API.md](docs/PEER_API.md)。
 
 > [!NOTE]
 > macOS 需要“本地网络”权限，Windows 只应在“专用”网络放行 TCP 4319 与 UDP 5353。

@@ -23,7 +23,7 @@ globaltokentracker-cli peer forget "书房 Mac"
 
 局域网共享默认关闭：GTT 应用本身不启动对等服务，只有手动运行 `peer serve` 才会监听；默认地址是回环 `127.0.0.1:4319`。绑定任何非回环地址（包括 `0.0.0.0`）时必须使用 TLS，`--plaintext` 只允许回环地址，否则在绑定前就拒绝启动。
 
-`serve` 启动时用常规读写方式打开账本，在 `app_state` 中生成一次稳定的 `device_id`（`peer.device_id.v1`），`--name` 存为 `peer.device_name.v1`；未指定名称时依次取 `COMPUTERNAME`、`HOSTNAME`，否则为 `GTT-<device_id 前 6 位>`。此后每个数据请求都用 SQLite 只读连接与单个读事务读取同一 WAL 快照，协议读路径从不写账本。配对与授权状态不写账本，单独保存在 `peer.db`（见下文）。
+每个账本在打开（迁移）时于 `app_state` 中生成一次稳定的 `device_id`（`peer.device_id.v1`），它也是设备维度中“本机”的键；`serve` 启动时用常规读写方式打开账本，`--name` 存为 `peer.device_name.v1`；未指定名称时依次取 `COMPUTERNAME`、`HOSTNAME`，否则为 `GTT-<device_id 前 6 位>`。此后每个数据请求都用 SQLite 只读连接与单个读事务读取同一 WAL 快照，协议读路径从不写账本。服务端的配对与授权状态不写账本，单独保存在 `peer.db`；查看方的已配对设备登记在账本 `peers` 表（见“查看方存储与同步”）。
 
 CLI 的 stdout 只有一个 UTF-8 JSON 文档。客户端侧失败（未配对、指纹不符、连接失败等）输出固定码的失败文档并以非零退出；服务端返回非 200 时也以非零退出。地址可带 `https://` 前缀，省略端口时用 4319；格式见下文“按 IP 添加”。
 
@@ -49,7 +49,7 @@ T = SHA-256("gtt.peer/pair/v1" ‖ 证书指纹 ‖ 查看方名称 ‖ Ns₀ �
 
 每一方都在得知对方数字之前承诺、在对方承诺之后才揭示，主动中间人每转发一位都只能猜，任何一位猜错整次配对作废，总体成功概率约 10⁻⁶。`"V"/"S"` 角色标签防止把承诺原样反射回去；`T` 把配对绑定到查看方实际看到的证书，所以即使逐条忠实转发消息、但用自己证书终止 TLS 的中继也无法完成配对。查看方会记住失败过的配对码，10 分钟内拒绝再次使用（`pairing_code_reused`），因为失败可能意味着有人在截获，此时应在服务端按回车生成新码。
 
-**令牌与授权**：配对成功后服务端生成 256 位随机持有者令牌。服务端 `peer.db` 的 `viewers` 表只存令牌的 SHA-256、查看方 id 与名称、创建时间、最后访问时间（至多每分钟更新）、撤销时间，从不保存明文；比较对所有有效记录做常数时间比较，不提前退出。查看方 `peer.db` 的 `peers` 表保存固定的证书指纹、设备 id 与名称、地址、令牌（明文，用于出示）和配对/最后拉取时间。
+**令牌与授权**：配对成功后服务端生成 256 位随机持有者令牌。服务端 `peer.db` 的 `viewers` 表只存令牌的 SHA-256、查看方 id 与名称、创建时间、最后访问时间（至多每分钟更新）、撤销时间，从不保存明文；比较对所有有效记录做常数时间比较，不提前退出。查看方的已配对设备（固定指纹、名称、地址、同步状态）登记在账本 `peers` 表；唯一的秘密——持有者令牌（明文，用于出示）——只存在 0600 的 `peer.db` 的 `peer_tokens` 表，不进入账本及其备份。早期版本存在 `peer.db` `peers` 表中的记录会在首次使用时迁入账本并删除旧表。
 
 **撤销**：`peer revoke` 设置撤销时间；服务端每个请求都重新读取 `viewers` 表，被撤销的令牌下一次请求即返回 401 `auth_invalid`，无需重启。查看方 `peer forget` 删除本地的固定指纹与令牌。
 
@@ -83,6 +83,25 @@ TXT 记录只有四项，不含任何用量信息：
 
 - macOS：未来的 App 需在 Info.plist 中声明 `NSLocalNetworkUsageDescription` 与 `NSBonjourServices`（`_gtt._tcp`），已加入 `macos/Resources/Info.plist` 及中英文 `InfoPlist.strings`。未获“本地网络”权限的进程发往局域网的数据（含 mDNS 组播）会被系统以 “No route to host” 拒绝，只剩回环可用；从终端运行 CLI 时，权限归属于启动它的终端类 App，需在“系统设置 › 隐私与安全性 › 本地网络”中允许。应用防火墙开启时，还需允许其接收传入连接。
 - Windows：只应为“专用”网络配置文件放行 TCP 4319 与 UDP 5353（mDNS），不要放行“公用”配置文件；安装程序暂未自动添加规则。
+
+## 查看方存储与同步
+
+账本 schema v2 新增四张表（`CREATE TABLE IF NOT EXISTS`，旧账本打开时自动迁移）。对等数据**永不**写入 `usage_events` / `daily_rollups`，对等服务的读路径只读本机表，所以拉来的数据不会被再次共享。
+
+| 表 | 内容 |
+|---|---|
+| `peers` | `device_id` 主键、名称、固定指纹（唯一）、`last_address`、`paired_at`、`last_seen_at`（最近成功连上）、`last_pull_at`（最近尝试）、`last_error_code`（成功后清空）、`gtt_version`、`protocol_version`、`enabled` |
+| `peer_groups` | 主键 (`device_id`, `utc_hour`, `app`, `model`)；`utc_hour` 为 epoch 小时数，无时间戳的行为 `-1`；事件数、各类 token、credits、成本、`active_ms`、`duration_ms` |
+| `peer_day_fps` | 主键 (`device_id`, `utc_day`)：每个 UTC 日（或 `undated`）的内容指纹 |
+| `peer_quotas` | 主键 (`device_id`, `app`, `account_key`, `window_kind`)：对方各窗口最新额度，无账号时 `account_key=''` |
+
+**同步**（`peer sync`、FFI `{"op":"sync"}`、`peer::sync::sync_all`）：对每台启用的已配对设备，在独立线程中先按 `device_id` 做 mDNS 查找（可关闭），再按固定指纹连接；拉 `days` 与本地指纹比较，只对最早变化日之后的范围拉 `summary`（附带已有指纹），再拉 `quotas`。每台设备有时间预算（默认 45 秒），慢或失败的设备不阻塞其他设备；超时记为 `sync_timeout`。结果在调用方线程按设备各用一个事务写入：变化的日整体替换，已删除的日删除，额度整体替换，并更新 `last_seen_at` / `last_error_code` 等。收到的数据视为不可信：日键、桶起点与小时必须一致，标识必须通过与服务端相同的校验，数值必须有限且非负，否则整台设备本次记为 `malformed_response`。`sync_if_due`（FFI `{"op":"sync","if_due":true}`）是给界面定时器用的节流钩子，默认 5 分钟一次，不引入运行时。
+
+**设备维度**：Cube 的每个分组带设备下标，0 为本机。对等方的 UTC 小时分组按查看方的本地固定偏移重新归入本地日与“今天”的小时（整小时偏移下精确）。设备筛选与工具、模型筛选并列，`overview_parts`、热力图、趋势、按工具与按模型都遵守；默认“全部设备”。没有对等设备时结果与之前逐字节相同，全部设备 = 本机 + Σ 对等设备（均由测试固定）。Cube 无法精确回答的区间（非整日边界、单日小时视图、过期的“今天”）走 SQL 路径取本机数据，并以小时精度折叠对等数据后合并。明细表只含本机事件（对等方只共享聚合）。停用（`enabled=0`）的设备不参与聚合，数据保留到被忘记；忘记设备在一个事务里删除其全部行，再删除令牌。
+
+**额度合并**：按 (app, 账号伪名, window_kind) 取所有设备中最新的一条，绝不相加；每行标明报告它的设备。本机账号用与对等方相同的 SHA-256 伪名对齐。
+
+**重叠检测**：若两台设备在最近 30 天内、同一 app 下，至少 3 个 UTC 日存在完全相同的小时分组（同一小时、模型、事件数与输入/输出/缓存读 token），则给出 `possible_shared_source` 警告（例如两台机器扫描了同一个同步文件夹）。只提示，不去重。
 
 ## HTTP 约束
 
@@ -118,6 +137,7 @@ TXT 记录只有四项，不含任何用量信息：
 | `not_paired` / `ambiguous_peer` / `unknown_peer` | 目标未配对 / 名称匹配多台设备 / forget 找不到设备 | 否 |
 | `unknown_viewer` / `ambiguous_viewer` | revoke 找不到 / 名称匹配多个查看方（请用 id） | 否 |
 | `peer_fingerprint_mismatch` | 对方证书与固定指纹不符，未发送任何请求 | 否 |
+| `sync_timeout` / `sync_failed` / `pairing_self` | 同步超出时间预算 / 同步失败（无具体码）/ 与本机自己配对 | 是 / 是 / 否 |
 | `connect_failed` / `tls_failed` / `plaintext_not_allowed` / `malformed_response` | 连接失败（含所有候选地址均不可达）/ TLS 握手失败 / 向非回环地址发明文 / 响应格式错误 | 否 |
 | `invalid_request` / `unknown_endpoint` / `method_not_allowed` / `request_too_large` / `request_timeout` / `host_not_allowed` | 请求层错误 | 否 |
 | `server_busy` | 并发连接已满 | 是 |

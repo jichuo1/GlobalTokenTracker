@@ -92,10 +92,12 @@ globaltokentracker-cli peer revoke Laptop
 globaltokentracker-cli peer discover
 globaltokentracker-cli peer pair 192.168.1.20:4319 408036 --name Laptop
 globaltokentracker-cli peer pull "Studio Mac" --endpoint summary
+globaltokentracker-cli peer sync                       # pull paired devices' aggregates into this ledger
+globaltokentracker-cli report week --device all        # this device + peers, with a per-device breakdown
 globaltokentracker-cli peer forget "Studio Mac"
 ```
 
-CLI only for now (JSON output); the multi-device view in the apps is coming. macOS needs the Local Network permission; on Windows open TCP 4319 and UDP 5353 for the Private profile only. Protocol and security model: [docs/PEER_API.md](docs/PEER_API.md) (Chinese).
+CLI only for now (JSON output). Synced data is stored separately (never in the local event tables, never re-shared) and appears as a device dimension next to this device; quotas take the freshest report per account and are never summed. The multi-device view in the apps is coming. macOS needs the Local Network permission; on Windows open TCP 4319 and UDP 5353 for the Private profile only. Protocol and security model: [docs/PEER_API.md](docs/PEER_API.md) (Chinese).
 
 ## Build
 
