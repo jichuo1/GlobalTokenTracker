@@ -64,7 +64,6 @@ struct OverviewLayout: Codable, Equatable {
 
 struct OverviewView: View {
     @Environment(AppModel.self) private var model
-    @ViewState private var layout = OverviewLayout.load()
 
     var body: some View {
         Group {
@@ -77,7 +76,7 @@ struct OverviewView: View {
                         // Chain reaction on page turns: each card on its own
                         // spring, released in layout order. The stat tiles
                         // cascade individually inside their grid.
-                        ForEach(Array(layout.visible.enumerated()), id: \.element) { i, w in
+                        ForEach(Array(model.overviewLayout.visible.enumerated()), id: \.element) { i, w in
                             if w == .stats {
                                 widget(w, vm: vm)
                             } else {
@@ -96,11 +95,6 @@ struct OverviewView: View {
                 ProgressView("Loading ledger…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .sheet(isPresented: Binding(get: { model.customizingOverview },
-                                    set: { model.customizingOverview = $0 })) {
-            CustomizeOverviewSheet(layout: $layout)
-        }
-        .onChange(of: layout) { _, l in l.save() }
     }
 
     @ViewBuilder
@@ -122,47 +116,6 @@ struct OverviewView: View {
 
 /// Customize sheet: drag to reorder, checkbox to show/hide — the Mac form of
 /// the WinUI edit mode (move up/down + hide per card).
-private struct CustomizeOverviewSheet: View {
-    @Binding var layout: OverviewLayout
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Customize Overview").scaledFont(.title3, weight: .bold)
-            Text("Drag to reorder. Uncheck a card to hide it.")
-                .scaledFont(.callout).foregroundStyle(.secondary)
-            List {
-                ForEach(layout.all) { w in
-                    Toggle(isOn: Binding(
-                        get: { !layout.hidden.contains(w) },
-                        set: { on in
-                            if on { layout.hidden.remove(w) } else { layout.hidden.insert(w) }
-                        }
-                    )) {
-                        Label(w.title, systemImage: w.symbol)
-                    }
-                }
-                .onMove { from, to in
-                    var o = layout.all
-                    o.move(fromOffsets: from, toOffset: to)
-                    layout.order = o
-                }
-            }
-            .listStyle(.bordered)
-            .frame(height: 260)
-            HStack {
-                Button("Restore Defaults") { layout = OverviewLayout() }
-                Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.glassProminent)
-            }
-        }
-        .padding(20)
-        .frame(width: 380)
-    }
-}
-
 private struct UpdateBanner: View {
     let info: UpdateInfo
     @Environment(AppModel.self) private var model

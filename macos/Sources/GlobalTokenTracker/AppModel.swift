@@ -99,7 +99,6 @@ final class AppModel {
 
     /// Overview's "Customize Overview…" sheet (toolbar button lives at the
     /// window level so mounted-but-hidden pages add no toolbar items).
-    var customizingOverview = false
 
     /// Main window on screen and not fully covered (NSWindow occlusion);
     /// background rescans relax while it's hidden.
@@ -130,6 +129,15 @@ final class AppModel {
     /// the title re-lays out the window (measured 50–130 ms), which froze the
     /// drum for its first frames; a stall while nothing moves is invisible.
     var chromePage: Page = .overview
+    /// The page the title-bar controls show — follows a turn as it starts
+    /// (the toolbar items themselves never change, see Chrome.swift).
+    var toolbarPage: Page = .overview
+    /// Width of the detail column — the title-bar chrome spans it.
+    var chromeWidth: CGFloat = 0
+    /// Overview card order and visibility (edited from the toolbar panel).
+    var overviewLayout = OverviewLayout.load() {
+        didSet { if overviewLayout != oldValue { overviewLayout.save() } }
+    }
     var range: RangeSpec {
         didSet {
             guard range != oldValue else { return }
@@ -234,6 +242,16 @@ final class AppModel {
     /// Re-read core's "today" / "now" (the panel may stay open past an hour).
     func refreshRangeInfo() {
         if let info = try? Core.window(.describe(range)), info != rangeInfo { rangeInfo = info }
+    }
+
+    /// A preset segment picked. The highlight and captions move at once; the
+    /// data load waits for clicks to stop (rapid picks collapse into one).
+    func selectPreset(_ key: String) {
+        guard let preset = RangeSpec.presets.first(where: { $0.key == key }), preset != range else { return }
+        let info = try? Core.window(.describe(preset))
+        rangeRollsDown = Self.startKey(info) < Self.startKey(rangeInfo)
+        deferRangeLoad = true
+        range = preset
     }
 
     /// The calendar popover, owned here so the toolbar's "Custom" segment can

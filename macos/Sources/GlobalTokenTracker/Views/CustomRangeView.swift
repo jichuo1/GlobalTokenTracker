@@ -60,7 +60,7 @@ struct CustomRangeButton: View {
                 Text(Self.summary(model.range, model.rangeInfo))
                     .monospacedDigit()
                     .rollingText(down: model.rangeRollsDown)
-                    .frame(width: Self.captionWidth, alignment: .leading)
+                    .frame(width: Self.captionWidth, alignment: .center)
             } icon: {
                 Image(systemName: "calendar")
             }

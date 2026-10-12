@@ -15,6 +15,11 @@ enum ProbeFlags {
     static let noDrum = env["GTT_PROBE_NO_DRUM"] != nil
     static let noChrome = env["GTT_PROBE_NO_CHROME"] != nil
     static let noSidebar = env["GTT_PROBE_NO_SIDEBAR"] != nil
+    /// Opens one title-bar panel shortly after launch (calendar, tools,
+    /// models, customize, refresh) for screenshots.
+    static let panel = env["GTT_PROBE_PANEL"]
+    /// Title-bar controls switch after the turn instead of with it (A/B).
+    static let noToolbarMotion = env["GTT_PROBE_NO_TOOLBAR_MOTION"] != nil
 }
 
 @MainActor
@@ -198,5 +203,49 @@ enum Snapshot {
             }
             NSApp.terminate(nil)
         }
+    }
+}
+
+/// Toolbar probe — inert unless GTT_TOOLBAR_PROBE is set. Brings the window
+/// to (100, 100) in front, then picks ranges in fast and slow bursts (the
+/// segments' own code path) and turns pages, so a recording of the title bar
+/// shows how the toolbar behaves under fast input.
+@MainActor
+enum ToolbarProbe {
+    static func start(model: AppModel) {
+        guard ProcessInfo.processInfo.environment["GTT_TOOLBAR_PROBE"] != nil else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            while model.isLoading { try? await Task.sleep(for: .milliseconds(250)) }
+            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else { return }
+            NSApp.activate()
+            window.setFrame(NSRect(x: 100, y: (NSScreen.main?.frame.height ?? 1000) - 100 - 780, width: 1180, height: 780),
+                            display: true)
+            window.makeKeyAndOrderFront(nil)
+            log("ready")
+            try? await Task.sleep(for: .seconds(2))
+            log("burst fast")
+            for i in [0, 1, 2, 3, 0, 3, 1, 2, 1] {
+                model.selectPreset(RangeSpec.presets[i].key)
+                try? await Task.sleep(for: .milliseconds(70))
+            }
+            try? await Task.sleep(for: .milliseconds(1500))
+            log("burst slow")
+            for i in [2, 0, 3, 1] {
+                model.selectPreset(RangeSpec.presets[i].key)
+                try? await Task.sleep(for: .milliseconds(220))
+            }
+            try? await Task.sleep(for: .milliseconds(1500))
+            log("pages")
+            for p in [Page.detail, .quota, .prices, .overview, .settings, .overview] {
+                model.page = p
+                try? await Task.sleep(for: .milliseconds(1200))
+            }
+            log("done")
+        }
+    }
+
+    private static func log(_ s: String) {
+        FileHandle.standardError.write(Data("[toolbar] \(s) \(Date().timeIntervalSince1970)\n".utf8))
     }
 }

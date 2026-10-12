@@ -17,6 +17,7 @@ struct RootView: View {
         } detail: {
             CurrentPageDeck()
                 .toolbar { MainToolbar() }
+                .toolbar(removing: .title)
         }
     }
 }
@@ -38,6 +39,7 @@ private struct CurrentPageDeck: View {
 
     var body: some View {
         PageDeck(page: model.page)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { model.chromeWidth = $0 }
     }
 }
 
@@ -83,6 +85,7 @@ struct PageDeck: View {
     @ViewState private var built: Set<Page> = []
     @ViewState private var height: CGFloat = 700
     @ViewState private var pendingTurn: Task<Void, Never>?
+    @ViewState private var toolbarTurn: Task<Void, Never>?
 
     var body: some View {
         let geo = DrumGeometry(height: height)
@@ -116,6 +119,7 @@ struct PageDeck: View {
             settled = page
             position = Double(Self.index(page))
             model.chromePage = page
+            model.toolbarPage = page
             built.insert(page)
         }
         .onChange(of: page) { _, new in
@@ -159,6 +163,21 @@ struct PageDeck: View {
         turnID += 1
         let forward = Self.index(new) > Self.index(from)
         let spring = Self.spring(distance: distance)
+        // The title-bar controls crossfade a little into the turn, in Core
+        // Animation (see ChromeFader): no per-frame work competes with the
+        // drum, and the one re-layout it costs lands after the drum's most
+        // expensive first frames.
+        toolbarTurn?.cancel()
+        if !ProbeFlags.noToolbarMotion {
+            let lead = reduceMotion ? 0 : min(0.12, spring.travel * 0.25)
+            toolbarTurn = Task { @MainActor in
+                if lead > 0 { try? await Task.sleep(for: .seconds(lead)) }
+                guard !Task.isCancelled, target == new else { return }
+                ChromeFader.crossfade(duration: reduceMotion ? 0.15 : 0.3) {
+                    model.toolbarPage = new
+                }
+            }
+        }
         // The destination's cascade starts as it comes into view, not when a
         // long jump starts: roughly the time to cover all but the last face.
         let arrival = distance > 1 ? spring.travel * Double(distance - 1) / Double(distance) : 0
@@ -180,6 +199,7 @@ struct PageDeck: View {
             guard target == new else { return }
             settled = new
             if !ProbeFlags.noChrome { model.chromePage = new }
+            if ProbeFlags.noToolbarMotion { model.toolbarPage = new }
             ScrollerStyle.apply()
             if let w = NSApp.keyWindow, let v = w.contentView {
                 w.enableCursorRects()
@@ -241,119 +261,14 @@ struct DrumGeometry {
     }
 }
 
+/// Two items that never change (see Chrome.swift): their contents follow
+/// `model.toolbarPage`, so the toolbar is never rebuilt by a page turn.
 struct MainToolbar: ToolbarContent {
-    @Environment(AppModel.self) private var model
-
     var body: some ToolbarContent {
-        @Bindable var model = model
-        if model.chromePage == .overview || model.chromePage == .detail {
-            ToolbarItem(placement: .navigation) {
-                // Always five segments: adding a "Custom" segment only while a
-                // custom window is active resized the picker and shoved the
-                // date button (and its popover) sideways on the first pick.
-                Picker("Range", selection: Binding(
-                    get: { model.range.key },
-                    set: { key in
-                        if key == "custom" {
-                            model.pickCustomRange()
-                        } else if let preset = RangeSpec.presets.first(where: { $0.key == key }) {
-                            model.range = preset
-                        }
-                    }
-                )) {
-                    ForEach(RangeSpec.presets, id: \.key) { r in
-                        Text(r.title).tag(r.key)
-                    }
-                    Text("Custom").tag("custom")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(model.chromePage == .detail)
-                .help("Statistics window")
-            }
-            ToolbarItem(placement: .navigation) {
-                CustomRangeButton()
-                    .disabled(model.chromePage == .detail)
-            }
-            ToolbarItemGroup(placement: .primaryAction) {
-                FilterMenu(
-                    title: "Tools", symbol: "hammer",
-                    items: model.vm?.apps ?? [], label: Fmt.app,
-                    isOn: model.isAppSelected, toggle: model.toggleApp,
-                    setAll: model.setAllApps, selected: model.appFilter?.count
-                )
-                FilterMenu(
-                    title: "Models", symbol: "cpu",
-                    items: model.vm?.models ?? [], label: { $0 },
-                    isOn: model.isModelSelected, toggle: model.toggleModel,
-                    setAll: model.setAllModels, selected: model.modelFilter?.count
-                )
-                // The device dimension, once another device is paired.
-                if let vm = model.vm, vm.hasPeers {
-                    FilterMenu(
-                        title: "Devices", symbol: "macbook.and.iphone",
-                        items: vm.devices.map(\.deviceId),
-                        label: { id in
-                            let d = vm.devices.first { $0.deviceId == id }
-                            guard let d, d.local, d.name != "This device" else { return vm.deviceName(id) }
-                            return String(localized: "\(d.name) (This Mac)")
-                        },
-                        isOn: model.isDeviceSelected, toggle: model.toggleDevice,
-                        setAll: model.setAllDevices, selected: model.deviceFilter?.count
-                    )
-                    .disabled(model.chromePage == .detail)
-                }
-            }
+        ToolbarItem(placement: .navigation) {
+            ChromeBar()
         }
-        if model.chromePage == .overview {
-            ToolbarItem(placement: .secondaryAction) {
-                Button {
-                    model.customizingOverview = true
-                } label: {
-                    Label("Customize Overview…", systemImage: "slider.horizontal.3")
-                }
-                .help("Reorder or hide overview cards")
-            }
-        }
-        if model.chromePage == .prices {
-            ToolbarItem(placement: .primaryAction) {
-                PriceSearchField(text: $model.priceQuery)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Toggle(isOn: $model.priceDisputedOnly) {
-                    Label("Disputed Only", systemImage: "exclamationmark.bubble")
-                }
-                .help("Only models the price sources disagree on")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.refreshPrices()
-                } label: {
-                    Label("Update Prices", systemImage: "arrow.down.circle")
-                }
-                .disabled(model.isRefreshingPrices)
-                .help("Download the latest prices from every source")
-            }
-        }
-        ToolbarSpacer(.fixed)
-        ToolbarItem(placement: .primaryAction) {
-            // Split button: click scans now; the menu sets the cadence
-            // (Windows: the 刷新 pill in the filter strip).
-            Menu {
-                Picker("Rescan sources", selection: $model.refreshSeconds) {
-                    ForEach(AppModel.refreshOptions, id: \.self) { s in
-                        Text(Prefs.refreshLabel(s)).tag(s)
-                    }
-                }
-                .pickerStyle(.inline)
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-                    .symbolEffect(.rotate, isActive: model.isScanning)
-            } primaryAction: {
-                model.manualRefresh()
-            }
-            .help("Scan all sources now (⌘R); hold for the refresh cadence")
-        }
+        .sharedBackgroundVisibility(.hidden)
     }
 }
 
@@ -378,49 +293,9 @@ struct PriceSearchField: View {
                 .help("Clear")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .frame(width: 260)
-        .background(.quaternary.opacity(0.5), in: .capsule)
-    }
-}
-
-/// Checklist menu for tool / model filters. `selected == nil` = everything
-/// on; `0` = a deliberately empty view (Windows: Some(vec![])).
-struct FilterMenu: View {
-    let title: LocalizedStringKey
-    let symbol: String
-    let items: [String]
-    let label: (String) -> String
-    let isOn: (String) -> Bool
-    let toggle: (String) -> Void
-    let setAll: (Bool) -> Void
-    let selected: Int?
-
-    var body: some View {
-        let active = selected != nil
-        Menu {
-            Button("Select All") { setAll(true) }.disabled(!active)
-            Button("Select None") { setAll(false) }.disabled(selected == 0)
-            Divider()
-            ForEach(items, id: \.self) { item in
-                Toggle(label(item), isOn: Binding(get: { isOn(item) }, set: { _ in toggle(item) }))
-            }
-        } label: {
-            Label {
-                // "Tools 12/15" when narrowed — the WinUI "已选 12/15" summary.
-                if let n = selected {
-                    Text("\(Text(title)) \(n)/\(items.count)")
-                } else {
-                    Text(title)
-                }
-            } icon: {
-                Image(systemName: active ? "\(symbol).fill" : symbol)
-            }
-        }
-        .menuIndicator(.hidden)
-        .help(title)
-        .disabled(items.isEmpty)
+        .padding(.horizontal, 12)
+        .frame(width: 260, height: 32)
+        .glassEffect(.regular.interactive(), in: .capsule)
     }
 }
 

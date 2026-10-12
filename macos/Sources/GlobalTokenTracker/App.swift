@@ -58,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppModel.shared.start()
             MotionProbe.shared.start(model: AppModel.shared)
             Snapshot.start(model: AppModel.shared)
+            ToolbarProbe.start(model: AppModel.shared)
         }
     }
 
@@ -124,6 +125,15 @@ enum Prefs {
         cfg.createsNewApplicationInstance = true
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: cfg) { _, _ in
             DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+
+    static func refreshText(_ secs: Int) -> String {
+        switch secs {
+        case 0: String(localized: "Only when files change")
+        case 60: String(localized: "Every minute")
+        case 300: String(localized: "Every 5 minutes")
+        default: String(localized: "Every \(secs) seconds")
         }
     }
 

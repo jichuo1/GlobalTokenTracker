@@ -371,3 +371,17 @@
 "The external interface is turned off on that device." = "该设备已关闭外部接口。";
 "The device's ledger is busy. Try again shortly." = "该设备的账本正忙，请稍后再试。";
 "That device runs an incompatible version." = "该设备运行的版本不兼容。";
+
+/* Title-bar panels */
+"All %lld" = "全部 %lld 项";
+"%lld of %lld" = "已选 %lld / %lld";
+"%@: %lld of %lld selected" = "%1$@：已选 %2$lld / %3$lld";
+"%lld of %lld cards shown" = "显示 %lld / %lld 张卡片";
+"Rescan Sources" = "重新扫描数据源";
+"Last scan %@ ago" = "上次扫描于 %@前";
+"Not scanned yet" = "尚未扫描";
+"Scanning…" = "正在扫描…";
+"New usage is picked up automatically." = "新的用量会自动计入。";
+"Scan Now" = "立即扫描";
+"No matches" = "无匹配项";
+"Refresh cadence" = "刷新频率";
