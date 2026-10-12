@@ -58,7 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Prefs.applyTheme()
         // Start loading before any scene appears: the menu bar label shows
         // today's numbers even if the window is never opened (login launch).
-        MainActor.assumeIsolated { AppModel.shared.start() }
+        MainActor.assumeIsolated {
+            AppModel.shared.start()
+            MotionProbe.shared.start(model: AppModel.shared)
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
