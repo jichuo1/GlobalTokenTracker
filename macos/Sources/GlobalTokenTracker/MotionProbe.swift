@@ -60,6 +60,28 @@ final class MotionProbe: NSObject {
                 let rest = Int(ProcessInfo.processInfo.environment["GTT_PROBE_REST_MS"] ?? "") ?? 500
                 try? await Task.sleep(for: .milliseconds(rest))
             }
+            // Multi-page jumps (the drum passes the pages in between) and an
+            // interrupted turn (re-targeted mid-flight, keeping velocity).
+            let jumps: [(String, [(Page, Int)])] = [
+                ("jump overview → prices", [(.prices, 0)]),
+                ("jump prices → overview", [(.overview, 0)]),
+                ("jump overview → sources", [(.sources, 0)]),
+                ("jump sources → overview", [(.overview, 0)]),
+                ("interrupt → prices ↩ detail", [(.prices, 0), (.detail, 180)]),
+            ]
+            for (name, steps) in jumps {
+                gaps.removeAll()
+                last = 0
+                recording = true
+                for (page, after) in steps {
+                    if after > 0 { try? await Task.sleep(for: .milliseconds(after)) }
+                    model.page = page
+                }
+                try? await Task.sleep(for: .milliseconds(1300))
+                recording = false
+                report(name)
+                try? await Task.sleep(for: .milliseconds(900))
+            }
             link.invalidate()
             FileHandle.standardError.write(Data("[probe] done\n".utf8))
         }

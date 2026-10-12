@@ -113,13 +113,16 @@ struct DrumRoll: ViewModifier, Animatable {
     }
 
     func body(content: Content) -> some View {
-        let a = angle * .pi / 180
+        // Faces more than one span away are fully faded; keep their
+        // transform bounded instead of spinning them round the back.
+        let clamped = min(max(angle, -span * 1.05), span * 1.05)
+        let a = clamped * .pi / 180
         let camera = radius * 2.4
         let scale = camera / (camera + radius * (1 - cos(a)))
         let t = min(1, abs(angle) / span)
         content
             .overlay(Color.black.opacity(0.22 * t).allowsHitTesting(false))
-            .rotation3DEffect(.degrees(angle), axis: (x: 1, y: 0, z: 0), anchor: .center, perspective: 0.2)
+            .rotation3DEffect(.degrees(clamped), axis: (x: 1, y: 0, z: 0), anchor: .center, perspective: 0.2)
             .scaleEffect(scale)
             .offset(y: -radius * sin(a) * scale)
             // Reaches ~0 exactly at the parked angle: the previous page used
@@ -139,6 +142,9 @@ struct PageTurn: Equatable {
     var id = 0
     var forward = true
     var role = Role.idle
+    /// Extra wait before an incoming page's cascade: on a multi-page jump
+    /// the destination only comes into view near the end of the travel.
+    var delay: Double = 0
 }
 
 /// One per page face, injected once and never replaced. The deck mutates
@@ -219,7 +225,7 @@ private struct Cascade: ViewModifier {
             // From the direction of travel, later components from further
             // out; hold through the delay, then spring home.
             return Plan(y0: dir * (26 + CGFloat(step) * 9), y1: 0, o0: 0.25, o1: 1,
-                        hold: delay, duration: 0.62, fade: 0.34,
+                        hold: turn.delay + delay, duration: 0.62, fade: 0.34,
                         spring: Spring(response: 0.46, dampingRatio: 0.82))
         case .outgoing:
             // Lead the drum away: earlier components leave first.
@@ -350,7 +356,7 @@ private struct DepthLayer: ViewModifier {
                 let outgoing = turn.role == .outgoing
                 let y0: CGFloat = incoming ? dir * CGFloat(depth) * 11 : 0
                 let y1: CGFloat = outgoing ? -dir * CGFloat(depth) * 9 : 0
-                let hold = incoming ? step * Motion.cascadeStep + d * 0.024
+                let hold = incoming ? turn.delay + step * Motion.cascadeStep + d * 0.024
                     : outgoing ? step * Motion.cascadeStep * 0.6 : 0
                 let moving = incoming || outgoing
                 KeyframeTrack(\.y) {

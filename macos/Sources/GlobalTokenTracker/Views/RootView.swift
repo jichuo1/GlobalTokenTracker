@@ -50,29 +50,33 @@ private extension Binding where Value == Page {
 
 /// Detail column: the pages as faces of a drum.
 ///
-/// Pages are built once and kept mounted (a "deck"), so turning to a page
-/// never pays its construction — measured at up to ~100 ms (Overview's
-/// charts, the grouped Quota form, AppKit tables) on the first frame of the
-/// turn, which is what made it stutter. Hidden faces are parked on the side
-/// of the drum their sidebar position implies — below the current page if
-/// they come after it, above if before — so every turn starts from the
-/// right side without a setup frame. Pages not yet visited are built ahead
-/// of time, one per idle moment after launch.
+/// The drum has one continuous **position** (0 = Overview … 4 = Prices, the
+/// sidebar order); every face's angle is (position − its index) × the face
+/// span. A turn is just `position` springing to the new index, so:
+/// - a jump of several pages rotates *through* the pages in between, each
+///   fading in and out by its own angle as it passes the front;
+/// - the spring's duration grows sub-linearly with distance (a 4-page jump
+///   spins up, cruises and settles in ~1.5× a single step, not 4×);
+/// - clicking another page mid-turn re-targets the same spring, which keeps
+///   its current velocity and bends toward the new page — interruptible,
+///   no restart.
 ///
-/// Only the current page is interactive and visible to accessibility; the
-/// leaving page stays drawn just until the turn completes.
+/// Pages are built once and kept mounted, so turning never pays a page's
+/// construction; parked faces sit at ~0 opacity (not 0, which would make
+/// SwiftUI drop their layers) and the resting face 0.001° off zero (so its
+/// 3D transform layer is never re-inserted). Chrome (toolbar, title), hit
+/// testing and accessibility switch once the drum has settled.
 struct PageDeck: View {
     let page: Page
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ViewState private var current: Page = .overview
-    @ViewState private var leaving: Page?
+    /// Animated drum position (page index, fractional mid-turn).
+    @ViewState private var position: Double = 0
+    /// The page the drum is heading to / resting on.
+    @ViewState private var target: Page = .overview
+    /// The page the last turn finished on: interactive + accessible.
     @ViewState private var settled: Page = .overview
-    /// Increments once per turn: triggers each component's cascade and, as
-    /// an animated value, drives the frosted seam (fraction = turn progress).
     @ViewState private var turnID = 0
-    @ViewState private var seamProgress: Double = 0
-    @ViewState private var forward = true
     /// Stable per-face turn state (see PageTurnState).
     @ViewState private var turnStates: [Page: PageTurnState] =
         Dictionary(uniqueKeysWithValues: Page.allCases.map { ($0, PageTurnState()) })
@@ -86,31 +90,21 @@ struct PageDeck: View {
             ForEach(Page.allCases) { p in
                 if built.contains(p) {
                     face(p)
-                        .modifier(DrumRoll(angle: reduceMotion || ProbeFlags.noDrum ? Self.restAngle : angle(of: p, span: geo.span),
+                        // Opacity, shading and depth all come from the face's
+                        // angle, so passing faces fade in and out continuously.
+                        .modifier(DrumRoll(angle: angle(of: p, span: geo.span),
                                            radius: geo.radius, span: geo.span))
-                        // 0.001, not 0: SwiftUI drops fully transparent content
-                        // from the render tree, so a page at 0 had its layers
-                        // rebuilt and re-rasterised on every turn into view
-                        // (up to ~130 ms). Parked faces sit off to the side of
-                        // the drum anyway; this keeps their layers alive.
-                        .opacity(p == current || p == leaving ? 1 : 0.001)
                         .environment(turnStates[p])
-                        // Interaction + accessibility follow `settled`, the page
-                        // the last turn finished on: exposing a page's subtree
-                        // to accessibility (charts, forms, tables) on the first
-                        // frame of a turn stalled it; nothing is clickable or
-                        // readable mid-turn anyway.
                         .allowsHitTesting(p == settled)
                         .accessibilityHidden(p != settled)
-                        // Fixed stacking order: changing zIndex per turn made
-                        // SwiftUI reorder the hosted AppKit views (tables,
-                        // forms) and re-lay them out on the turn's first frame.
                 }
             }
         }
         .overlay {
             if !reduceMotion && !ProbeFlags.noSeam {
-                SeamGlass(progress: seamProgress, forward: forward, height: height, geometry: geo)
+                // The seam between faces k and k+1 sits at fraction
+                // position − k; it pulses once per page boundary passed.
+                SeamGlass(progress: position, forward: true, height: height, geometry: geo)
             }
         }
         .clipped()
@@ -118,82 +112,96 @@ struct PageDeck: View {
         .navigationTitle(model.chromePage.windowTitle)
         .navigationSubtitle(model.chromePage == .overview ? (model.vm.map { "UTC\($0.tzOffset)" } ?? "") : "")
         .onAppear {
-            current = page
+            target = page
             settled = page
+            position = Double(Self.index(page))
             model.chromePage = page
             built.insert(page)
         }
         .onChange(of: page) { _, new in
-            // Start the turn one run-loop pass later: the sidebar commits its
-            // own selection change (an animated Liquid Glass highlight in an
-            // AppKit outline view) first, instead of in the turn's first
-            // frame, where it caused most first-frame stalls. ~1 frame of
-            // latency, imperceptible after a click.
+            // Start one run-loop pass later: the sidebar commits its own
+            // selection change (an animated highlight in an AppKit outline
+            // view) first, instead of in the turn's first frame.
             pendingTurn?.cancel()
             pendingTurn = Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(1))
                 guard !Task.isCancelled, page == new else { return }
-                turn(from: current, to: new)
+                turn(to: new)
             }
         }
         .task { await prebuild() }
     }
 
-    /// Current face at 0°; others parked one face-span away, below the drum
-    /// when they come later in the sidebar, above when earlier.
+    static func index(_ p: Page) -> Int { Page.allCases.firstIndex(of: p) ?? 0 }
+
+    /// Faces later in the sidebar sit below (negative), earlier ones above;
+    /// the resting face 0.001° off zero (see `restAngle`).
     private func angle(of p: Page, span: Double) -> Double {
-        guard p != current, let i = Page.allCases.firstIndex(of: p),
-              let c = Page.allCases.firstIndex(of: current) else { return Self.restAngle }
-        return i > c ? -span : span
+        if reduceMotion || ProbeFlags.noDrum {
+            return p == target ? Self.restAngle : (Self.index(p) > Self.index(target) ? -span : span)
+        }
+        return (position - Double(Self.index(p))) * span + Self.restAngle
     }
 
-    /// A resting face sits at 0.001°, not 0°: at exactly 0 SwiftUI drops the
-    /// 3D transform layer, and re-inserting it when a turn starts re-hosted
-    /// the page (AppKit tables, Swift Charts) on the turn's first frame —
-    /// the 100–145 ms stalls. Visually identical to 0.
+    /// At exactly 0° SwiftUI drops the 3D transform layer; re-inserting it
+    /// when a turn starts re-hosted the page (tables, charts) — 100–145 ms
+    /// stalls. Visually identical to 0.
     static let restAngle = 0.001
 
-    private func turn(from old: Page, to new: Page) {
-        guard new != current else { return }
-        built.insert(new)
-        leaving = old
-        forward = (Page.allCases.firstIndex(of: new) ?? 0) > (Page.allCases.firstIndex(of: old) ?? 0)
+    private func turn(to new: Page) {
+        guard new != target else { return }
+        let from = target
+        let distance = abs(Self.index(new) - Self.index(from))
+        // Every face the drum will pass must exist.
+        let lo = min(Self.index(new), Self.index(from)), hi = max(Self.index(new), Self.index(from))
+        for i in lo...hi { built.insert(Page.allCases[i]) }
+        target = new
         turnID += 1
-        let target = Double(turnID)
-        // Only the two faces in this turn get a new turn (their components
-        // cascade); a face that was in the previous turn is reset to idle
-        // once. Untouched faces' components aren't invalidated at all.
+        let forward = Self.index(new) > Self.index(from)
+        let spring = Self.spring(distance: distance)
+        // The destination's cascade starts as it comes into view, not when a
+        // long jump starts: roughly the time to cover all but the last face.
+        let arrival = distance > 1 ? spring.travel * Double(distance - 1) / Double(distance) : 0
         for p in Page.allCases {
-            let role: PageTurn.Role = p == new ? .incoming : p == old ? .outgoing : .idle
+            let role: PageTurn.Role = p == new ? .incoming : p == from ? .outgoing : .idle
             guard role != .idle || turnStates[p]?.turn.role != .idle else { continue }
-            turnStates[p]?.turn = PageTurn(id: turnID, forward: forward, role: role)
+            turnStates[p]?.turn = PageTurn(id: turnID, forward: forward, role: role,
+                                           delay: role == .incoming ? arrival : 0)
         }
-        let anim = reduceMotion ? Animation.easeInOut(duration: 0.15) : Motion.drum
-        // `.removed`: the chrome update (toolbar/title relayout) must wait
-        // until the spring has fully settled, not just logically finished,
-        // or its stall lands in the visible tail of the motion.
-        // While faces move, AppKit would recompute every moving scroll view's
-        // tracking areas and cursor rects each frame (seen in profiles);
-        // nothing is clickable mid-turn, so pause that until it settles.
+        // AppKit would recompute moving scroll views' tracking areas and
+        // cursor rects every frame; nothing is clickable mid-turn.
         NSApp.keyWindow?.disableCursorRects()
+        let anim = reduceMotion ? Animation.easeInOut(duration: 0.15) : spring.animation
         withAnimation(anim, completionCriteria: .removed) {
-            current = new
-            seamProgress = target
+            position = Double(Self.index(new))
         } completion: {
-            if leaving == old {
-                leaving = nil
-                NSApp.keyWindow?.enableCursorRects()
-                NSApp.keyWindow?.invalidateCursorRects(for: NSApp.keyWindow!.contentView!)
-            }
-            if current == new {
-                settled = new
-                if !ProbeFlags.noChrome { model.chromePage = new }
+            // A later click may have re-targeted the drum; only the final
+            // destination switches chrome, interaction and accessibility.
+            guard target == new else { return }
+            settled = new
+            if !ProbeFlags.noChrome { model.chromePage = new }
+            if let w = NSApp.keyWindow, let v = w.contentView {
+                w.enableCursorRects()
+                w.invalidateCursorRects(for: v)
             }
         }
+    }
+
+    /// Spring for a turn of `distance` faces. Response grows with √distance
+    /// (sub-linear): far jumps take longer but not proportionally; damping
+    /// just under critical gives the reel a faint settle without bouncing.
+    /// Re-targeting mid-flight keeps the spring's velocity (SwiftUI merges
+    /// springs on the same value), which is what makes turns interruptible.
+    static func spring(distance: Int) -> (animation: Animation, travel: Double) {
+        let d = Double(max(1, distance))
+        let response = 0.5 * (0.55 + 0.45 * d.squareRoot())
+        let damping = d > 1 ? 0.88 : 0.94
+        // Time to get most of the way there (~75% of the settling time).
+        return (.spring(response: response, dampingFraction: damping), response * 0.9)
     }
 
     /// Build the remaining pages after launch, one per idle step, so even a
-    /// first visit turns smoothly. Each mounts hidden (opacity 0).
+    /// first visit turns smoothly. Each mounts parked (≈0 opacity).
     private func prebuild() async {
         try? await Task.sleep(for: .seconds(2.5))
         for p in Page.allCases where !built.contains(p) {

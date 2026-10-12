@@ -98,16 +98,7 @@ final class AppModel {
     private(set) var priceError: String?
 
     // MARK: Selection (persisted)
-    var page: Page = .overview {
-        didSet {
-            if let a = Page.allCases.firstIndex(of: oldValue), let b = Page.allCases.firstIndex(of: page) {
-                pageForward = b > a
-            }
-        }
-    }
-    /// Direction of the last page change (down the sidebar = forward), for
-    /// the page transition.
-    private(set) var pageForward = true
+    var page: Page = .overview
     /// The page the window chrome (toolbar items, title) shows. Follows
     /// `page` only once a page turn has finished: reconfiguring NSToolbar and
     /// the title re-lays out the window (measured 50–130 ms), which froze the
