@@ -8,6 +8,8 @@ use crate::Cube;
 use crate::model::{CostSource, Provenance, QuotaSnapshot, UsageEvent};
 use crate::store::{AppSummary, ShareRow, Totals};
 use crate::viewmodel::{Range, day_start_ms};
+use rusqlite::params;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -766,7 +768,7 @@ fn pairing_happy_path_pins_and_authorizes() {
 
     // Before pairing: only `hello`, which proves the certificate it claims.
     let (status, hello) = client::pull(
-        &viewer.path,
+        &viewer.store,
         &addr.to_string(),
         false,
         false,
@@ -782,7 +784,7 @@ fn pairing_happy_path_pins_and_authorizes() {
     );
     assert_eq!(
         client::pull(
-            &viewer.path,
+            &viewer.store,
             &addr.to_string(),
             false,
             false,
@@ -795,11 +797,11 @@ fn pairing_happy_path_pins_and_authorizes() {
     );
 
     let code = state.issue_code().unwrap();
-    let peer = pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+    let peer = pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop")
         .unwrap()
         .unwrap();
     assert_eq!(peer.fingerprint, fp);
-    assert_eq!(peer.device_name, "test-mac");
+    assert_eq!(peer.name, "test-mac");
     assert_eq!(peer.device_id, server_f.identity.device_id);
     let viewers = TrustStore::open(&state.peer_dir)
         .unwrap()
@@ -810,7 +812,7 @@ fn pairing_happy_path_pins_and_authorizes() {
 
     // Pull by device name and by address; both use the pin and token.
     for target in ["test-mac", &addr.to_string()] {
-        let (status, s) = client::pull(&viewer.path, target, false, false, 1, "summary", "")
+        let (status, s) = client::pull(&viewer.store, target, false, false, 1, "summary", "")
             .unwrap()
             .unwrap();
         assert_eq!(status, 200, "{s}");
@@ -825,25 +827,31 @@ fn pairing_happy_path_pins_and_authorizes() {
     // Single use: the same code cannot pair a second viewer.
     let other = fixture();
     assert_eq!(
-        pairing::pair(&other.path, &addr.to_string(), &code, "Other").unwrap(),
+        pairing::pair(&other.store, &addr.to_string(), &code, "Other").unwrap(),
         Err("pairing_unavailable")
     );
 
     // The server stores only the token's hash.
-    let hash = super::trust::token_hash(&peer.token);
+    let token = super::devices::Registry::open(&viewer.store)
+        .unwrap()
+        .token(&peer.device_id)
+        .unwrap()
+        .unwrap();
+    let hash = super::trust::token_hash(&token);
     let mut stored = Vec::new();
     for entry in std::fs::read_dir(&state.peer_dir).unwrap() {
         stored.extend(std::fs::read(entry.unwrap().path()).unwrap());
     }
     let stored = String::from_utf8_lossy(&stored);
-    assert!(!stored.contains(&peer.token), "token stored in clear");
+    assert!(!stored.contains(&token), "token stored in clear");
     assert!(stored.contains(&hash));
 
     // Forgetting the device drops pin and token.
-    let trust = TrustStore::open(&peer_dir(&viewer.path)).unwrap();
-    assert!(trust.forget("test-mac").unwrap().is_some());
+    let registry = super::devices::Registry::open(&viewer.store).unwrap();
+    assert!(registry.forget("test-mac").unwrap().is_some());
+    assert!(registry.token(&peer.device_id).unwrap().is_none());
     assert_eq!(
-        client::pull(&viewer.path, "test-mac", false, false, 1, "summary", "").unwrap(),
+        client::pull(&viewer.store, "test-mac", false, false, 1, "summary", "").unwrap(),
         Err("not_paired")
     );
 }
@@ -854,11 +862,11 @@ fn revoked_tokens_fail_immediately() {
     let viewer = fixture();
     let (addr, state) = start(&server_f, true);
     let code = state.issue_code().unwrap();
-    pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+    pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop")
         .unwrap()
         .unwrap();
     assert_eq!(
-        client::pull(&viewer.path, "test-mac", false, false, 1, "sources", "")
+        client::pull(&viewer.store, "test-mac", false, false, 1, "sources", "")
             .unwrap()
             .unwrap()
             .0,
@@ -870,7 +878,7 @@ fn revoked_tokens_fail_immediately() {
         .unwrap()
         .unwrap();
     assert!(revoked.revoked_at.is_some());
-    let (status, v) = client::pull(&viewer.path, "test-mac", false, false, 1, "sources", "")
+    let (status, v) = client::pull(&viewer.store, "test-mac", false, false, 1, "sources", "")
         .unwrap()
         .unwrap();
     assert_eq!((status, code_of(&v)), (401, Some("auth_invalid")));
@@ -892,7 +900,7 @@ fn wrong_code_fails_backs_off_and_is_never_retried() {
     let code = state.issue_code().unwrap();
     let wrong = pairing::test_support::wrong_code(&code);
     assert_eq!(
-        pairing::pair(&viewer.path, &addr.to_string(), &wrong, "Laptop").unwrap(),
+        pairing::pair(&viewer.store, &addr.to_string(), &wrong, "Laptop").unwrap(),
         Err("pairing_failed")
     );
     assert!(
@@ -904,23 +912,23 @@ fn wrong_code_fails_backs_off_and_is_never_retried() {
     );
     // The viewer refuses to reuse a code that failed.
     assert_eq!(
-        pairing::pair(&viewer.path, &addr.to_string(), &wrong, "Laptop").unwrap(),
+        pairing::pair(&viewer.store, &addr.to_string(), &wrong, "Laptop").unwrap(),
         Err("pairing_code_reused")
     );
     // The server backs off after a failure …
     assert_eq!(
-        pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop").unwrap(),
+        pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop").unwrap(),
         Err("pairing_locked")
     );
     // … and the right code still works once the back-off has passed.
     std::thread::sleep(Duration::from_millis(1100));
     assert!(
-        pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+        pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop")
             .unwrap()
             .is_ok()
     );
     assert_eq!(
-        pairing::pair(&viewer.path, &addr.to_string(), "12345", "Laptop").unwrap(),
+        pairing::pair(&viewer.store, &addr.to_string(), "12345", "Laptop").unwrap(),
         Err("invalid_code")
     );
 }
@@ -1028,7 +1036,7 @@ fn an_interceptor_certificate_can_neither_pair_nor_pull() {
     let code = state.issue_code().unwrap();
     let mitm = relay(&attacker, addr);
     assert_eq!(
-        pairing::pair(&viewer.path, &mitm.to_string(), &code, "Laptop").unwrap(),
+        pairing::pair(&viewer.store, &mitm.to_string(), &code, "Laptop").unwrap(),
         Err("pairing_failed")
     );
     assert!(
@@ -1038,37 +1046,30 @@ fn an_interceptor_certificate_can_neither_pair_nor_pull() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        TrustStore::open(&peer_dir(&viewer.path))
-            .unwrap()
-            .peers()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(super::devices::list(&viewer.store).unwrap().is_empty());
 
     // A device that does not know the code cannot pair either.
     let (fake_addr, fake) = start(&attacker_f, true);
     fake.issue_code().unwrap();
     let code = state.issue_code().unwrap();
     assert_eq!(
-        pairing::pair(&viewer.path, &fake_addr.to_string(), &code, "Laptop").unwrap(),
+        pairing::pair(&viewer.store, &fake_addr.to_string(), &code, "Laptop").unwrap(),
         Err("pairing_failed")
     );
 
     // After a genuine pairing, a different certificate at the saved address
     // fails closed — no request (and no token) is sent.
     let code = state.issue_code().unwrap();
-    let mut peer = pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+    let peer = pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop")
         .unwrap()
         .unwrap();
-    peer.address = fake_addr.to_string();
-    TrustStore::open(&peer_dir(&viewer.path))
+    super::devices::Registry::open(&viewer.store)
         .unwrap()
-        .save_peer(&peer)
+        .set_address(&peer.device_id, &fake_addr.to_string())
         .unwrap();
     for ep in ["hello", "summary"] {
         assert_eq!(
-            client::pull(&viewer.path, "test-mac", false, false, 1, ep, "").unwrap(),
+            client::pull(&viewer.store, "test-mac", false, false, 1, ep, "").unwrap(),
             Err("peer_fingerprint_mismatch"),
             "{ep}"
         );
@@ -1174,15 +1175,19 @@ fn sock(s: &str) -> std::net::SocketAddr {
     s.parse().unwrap()
 }
 
-fn peer_row(id: char, fp: &str) -> super::trust::Peer {
-    super::trust::Peer {
-        fingerprint: fp.into(),
+fn peer_row(id: char, fp: &str) -> super::devices::PeerDevice {
+    super::devices::PeerDevice {
         device_id: id.to_string().repeat(32),
-        device_name: "paired".into(),
-        address: "192.0.2.9:4319".into(),
-        token: "t".repeat(64),
+        name: "paired".into(),
+        fingerprint: fp.into(),
+        last_address: "192.0.2.9:4319".into(),
         paired_at: 0,
-        last_pulled_at: None,
+        last_seen_at: None,
+        last_pull_at: None,
+        last_error_code: None,
+        gtt_version: None,
+        protocol_version: Some(1),
+        enabled: true,
     }
 }
 
@@ -1283,7 +1288,7 @@ fn paired_devices_are_refound_by_device_id_before_the_saved_address() {
     let (addr, state) = start(&server_f, true);
     let (fake_addr, _) = start(&attacker_f, true);
     let code = state.issue_code().unwrap();
-    let mut peer = pairing::pair(&viewer.path, &addr.to_string(), &code, "Laptop")
+    let peer = pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop")
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1296,46 +1301,44 @@ fn paired_devices_are_refound_by_device_id_before_the_saved_address() {
     );
 
     // DHCP moved the device: the saved address is dead, mDNS knows the new one.
-    peer.address = "127.0.0.1:9".into();
-    let trust = TrustStore::open(&peer_dir(&viewer.path)).unwrap();
-    trust.save_peer(&peer).unwrap();
+    let registry = super::devices::Registry::open(&viewer.store).unwrap();
+    registry
+        .set_address(&peer.device_id, "127.0.0.1:9")
+        .unwrap();
     let id = server_f.identity.device_id.clone();
     let asked = std::cell::RefCell::new(Vec::new());
     let locate = |device_id: &str, _: &str| {
         asked.borrow_mut().push(device_id.to_string());
         vec![addr]
     };
-    let (status, _) = client::pull_via(&viewer.path, "test-mac", false, &locate, 1, "sources", "")
+    let (status, _) = client::pull_via(&viewer.store, "test-mac", false, &locate, 1, "sources", "")
         .unwrap()
         .unwrap();
     assert_eq!(status, 200);
     assert_eq!(*asked.borrow(), [id]);
     // The working address is remembered.
     assert_eq!(
-        trust.find_peer("test-mac").unwrap().unwrap().address,
+        registry.find("test-mac").unwrap().unwrap().last_address,
         addr.to_string()
     );
 
     // A different device answering on mDNS is skipped (pin check) and the
     // saved address still works.
     let liar = |_: &str, _: &str| vec![fake_addr];
-    let (status, _) = client::pull_via(&viewer.path, "test-mac", false, &liar, 1, "sources", "")
+    let (status, _) = client::pull_via(&viewer.store, "test-mac", false, &liar, 1, "sources", "")
         .unwrap()
         .unwrap();
     assert_eq!(status, 200);
     assert_eq!(
-        trust.find_peer("test-mac").unwrap().unwrap().address,
+        registry.find("test-mac").unwrap().unwrap().last_address,
         addr.to_string()
     );
     // Only an impostor anywhere → fail closed with the mismatch.
-    trust
-        .save_peer(&super::trust::Peer {
-            address: fake_addr.to_string(),
-            ..peer
-        })
+    registry
+        .set_address(&peer.device_id, &fake_addr.to_string())
         .unwrap();
     assert_eq!(
-        client::pull_via(&viewer.path, "test-mac", false, &liar, 1, "sources", "").unwrap(),
+        client::pull_via(&viewer.store, "test-mac", false, &liar, 1, "sources", "").unwrap(),
         Err("peer_fingerprint_mismatch")
     );
 }
@@ -1360,4 +1363,686 @@ fn advertisement_is_discoverable_and_withdrawn() {
     assert_eq!((me.name.as_str(), me.port), ("mdns-it", 47399));
     assert!(!me.addresses.is_empty());
     ad.withdraw();
+}
+
+// ── viewer storage, sync and the device dimension ─────────────────────────
+
+use super::devices::Registry;
+use super::sync::{SyncOptions, sync_all_via, sync_if_due};
+
+fn no_locate() -> super::sync::Locate {
+    Arc::new(|_: &str, _: &str| Vec::new())
+}
+
+fn quick() -> SyncOptions {
+    SyncOptions {
+        rediscover: false,
+        device_timeout: Duration::from_secs(20),
+    }
+}
+
+/// A small, distinct local dataset for viewers (so viewer ≠ server data).
+fn fill_viewer(store: &Store) {
+    for i in 0..6i64 {
+        let ts = day_start_ms(i * 3) + HOUR_MS * (5 + i);
+        store
+            .upsert_event(&ev(
+                &format!("v{i}"),
+                "codex",
+                Some("gpt"),
+                Some(ts),
+                1_000 + i as u64,
+                0.5,
+            ))
+            .unwrap();
+    }
+}
+
+/// Pair `viewer` with a TLS server for `server_f` and sync once.
+fn pair_and_sync(server_f: &Fixture, viewer: &Fixture) -> (Arc<ServerState>, String) {
+    let (addr, state) = start(server_f, true);
+    let code = state.issue_code().unwrap();
+    let peer = pairing::pair(&viewer.store, &addr.to_string(), &code, "Viewer")
+        .unwrap()
+        .unwrap();
+    let report = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
+    assert!(report.devices[0].ok, "{report:?}");
+    (state, peer.device_id)
+}
+
+fn dump(store: &Store, device: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (table, order) in [
+        ("peer_groups", "utc_hour, app, model"),
+        ("peer_day_fps", "utc_day"),
+        ("peer_quotas", "app, account_key, window_kind"),
+    ] {
+        let mut st = store
+            .conn()
+            .prepare(&format!(
+                "SELECT * FROM {table} WHERE device_id=?1 ORDER BY {order}"
+            ))
+            .unwrap();
+        let n = st.column_count();
+        let rows = st
+            .query_map([device], |r| {
+                Ok((0..n)
+                    .map(|i| format!("{:?}", r.get_ref(i).unwrap()))
+                    .collect::<Vec<_>>()
+                    .join("|"))
+            })
+            .unwrap();
+        out.extend(rows.map(|r| format!("{table}:{}", r.unwrap())));
+    }
+    out
+}
+
+fn count(store: &Store, table: &str, device: &str) -> i64 {
+    store
+        .conn()
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE device_id=?1"),
+            [device],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn schema_v2_migrates_existing_ledgers_and_legacy_viewer_rows() {
+    let f = fixture();
+    fill_viewer(&f.store);
+    // Make it look like a v1 ledger: no peer tables, version 1.
+    f.store
+        .conn()
+        .execute_batch(
+            "DROP TABLE peers; DROP TABLE peer_groups; DROP TABLE peer_day_fps;
+             DROP TABLE peer_quotas; DELETE FROM schema_migrations WHERE version >= 2;",
+        )
+        .unwrap();
+    let path = f.path.clone();
+    let reopened = Store::open(&path).unwrap();
+    let version: i64 = reopened
+        .conn()
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(version, 2);
+    for t in ["peers", "peer_groups", "peer_day_fps", "peer_quotas"] {
+        assert_eq!(count(&reopened, t, "x"), 0, "{t} exists");
+    }
+    assert_eq!(
+        reopened.event_count(None, None).unwrap(),
+        6,
+        "local rows untouched"
+    );
+
+    // Step-2 viewers kept pins + tokens in peer.db: moved into the ledger once.
+    let trust = TrustStore::open(&peer_dir(&path)).unwrap();
+    trust
+        .insert_legacy_peer(&super::trust::LegacyPeer {
+            fingerprint: "f".repeat(64),
+            device_id: "d".repeat(32),
+            device_name: "Old Mac".into(),
+            address: "127.0.0.1:4319".into(),
+            token: "t".repeat(64),
+            paired_at: 7,
+            last_pulled_at: Some(8),
+        })
+        .unwrap();
+    let registry = Registry::open(&reopened).unwrap();
+    let moved = registry.find("Old Mac").unwrap().unwrap();
+    assert_eq!(
+        (moved.fingerprint.as_str(), moved.paired_at),
+        ("f".repeat(64).as_str(), 7)
+    );
+    assert_eq!(
+        registry.token(&"d".repeat(32)).unwrap(),
+        Some("t".repeat(64))
+    );
+    assert!(
+        trust.legacy_peers().unwrap().is_empty(),
+        "legacy table dropped"
+    );
+}
+
+#[test]
+fn sync_is_incremental_idempotent_and_replaces_or_removes_days() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let viewer = fixture();
+    let (_state, id) = pair_and_sync(&server_f, &viewer);
+    let first = dump(&viewer.store, &id);
+    assert!(count(&viewer.store, "peer_groups", &id) > 0);
+
+    // Nothing changed → nothing rewritten.
+    let again = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
+    let d = &again.devices[0];
+    assert!(
+        d.ok && d.days_changed == 0 && d.days_removed == 0 && !d.quotas_changed,
+        "{d:?}"
+    );
+    assert!(!again.changed);
+    assert_eq!(dump(&viewer.store, &id), first);
+
+    // The server re-prices one day and loses another (prune/re-import).
+    let day = |n: i64| 20_000 * DAY_MS + n * DAY_MS;
+    for (k, n) in [("x1", 0), ("x2", 0), ("x3", 1)] {
+        server_f
+            .store
+            .upsert_event(&ev(
+                k,
+                "cline",
+                Some("opus"),
+                Some(day(n) + 3 * HOUR_MS),
+                10,
+                1.0,
+            ))
+            .unwrap();
+    }
+    sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
+    server_f
+        .store
+        .conn()
+        .execute(
+            "UPDATE usage_events SET cost_usd=9.5 WHERE dedup_key='x1'",
+            [],
+        )
+        .unwrap();
+    server_f
+        .store
+        .conn()
+        .execute("DELETE FROM usage_events WHERE dedup_key='x3'", [])
+        .unwrap();
+    let r = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
+    let d = &r.devices[0];
+    assert_eq!((d.days_changed, d.days_removed), (1, 1), "{d:?}");
+    let cost: f64 = viewer
+        .store
+        .conn()
+        .query_row(
+            "SELECT SUM(cost_usd) FROM peer_groups WHERE device_id=?1 AND utc_hour BETWEEN ?2 AND ?3",
+            params![id, day(0) / HOUR_MS, day(0) / HOUR_MS + 23],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(close(cost, 10.5), "{cost}");
+    let gone: i64 = viewer
+        .store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM peer_groups WHERE device_id=?1 AND utc_hour BETWEEN ?2 AND ?3",
+            params![id, day(1) / HOUR_MS, day(1) / HOUR_MS + 23],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(gone, 0);
+    // Fingerprints on the viewer now equal the server's.
+    let server_days: Days = serde_json::from_value(respond(
+        &server_f.path,
+        &server_f.identity,
+        1,
+        &Request::Days,
+    ))
+    .unwrap();
+    let mut st = viewer
+        .store
+        .conn()
+        .prepare("SELECT utc_day, fingerprint FROM peer_day_fps WHERE device_id=?1")
+        .unwrap();
+    let viewer_days: BTreeMap<String, String> = st
+        .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(viewer_days, server_days.fingerprints);
+}
+
+#[test]
+fn peer_data_is_rebucketed_into_the_viewers_frame() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let viewer = fixture();
+    let (_state, id) = pair_and_sync(&server_f, &viewer);
+    let only = [id.clone()];
+    for off in [0, 8 * HOUR_MS, -5 * HOUR_MS, 13 * HOUR_MS] {
+        let cube = crate::cube::Cube::build_with_offset(&viewer.store, off).unwrap();
+        let mut st = server_f
+            .store
+            .conn()
+            .prepare(&format!(
+                "SELECT (ts_start + ?1) / {DAY_MS} AS d, COUNT(*),
+                        SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens)
+                 FROM usage_events WHERE ts_start IS NOT NULL GROUP BY d"
+            ))
+            .unwrap();
+        let sql: BTreeMap<i32, (u64, u64)> = st
+            .query_map([off], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as i32,
+                    (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64),
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(cube.day_totals_for(Some(&only)), sql, "offset {off}");
+    }
+}
+
+/// Field-by-field equality of overview parts (cost/credits with tolerance).
+fn same_parts(a: &crate::cube::OverviewParts, b: &crate::viewmodel::OverviewVm, what: &str) {
+    assert_totals(&a.today, &b.today, &format!("today {what}"));
+    assert_totals(&a.span, &b.span, &format!("span {what}"));
+    assert_totals(&a.all, &b.all, &format!("all {what}"));
+    let apps = |v: &[AppSummary]| -> BTreeMap<String, (u64, u64)> {
+        v.iter()
+            .map(|x| (x.app.clone(), (x.events, x.input_tokens)))
+            .collect()
+    };
+    assert_eq!(apps(&a.by_app), apps(&b.by_app), "by_app {what}");
+    let models = |v: &[ShareRow]| -> BTreeMap<String, (u64, u64)> {
+        v.iter()
+            .map(|x| (x.name.clone(), (x.events, x.tokens)))
+            .collect()
+    };
+    assert_eq!(models(&a.by_model), models(&b.by_model), "by_model {what}");
+    let days = |v: &[crate::viewmodel::TrendBucket]| -> Vec<(String, u64, u64)> {
+        v.iter()
+            .map(|x| (x.date.clone(), x.events, x.tokens))
+            .collect()
+    };
+    assert_eq!(days(&a.daily), days(&b.daily), "daily {what}");
+}
+
+fn sum_totals(a: &Totals, b: &Totals) -> Totals {
+    let mut t = a.clone();
+    t.events += b.events;
+    t.input_tokens += b.input_tokens;
+    t.output_tokens += b.output_tokens;
+    t.reasoning_tokens += b.reasoning_tokens;
+    t.cache_read_tokens += b.cache_read_tokens;
+    t.cache_write_tokens += b.cache_write_tokens;
+    t.unclassified_tokens += b.unclassified_tokens;
+    t.credits += b.credits;
+    t.cost_usd += b.cost_usd;
+    t.active_ms += b.active_ms;
+    t
+}
+
+#[test]
+fn device_filter_reaches_every_overview_part() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let viewer = fixture();
+    fill_viewer(&viewer.store);
+    let (_state, id) = pair_and_sync(&server_f, &viewer);
+    if crate::cube::current_offset_ms() % HOUR_MS != 0 {
+        return; // hour buckets cannot split a :30/:45 local midnight
+    }
+    let cube = crate::cube::Cube::build(&viewer.store).unwrap();
+    let local = [cube.local_device().to_string()];
+    let peer = [id.clone()];
+    let server_cube = crate::cube::Cube::build(&server_f.store).unwrap();
+    let ranges = [
+        Range::Today,
+        Range::Week,
+        Range::Month,
+        Range::All,
+        Range::custom(day_start_ms(20), day_start_ms(10) + DAY_MS),
+    ];
+    for range in ranges {
+        let what = format!("{range:?}");
+        // This device only == the SQL path over local rows.
+        let mine = cube
+            .overview_parts_for(range, None, None, Some(&local))
+            .unwrap();
+        let sql = viewer.store.overview(range, None, None).unwrap();
+        same_parts(&mine, &sql, &format!("local {what}"));
+        // The peer only == the server's own view of itself.
+        let theirs = cube
+            .overview_parts_for(range, None, None, Some(&peer))
+            .unwrap();
+        let own = server_cube.overview_parts(range, None, None).unwrap();
+        let own_vm = server_f
+            .store
+            .overview_from_cube(&server_cube, range, None, None)
+            .unwrap();
+        assert_totals(&theirs.span, &own.span, &format!("peer span {what}"));
+        same_parts(&theirs, &own_vm, &format!("peer {what}"));
+        // All devices == local + Σ peers.
+        let all = cube.overview_parts_for(range, None, None, None).unwrap();
+        assert_totals(
+            &all.span,
+            &sum_totals(&mine.span, &theirs.span),
+            &format!("all span {what}"),
+        );
+        assert_totals(
+            &all.today,
+            &sum_totals(&mine.today, &theirs.today),
+            &format!("all today {what}"),
+        );
+        assert_totals(
+            &all.all,
+            &sum_totals(&mine.all, &theirs.all),
+            &format!("all all {what}"),
+        );
+        let events =
+            |p: &crate::cube::OverviewParts| -> u64 { p.daily.iter().map(|b| b.events).sum() };
+        assert_eq!(
+            events(&all),
+            events(&mine) + events(&theirs),
+            "trend {what}"
+        );
+        // Per-app filter composes with the device filter.
+        let codex = ["codex".to_string()];
+        let c = cube
+            .overview_parts_for(range, Some(&codex), None, Some(&peer))
+            .unwrap();
+        let s = server_cube
+            .overview_parts(range, Some(&codex), None)
+            .unwrap();
+        assert_totals(&c.span, &s.span, &format!("codex peer {what}"));
+        // Nobody selected → zeros.
+        let none = cube
+            .overview_parts_for(range, None, None, Some(&[]))
+            .unwrap();
+        assert_eq!(none.span.events, 0);
+        // Per-device totals add up.
+        let per = cube.device_totals(range, None, None).unwrap();
+        assert_eq!(per.len(), 2);
+        assert_totals(
+            &per[0].span,
+            &mine.span,
+            &format!("device_totals local {what}"),
+        );
+        assert_totals(
+            &per[1].span,
+            &theirs.span,
+            &format!("device_totals peer {what}"),
+        );
+    }
+    // Heat: all = local + peer, day by day.
+    let (h_all, h_mine, h_peer) = (
+        cube.heat_for(None, None, None),
+        cube.heat_for(None, None, Some(&local)),
+        cube.heat_for(None, None, Some(&peer)),
+    );
+    for ((a, m), p) in h_all.iter().zip(&h_mine).zip(&h_peer) {
+        assert_eq!(
+            (a.events, a.tokens),
+            (m.events + p.events, m.tokens + p.tokens),
+            "{}",
+            a.date
+        );
+    }
+    assert_eq!(
+        h_mine,
+        viewer.store.overview(Range::All, None, None).unwrap().heat
+    );
+    // Detail counts stay local.
+    assert_eq!(cube.event_count(None, None), 6);
+
+    // A window the cube declines (sub-day edges) takes the SQL path for this
+    // device and the hour-level fold for peers — still local + Σ peers.
+    let window = Range::custom(
+        day_start_ms(5) + 3 * HOUR_MS,
+        day_start_ms(2) + 17 * HOUR_MS,
+    );
+    assert!(cube.overview_parts_for(window, None, None, None).is_none());
+    let vm = viewer
+        .store
+        .overview_from_cube_for(&cube, window, None, None, None)
+        .unwrap();
+    let local_sql = viewer
+        .store
+        .totals(window.start_ms(), window.end_ms(), None, None)
+        .unwrap();
+    let peer_sql = server_f
+        .store
+        .totals(window.start_ms(), window.end_ms(), None, None)
+        .unwrap();
+    assert_totals(
+        &vm.span,
+        &sum_totals(&local_sql, &peer_sql),
+        "fallback span",
+    );
+    let peer_only = viewer
+        .store
+        .overview_from_cube_for(&cube, window, None, None, Some(&peer))
+        .unwrap();
+    assert_totals(&peer_only.span, &peer_sql, "fallback peer span");
+    assert_eq!(vm.devices.len(), 2);
+    assert!(vm.devices[0].local && !vm.devices[1].local);
+    assert_totals(&vm.devices[1].span, &peer_sql, "fallback device span");
+}
+
+#[test]
+fn without_peers_the_device_dimension_changes_nothing() {
+    let f = fixture();
+    fill(&f.store);
+    let cube = crate::cube::Cube::build(&f.store).unwrap();
+    let local = [cube.local_device().to_string()];
+    for range in [Range::Today, Range::Week, Range::Month, Range::All] {
+        let before = cube.overview_parts(range, None, None);
+        let mine = cube.overview_parts_for(range, None, None, Some(&local));
+        assert_eq!(format!("{before:?}"), format!("{mine:?}"), "{range:?}");
+    }
+    assert_eq!(
+        serde_json::to_string(&cube.heat(None, None)).unwrap(),
+        serde_json::to_string(&cube.heat_for(None, None, Some(&local))).unwrap()
+    );
+    assert_eq!(cube.device_ids(), local);
+}
+
+#[test]
+fn forgetting_a_device_removes_all_of_its_rows_and_its_token() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    server_f
+        .store
+        .insert_quota(&QuotaSnapshot {
+            app: "codex".into(),
+            account: Some("a@example.com".into()),
+            captured_at: now_ms(),
+            window_kind: "weekly".into(),
+            used: None,
+            limit_value: None,
+            used_percent: Some(10.0),
+            resets_at: None,
+            raw_json: None,
+        })
+        .unwrap();
+    let viewer = fixture();
+    let (_state, id) = pair_and_sync(&server_f, &viewer);
+    for t in ["peer_groups", "peer_day_fps", "peer_quotas"] {
+        assert!(count(&viewer.store, t, &id) > 0, "{t}");
+    }
+    let registry = Registry::open(&viewer.store).unwrap();
+    assert!(registry.forget(&id).unwrap().is_some());
+    for t in ["peers", "peer_groups", "peer_day_fps", "peer_quotas"] {
+        assert_eq!(count(&viewer.store, t, &id), 0, "{t}");
+    }
+    assert!(registry.token(&id).unwrap().is_none());
+    let cube = crate::cube::Cube::build(&viewer.store).unwrap();
+    assert_eq!(cube.device_ids().len(), 1);
+}
+
+#[test]
+fn quotas_merge_to_the_freshest_report_per_account_never_summed() {
+    let server_f = fixture();
+    let viewer = fixture();
+    let quota = |account: &str, kind: &str, pct: f64, at: i64| QuotaSnapshot {
+        app: "codex".into(),
+        account: Some(account.into()),
+        captured_at: at,
+        window_kind: kind.into(),
+        used: None,
+        limit_value: None,
+        used_percent: Some(pct),
+        resets_at: None,
+        raw_json: None,
+    };
+    let now = now_ms();
+    // Same account on both: the peer's report is newer.
+    viewer
+        .store
+        .insert_quota(&quota("me@x.com", "weekly", 20.0, now - 60_000))
+        .unwrap();
+    server_f
+        .store
+        .insert_quota(&quota("me@x.com", "weekly", 35.0, now - 1_000))
+        .unwrap();
+    // Only local / only peer.
+    viewer
+        .store
+        .insert_quota(&quota("me@x.com", "5h_block", 50.0, now))
+        .unwrap();
+    server_f
+        .store
+        .insert_quota(&quota("other@x.com", "weekly", 70.0, now))
+        .unwrap();
+    let (_state, id) = pair_and_sync(&server_f, &viewer);
+    let merged = super::merged::merged_quotas(&viewer.store).unwrap();
+    assert_eq!(merged.len(), 3);
+    let me = crate::coordination::opaque("me@x.com");
+    let weekly = merged
+        .iter()
+        .find(|q| q.window_kind == "weekly" && q.account_key.as_deref() == Some(&me))
+        .unwrap();
+    assert_eq!(
+        (weekly.used_percent, weekly.device_id.as_str(), weekly.local),
+        (Some(35.0), id.as_str(), false)
+    );
+    let block = merged.iter().find(|q| q.window_kind == "5h_block").unwrap();
+    assert!(block.local && block.used_percent == Some(50.0));
+}
+
+#[test]
+fn overlapping_sources_are_flagged_not_deduplicated() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let viewer = fixture();
+    // The viewer scans the very same (synced) logs.
+    fill(&viewer.store);
+    let (_state, id) = pair_and_sync(&server_f, &viewer);
+    let warnings = super::merged::overlaps(&viewer.store).unwrap();
+    assert!(!warnings.is_empty());
+    for w in &warnings {
+        assert_eq!(w.code, "possible_shared_source");
+        assert!(w.days >= super::merged::OVERLAP_MIN_DAYS);
+        assert!([&w.device_a, &w.device_b].contains(&&id));
+    }
+    // Still counted twice: all devices = local + peer.
+    let cube = crate::cube::Cube::build(&viewer.store).unwrap();
+    let all = cube
+        .overview_parts_for(Range::All, None, None, None)
+        .unwrap();
+    assert_eq!(
+        all.all.events,
+        2 * viewer.store.event_count(None, None).unwrap()
+    );
+
+    // Distinct data → no warning.
+    let other = fixture();
+    fill_viewer(&other.store);
+    pair_and_sync(&server_f, &other);
+    assert!(super::merged::overlaps(&other.store).unwrap().is_empty());
+}
+
+#[test]
+fn peer_data_is_never_reshared() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let viewer = fixture();
+    fill_viewer(&viewer.store);
+    let serve = |r: Request| respond(&viewer.path, &viewer.identity, 1, &r);
+    let before: Vec<String> = [
+        Request::Days,
+        Request::Summary(SummaryQuery::default()),
+        Request::Quotas,
+    ]
+    .into_iter()
+    .map(|r| {
+        let mut v = serve(r);
+        v["captured_at"] = Value::Null;
+        v.to_string()
+    })
+    .collect();
+    let (_state, id) = pair_and_sync(&server_f, &viewer);
+    assert!(count(&viewer.store, "peer_groups", &id) > 0);
+    let after: Vec<String> = [
+        Request::Days,
+        Request::Summary(SummaryQuery::default()),
+        Request::Quotas,
+    ]
+    .into_iter()
+    .map(|r| {
+        let mut v = serve(r);
+        v["captured_at"] = Value::Null;
+        v.to_string()
+    })
+    .collect();
+    assert_eq!(before, after, "the serving path reads local tables only");
+    assert!(
+        !after[1].contains("claude"),
+        "server-only apps never appear"
+    );
+}
+
+#[test]
+fn one_failing_device_does_not_block_the_others() {
+    let a = fixture();
+    fill(&a.store);
+    let b = fixture();
+    fill_viewer(&b.store);
+    let viewer = fixture();
+    let (_sa, id_a) = pair_and_sync(&a, &viewer);
+    let (_sb, id_b) = pair_and_sync(&b, &viewer);
+    // Device A goes away (dead address, nothing on mDNS).
+    Registry::open(&viewer.store)
+        .unwrap()
+        .set_address(&id_a, "127.0.0.1:9")
+        .unwrap();
+    let r = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
+    let by_id = |id: &str| {
+        r.devices
+            .iter()
+            .find(|d| d.device_id == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_id(&id_a).error_code.as_deref(), Some("connect_failed"));
+    assert!(by_id(&id_b).ok);
+    let devices = super::devices::list(&viewer.store).unwrap();
+    let a_row = devices.iter().find(|d| d.device_id == id_a).unwrap();
+    assert_eq!(a_row.last_error_code.as_deref(), Some("connect_failed"));
+    assert!(
+        devices
+            .iter()
+            .find(|d| d.device_id == id_b)
+            .unwrap()
+            .last_error_code
+            .is_none()
+    );
+    // Its earlier data stays until it is forgotten; disabling hides it.
+    assert!(count(&viewer.store, "peer_groups", &id_a) > 0);
+    Registry::open(&viewer.store)
+        .unwrap()
+        .set_enabled(&id_a, false)
+        .unwrap();
+    let cube = crate::cube::Cube::build(&viewer.store).unwrap();
+    assert!(!cube.device_ids().contains(&id_a));
+    // The schedule hook only lets one sync through per interval.
+    assert!(
+        sync_if_due(&viewer.store, Duration::from_secs(3600), &quick())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        sync_if_due(&viewer.store, Duration::from_secs(3600), &quick())
+            .unwrap()
+            .is_none()
+    );
 }

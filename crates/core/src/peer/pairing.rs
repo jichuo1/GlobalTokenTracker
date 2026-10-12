@@ -26,9 +26,9 @@
 //! one success or five failures and backs off between failures; the viewer
 //! refuses to retry a code that failed (a failure may mean interception).
 
-use super::keys::{hex, peer_dir};
+use super::devices::{PeerDevice, Registry};
+use super::keys::hex;
 use super::net::{Wire, WireError};
-use super::trust::{Peer, TrustStore};
 use anyhow::Result;
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -284,13 +284,14 @@ pub(crate) fn run_viewer(
     Ok(grant)
 }
 
-/// Result of [`pair`]: the saved peer, or a fixed error code.
-pub type PairOutcome = std::result::Result<Peer, &'static str>;
+/// Result of [`pair`]: the saved device, or a fixed error code.
+pub type PairOutcome = std::result::Result<PeerDevice, &'static str>;
 
-/// Viewer: pair with the device at `addr` using `code`; on success pin its
-/// certificate fingerprint and save the bearer token in `<data dir>/peer`.
+/// Viewer: pair with the device at `addr` using `code`; on success register
+/// it in the ledger's `peers` (pinned fingerprint) and keep the bearer token
+/// in `<data dir>/peer/peer.db`.
 pub fn pair(
-    db: &std::path::Path,
+    store: &crate::store::Store,
     addr: &str,
     code: &str,
     viewer_name: &str,
@@ -298,7 +299,8 @@ pub fn pair(
     if !valid_code(code) {
         return Ok(Err("invalid_code"));
     }
-    let trust = TrustStore::open(&peer_dir(db))?;
+    let registry = Registry::open(store)?;
+    let trust = &registry.trust;
     let now = crate::store::now_ms();
     if trust.code_failed_recently(code, now)? {
         return Ok(Err("pairing_code_reused"));
@@ -357,23 +359,32 @@ pub fn pair(
     };
     let (Some(token), Some(device_id), Some(device_name)) = (
         grant["token"].as_str().filter(|t| t.len() == 64),
-        grant["device_id"].as_str(),
+        grant["device_id"]
+            .as_str()
+            .filter(|id| super::valid_device_id(id)),
         grant["device_name"].as_str(),
     ) else {
         trust.note_failed_code(code, now)?;
         return Ok(Err("pairing_aborted"));
     };
-    let peer = Peer {
+    if device_id == super::ensure_device_id(store)? {
+        return Ok(Err("pairing_self"));
+    }
+    let device = PeerDevice {
+        device_id: device_id.into(),
+        name: super::clean_name(device_name).unwrap_or_else(|| "GTT".into()),
         fingerprint,
-        device_id: device_id.chars().take(64).collect(),
-        device_name: super::clean_name(device_name).unwrap_or_else(|| "GTT".into()),
-        address: target.to_string(),
-        token: token.into(),
+        last_address: target.to_string(),
         paired_at: now,
-        last_pulled_at: None,
+        last_seen_at: Some(now),
+        last_pull_at: None,
+        last_error_code: None,
+        gtt_version: None,
+        protocol_version: Some(super::PROTOCOL_VERSION),
+        enabled: true,
     };
-    trust.save_peer(&peer)?;
-    Ok(Ok(peer))
+    registry.save_paired(&device, token)?;
+    Ok(Ok(device))
 }
 
 #[cfg(test)]

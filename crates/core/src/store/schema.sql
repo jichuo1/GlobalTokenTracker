@@ -143,3 +143,64 @@ CREATE TABLE IF NOT EXISTS app_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- ── LAN 对等查看（schema v2）：已配对设备的聚合，只读拉取而来 ──────────────
+-- 对等数据永不写入 usage_events / daily_rollups，也永不经本机 peer 服务再共享。
+-- 持有者令牌不在账本里：它在 0600 的 <数据目录>/peer/peer.db（peer_tokens）。
+CREATE TABLE IF NOT EXISTS peers (
+  device_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  fingerprint TEXT NOT NULL UNIQUE,     -- 固定的证书 SHA-256（信任身份）
+  last_address TEXT NOT NULL,
+  paired_at INTEGER NOT NULL,
+  last_seen_at INTEGER,                 -- 最近一次成功连上
+  last_pull_at INTEGER,                 -- 最近一次尝试同步
+  last_error_code TEXT,                 -- 最近一次失败的固定错误码；成功后清空
+  gtt_version TEXT,
+  protocol_version INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1
+);
+
+-- 对等方的 UTC 小时 × app × model 聚合（gtt.peer summary 原样落库）。
+-- utc_hour = epoch 小时数；无时间戳的行用 -1（只计入不限范围的总计）。
+CREATE TABLE IF NOT EXISTS peer_groups (
+  device_id TEXT NOT NULL,
+  utc_hour INTEGER NOT NULL,
+  app TEXT NOT NULL,
+  model TEXT NOT NULL,
+  events INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  unclassified_tokens INTEGER NOT NULL DEFAULT 0,
+  credits REAL NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  active_ms INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (device_id, utc_hour, app, model)
+) WITHOUT ROWID;
+
+-- 每个对等设备每个 UTC 日的内容指纹（'YYYY-MM-DD' 或 'undated'），增量同步用。
+CREATE TABLE IF NOT EXISTS peer_day_fps (
+  device_id TEXT NOT NULL,
+  utc_day TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  PRIMARY KEY (device_id, utc_day)
+) WITHOUT ROWID;
+
+-- 对等方各 app/账号伪名/窗口的最新额度。账号无键时 account_key = ''。额度永不相加。
+CREATE TABLE IF NOT EXISTS peer_quotas (
+  device_id TEXT NOT NULL,
+  app TEXT NOT NULL,
+  account_key TEXT NOT NULL DEFAULT '',
+  window_kind TEXT NOT NULL,
+  captured_at INTEGER NOT NULL,
+  used REAL,
+  limit_value REAL,
+  used_percent REAL,
+  resets_at INTEGER,
+  value_semantics TEXT NOT NULL DEFAULT 'unknown',
+  PRIMARY KEY (device_id, app, account_key, window_kind)
+) WITHOUT ROWID;

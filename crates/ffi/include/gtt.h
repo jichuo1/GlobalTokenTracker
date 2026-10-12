@@ -13,8 +13,22 @@
 extern "C" {
 #endif
 
-/* {range:{key,start_ms?,end_ms?}, apps?, models?, scan, force_views, rebuild, force_prices} */
+/* {range:{key,start_ms?,end_ms?}, apps?, models?, devices?, scan, force_views, rebuild, force_prices}
+ * devices: device ids to include (absent = the saved filter, default all).
+ * vm.devices = this device + paired peers with per-device span totals;
+ * vm.quotas_all_devices / vm.device_warnings; detail rows are this device's. */
 char *gtt_load(const char *req_json);
+/* LAN peers (sync / pair / discover use the network — background queue):
+ *   {"op":"list"}                                   → {device, peers, warnings, filter}
+ *   {"op":"sync","if_due"?:bool,"interval_secs"?,"rediscover"?:bool} → {ran, report}
+ *   {"op":"set_filter","devices":[ids]|null}         → {filter}
+ *   {"op":"forget","device":"id|name|fingerprint"}   → {forgotten}
+ *   {"op":"set_enabled","device":"…","enabled":bool} → {device_id, enabled}
+ *   {"op":"pair","addr":"host:port","code":"123456","name"?} → {device}
+ *   {"op":"discover","timeout_secs"?:n}              → {devices, invalid_answers}
+ * Protocol failures: {"ok":false,"error":"<code>","code":"<code>"} with the
+ * fixed codes of docs/PEER_API.md (pairing_failed, peer_fingerprint_mismatch …). */
+char *gtt_peer(const char *req_json);
 /* {offset, limit?, apps?, models?} */
 char *gtt_detail_page(const char *req_json);
 char *gtt_sources(void);

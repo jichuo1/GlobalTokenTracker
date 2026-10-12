@@ -17,7 +17,7 @@ use globaltokentracker_core::store::default_db_path;
 use globaltokentracker_core::store::{PriceRow, filter_prices};
 use globaltokentracker_core::viewmodel::{QuickRange, Range, rank_quotas};
 use globaltokentracker_core::{
-    Cube, Engine, Store, adapters, external_interface, pricing, quota, trend, update,
+    Cube, Engine, Store, adapters, external_interface, peer, pricing, quota, trend, update,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -71,6 +71,8 @@ struct LoadReq {
     rebuild: bool,
     /// Treat prices as due regardless of age (once per launch).
     force_prices: bool,
+    /// Device ids to include; absent = the saved device filter (default all).
+    devices: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -180,9 +182,14 @@ fn load(req: LoadReq) -> Result<Value, String> {
     let cube = Arc::new(cube);
     *CUBE.lock().map_err(|e| e.to_string())? = Some(cube.clone());
     let (apps, models) = (req.apps.as_deref(), req.models.as_deref());
+    let devices = match req.devices {
+        Some(d) => Some(d),
+        None => saved_device_filter(&store)?,
+    };
     let vm = store
-        .overview_from_cube(&cube, range, apps, models)
+        .overview_from_cube_for(&cube, range, apps, models, devices.as_deref())
         .map_err(|e| e.to_string())?;
+    let (device_id, device_name) = peer::local_device(&store).map_err(|e| e.to_string())?;
     let rows = store
         .events_page(DETAIL_PAGE_SIZE, 0, apps, models)
         .map_err(|e| e.to_string())?;
@@ -197,7 +204,9 @@ fn load(req: LoadReq) -> Result<Value, String> {
         "trend": trend,
         "quotas_ranked": quotas_ranked,
         "vm": vm,
-        "detail": { "rows": rows, "total": cube.event_count(apps, models), "page_size": DETAIL_PAGE_SIZE },
+        // Event rows are always this device's; peers share aggregates only.
+        "detail": { "rows": rows, "total": cube.event_count(apps, models), "page_size": DETAIL_PAGE_SIZE,
+                    "device_id": device_id, "device_name": device_name },
     }))
 }
 
@@ -350,12 +359,167 @@ fn info() -> Value {
     })
 }
 
+// ---- LAN peers ------------------------------------------------------------
+
+const DEVICE_FILTER_KEY: &str = "peer.device_filter.v1";
+
+/// The device filter saved by `set_filter` (`None` = all devices).
+fn saved_device_filter(store: &Store) -> Result<Option<Vec<String>>, String> {
+    Ok(store
+        .get_state(DEVICE_FILTER_KEY)
+        .map_err(|e| e.to_string())?
+        .and_then(|v| serde_json::from_str(&v).ok()))
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum PeerOp {
+    /// This device, paired devices (status, last error), overlap warnings,
+    /// and the saved device filter.
+    List,
+    /// Pull every enabled paired device now (`if_due`: only when the last
+    /// sync is older than `interval_secs`, default 300 — the shells' timer hook).
+    Sync {
+        #[serde(default)]
+        if_due: bool,
+        interval_secs: Option<u64>,
+        rediscover: Option<bool>,
+    },
+    /// Save the device filter used by `gtt_load` (`null` = all devices).
+    SetFilter {
+        devices: Option<Vec<String>>,
+    },
+    Forget {
+        device: String,
+    },
+    SetEnabled {
+        device: String,
+        enabled: bool,
+    },
+    /// Pair with the device at `addr` using the code it shows.
+    Pair {
+        addr: String,
+        code: String,
+        name: Option<String>,
+    },
+    /// Browse mDNS for GTT devices (hints only).
+    Discover {
+        timeout_secs: Option<u64>,
+    },
+}
+
+/// A peer failure with a fixed code (`{"ok":false,"error":code,"code":code}`).
+struct Coded(String);
+
+impl From<String> for Coded {
+    fn from(e: String) -> Self {
+        Self(e)
+    }
+}
+
+fn coded<T>(r: Result<T, &'static str>) -> Result<T, Coded> {
+    r.map_err(|c| Coded(format!("code:{c}")))
+}
+
+fn err(e: impl std::fmt::Display) -> Coded {
+    Coded(format!("{e:#}"))
+}
+
+fn peer_op(op: PeerOp) -> Result<Value, Coded> {
+    let store = open()?;
+    match op {
+        PeerOp::List => {
+            let (id, name) = peer::local_device(&store).map_err(err)?;
+            let registry = peer::devices::Registry::open(&store).map_err(err)?;
+            Ok(json!({
+                "device": { "device_id": id, "name": name },
+                "peers": registry.list().map_err(err)?,
+                "warnings": peer::merged::overlaps(&store).map_err(err)?,
+                "filter": saved_device_filter(&store)?,
+            }))
+        }
+        PeerOp::Sync {
+            if_due,
+            interval_secs,
+            rediscover,
+        } => {
+            let options = peer::sync::SyncOptions {
+                rediscover: rediscover.unwrap_or(true),
+                ..Default::default()
+            };
+            let report = if if_due {
+                let interval =
+                    interval_secs.map_or(peer::sync::SYNC_INTERVAL, std::time::Duration::from_secs);
+                peer::sync::sync_if_due(&store, interval, &options).map_err(err)?
+            } else {
+                Some(peer::sync::sync_all(&store, &options).map_err(err)?)
+            };
+            if report.as_ref().is_some_and(|r| r.changed) {
+                *CUBE.lock().map_err(|e| e.to_string())? = None;
+            }
+            Ok(json!({ "ran": report.is_some(), "report": report }))
+        }
+        PeerOp::SetFilter { devices } => {
+            let value = serde_json::to_string(&devices).map_err(|e| e.to_string())?;
+            store.set_state(DEVICE_FILTER_KEY, &value).map_err(err)?;
+            Ok(json!({ "filter": devices }))
+        }
+        PeerOp::Forget { device } => {
+            let registry = peer::devices::Registry::open(&store).map_err(err)?;
+            let forgotten: Option<peer::devices::PeerDevice> = match registry.forget(&device) {
+                Ok(f) => f,
+                Err(e) if e.is::<peer::trust::Ambiguous>() => {
+                    return Err(Coded("code:ambiguous_peer".into()));
+                }
+                Err(e) => return Err(err(e)),
+            };
+            let forgotten = coded(forgotten.ok_or("unknown_peer"))?;
+            *CUBE.lock().map_err(|e| e.to_string())? = None;
+            Ok(json!({ "forgotten": forgotten }))
+        }
+        PeerOp::SetEnabled { device, enabled } => {
+            let registry = peer::devices::Registry::open(&store).map_err(err)?;
+            let found = coded(registry.find(&device).map_err(err)?.ok_or("unknown_peer"))?;
+            registry
+                .set_enabled(&found.device_id, enabled)
+                .map_err(err)?;
+            *CUBE.lock().map_err(|e| e.to_string())? = None;
+            Ok(json!({ "device_id": found.device_id, "enabled": enabled }))
+        }
+        PeerOp::Pair { addr, code, name } => {
+            let name = name.unwrap_or_else(|| {
+                peer::local_device(&store).map_or_else(|_| "viewer".into(), |(_, n)| n)
+            });
+            let device =
+                coded(peer::pairing::pair(&store, &addr, code.trim(), &name).map_err(err)?)?;
+            Ok(json!({ "device": device }))
+        }
+        PeerOp::Discover { timeout_secs } => {
+            let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(3).clamp(1, 30));
+            let (devices, invalid) = peer::discovery::discover(&store, timeout).map_err(err)?;
+            Ok(json!({ "devices": devices, "invalid_answers": invalid }))
+        }
+    }
+}
+
+/// `peer_op` as an envelope: fixed-code failures carry `code` as well.
+fn peer_envelope(op: PeerOp) -> Result<Value, String> {
+    match peer_op(op) {
+        Ok(v) => Ok(v),
+        Err(Coded(e)) => Err(e),
+    }
+}
+
 // ---- ABI plumbing ---------------------------------------------------------
 
 fn envelope(r: Result<Value, String>) -> *mut c_char {
     let v = match r {
         Ok(data) => json!({ "ok": true, "data": data }),
-        Err(error) => json!({ "ok": false, "error": error }),
+        // Fixed protocol codes (peer calls) travel as `code` too.
+        Err(error) => match error.strip_prefix("code:") {
+            Some(code) => json!({ "ok": false, "error": code, "code": code }),
+            None => json!({ "ok": false, "error": error }),
+        },
     };
     // serde_json never emits interior NULs (they're escaped as \u0000).
     CString::new(v.to_string()).map_or(std::ptr::null_mut(), CString::into_raw)
@@ -393,6 +557,26 @@ fn arg<T: for<'de> Deserialize<'de> + Default>(p: *const c_char) -> Result<T, St
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_load(req_json: *const c_char) -> *mut c_char {
     guarded(|| load(arg(req_json)?))
+}
+
+/// LAN peers: `{"op":"list"|"sync"|"set_filter"|"forget"|"set_enabled"|"pair"|"discover", …}`.
+/// `sync`, `pair` and `discover` touch the network (seconds) — call from a
+/// background queue like every other call.
+///
+/// # Safety
+/// `req_json` is a valid NUL-terminated UTF-8 string that outlives the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_peer(req_json: *const c_char) -> *mut c_char {
+    guarded(|| {
+        if req_json.is_null() {
+            return Err("bad request: missing op".into());
+        }
+        let s = unsafe { CStr::from_ptr(req_json) }
+            .to_str()
+            .map_err(|e| e.to_string())?;
+        let op: PeerOp = serde_json::from_str(s).map_err(|e| format!("bad request: {e}"))?;
+        peer_envelope(op)
+    })
 }
 
 /// One page of the detail table (`{offset, limit?, apps?, models?}`).

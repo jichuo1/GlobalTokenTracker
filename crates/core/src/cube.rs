@@ -11,6 +11,13 @@
 //! tests below: the same fixed-offset day frame, `MODEL_EXPR` model identity,
 //! `input+output+cache_read` headline tokens, and NULL-timestamp rows counting
 //! in unbounded totals only.
+//!
+//! **Devices.** Every group carries a device: index 0 is this ledger's own
+//! device, the rest are paired LAN peers whose UTC-hour groups (`peer_groups`)
+//! are re-bucketed into this cube's local-day frame (exact for whole-hour
+//! offsets). The `*_for` reads take a device filter; the older reads mean
+//! "all devices", which equals the local-only result when no peers exist.
+//! `event_count` stays local: it sizes the event-level detail table.
 
 use crate::store::{AppSummary, MODEL_EXPR, ShareRow, Store, Totals};
 use crate::viewmodel::{
@@ -32,6 +39,8 @@ struct Group {
     day: i32,
     app: u16,
     model: u16,
+    /// 0 = this device; otherwise an index into `Cube::devices`.
+    device: u16,
     events: u64,
     input: u64,
     output: u64,
@@ -58,6 +67,7 @@ struct HourGroup {
     hour: u8,
     app: u16,
     model: u16,
+    device: u16,
     events: u64,
     tokens: u64,
     cost: f64,
@@ -75,6 +85,27 @@ pub struct Cube {
     /// Day index the `hours` belong to — a midnight rollover makes them stale.
     today_day: i32,
     hours: Vec<HourGroup>,
+    /// Device ids; index 0 is this ledger's own device.
+    devices: Vec<String>,
+    /// Peer groups at their original UTC-hour precision, for windows the
+    /// day-level groups cannot answer (sub-day edges, hourly bars) and for
+    /// rebuilding today's hours after midnight.
+    peer_hours: Vec<PeerHour>,
+}
+
+/// One peer UTC-hour group (`start_ms` `None` = undated).
+#[derive(Clone, Debug)]
+struct PeerHour {
+    start_ms: Option<i64>,
+    group: Group,
+}
+
+/// Per-device span totals for the selected range.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeviceTotals {
+    pub device_id: String,
+    pub local: bool,
+    pub span: Totals,
 }
 
 /// The range/filter-dependent part of an overview.
@@ -111,10 +142,16 @@ struct Raw {
 impl Cube {
     /// Scan the whole ledger once.
     pub fn build(store: &Store) -> Result<Self> {
-        let off_ms = current_offset_ms();
+        Self::build_with_offset(store, current_offset_ms())
+    }
+
+    /// [`Cube::build`] in an explicit fixed-offset frame (tests).
+    pub(crate) fn build_with_offset(store: &Store, off_ms: i64) -> Result<Self> {
         let mut cube = Self::empty(off_ms);
+        cube.devices = vec![crate::peer::local_device(store)?.0];
         let raws = query_groups(store, off_ms, None)?;
         cube.absorb(raws);
+        cube.load_peers(store)?;
         cube.reload_hours(store)?;
         cube.sort();
         Ok(cube)
@@ -137,7 +174,7 @@ impl Cube {
         dirty.insert(i64::from(now_day));
         dirty.insert(i64::from(now_day) - 1);
         next.groups
-            .retain(|g| g.day == NO_DAY || !dirty.contains(&i64::from(g.day)));
+            .retain(|g| g.device != LOCAL || g.day == NO_DAY || !dirty.contains(&i64::from(g.day)));
         let raws = query_groups(store, off_ms, Some(&dirty))?;
         next.absorb(raws);
         next.reload_hours(store)?;
@@ -155,7 +192,87 @@ impl Cube {
             groups: Vec::new(),
             today_day: day_index(off_ms, now_ms()),
             hours: Vec::new(),
+            devices: Vec::new(),
+            peer_hours: Vec::new(),
         }
+    }
+
+    fn intern_device(&mut self, id: &str) -> u16 {
+        if let Some(i) = self.devices.iter().position(|d| d == id) {
+            return i as u16;
+        }
+        self.devices.push(id.to_string());
+        (self.devices.len() - 1) as u16
+    }
+
+    /// Enabled peers' UTC-hour groups → day-level groups in this frame (and
+    /// the hour-level copy kept for sub-day windows).
+    fn load_peers(&mut self, store: &Store) -> Result<()> {
+        let mut st = store.conn().prepare(
+            "SELECT g.device_id, g.utc_hour, g.app, g.model, g.events, g.input_tokens,
+                    g.output_tokens, g.reasoning_tokens, g.cache_read_tokens,
+                    g.cache_write_tokens, g.unclassified_tokens, g.credits, g.cost_usd,
+                    g.active_ms, g.duration_ms
+             FROM peer_groups g JOIN peers p ON p.device_id = g.device_id
+             WHERE p.enabled = 1 ORDER BY g.device_id",
+        )?;
+        let n = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<u64> {
+            Ok(u64::try_from(r.get::<_, i64>(i)?).unwrap_or(0))
+        };
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                [
+                    n(r, 4)?,
+                    n(r, 5)?,
+                    n(r, 6)?,
+                    n(r, 7)?,
+                    n(r, 8)?,
+                    n(r, 9)?,
+                    n(r, 10)?,
+                    n(r, 13)?,
+                    n(r, 14)?,
+                ],
+                r.get::<_, f64>(11)?,
+                r.get::<_, f64>(12)?,
+            ))
+        })?;
+        let mut days: BTreeMap<(i32, u16, u16, u16), Group> = BTreeMap::new();
+        for row in rows {
+            let (device_id, utc_hour, app, model, c, credits, cost) = row?;
+            let device = self.intern_device(&device_id);
+            let start_ms = (utc_hour >= 0).then(|| utc_hour * HOUR_MS);
+            let group = Group {
+                day: start_ms.map_or(NO_DAY, |s| day_index(self.off_ms, s)),
+                app: self.intern_app(&app),
+                model: self.intern_model(&model),
+                device,
+                events: c[0],
+                input: c[1],
+                output: c[2],
+                reasoning: c[3],
+                cache_read: c[4],
+                cache_write: c[5],
+                unclassified: c[6],
+                credits,
+                cost,
+                active_ms: c[7],
+                duration_ms: c[8],
+            };
+            let key = (group.day, group.app, group.model, device);
+            match days.get_mut(&key) {
+                Some(g) => merge_group(g, &group),
+                None => {
+                    days.insert(key, group.clone());
+                }
+            }
+            self.peer_hours.push(PeerHour { start_ms, group });
+        }
+        self.groups.extend(days.into_values());
+        Ok(())
     }
 
     fn intern_app(&mut self, name: &str) -> u16 {
@@ -186,6 +303,7 @@ impl Cube {
                 day: r.day.map_or(NO_DAY, |d| d as i32),
                 app,
                 model,
+                device: LOCAL,
                 events: r.events,
                 input: r.input,
                 output: r.output,
@@ -202,7 +320,8 @@ impl Cube {
     }
 
     fn sort(&mut self) {
-        self.groups.sort_by_key(|g| (g.day, g.app, g.model));
+        self.groups
+            .sort_by_key(|g| (g.day, g.app, g.model, g.device));
     }
 
     fn reload_hours(&mut self, store: &Store) -> Result<()> {
@@ -236,11 +355,27 @@ impl Cube {
                 hour: h.clamp(0, 23) as u8,
                 app: self.intern_app(&app),
                 model: self.intern_model(&model),
+                device: LOCAL,
                 events: events as u64,
                 tokens: tokens as u64,
                 cost,
             })
             .collect();
+        // Peers' hours of (the new) today, from the hour-level copy.
+        for p in &self.peer_hours {
+            let Some(start) = p.start_ms.filter(|s| *s >= today_start) else {
+                continue;
+            };
+            self.hours.push(HourGroup {
+                hour: ((start + self.off_ms).rem_euclid(DAY_MS) / HOUR_MS) as u8,
+                app: p.group.app,
+                model: p.group.model,
+                device: p.group.device,
+                events: p.group.events,
+                tokens: p.group.headline(),
+                cost: p.group.cost,
+            });
+        }
         Ok(())
     }
 
@@ -276,14 +411,27 @@ impl Cube {
         v
     }
 
-    /// Event count under the tool/model filters (all time, NULL-ts included).
+    /// This device's event count under the tool/model filters (all time,
+    /// NULL-ts included) — the event-level detail table holds local rows only.
     pub fn event_count(&self, apps: Option<&[String]>, models: Option<&[String]>) -> u64 {
         let (app_ok, model_ok) = (self.app_mask(apps), self.model_mask(models));
         self.groups
             .iter()
-            .filter(|g| app_ok[usize::from(g.app)] && model_ok[usize::from(g.model)])
+            .filter(|g| {
+                g.device == LOCAL && app_ok[usize::from(g.app)] && model_ok[usize::from(g.model)]
+            })
             .map(|g| g.events)
             .sum()
+    }
+
+    /// This device's id (index 0 of the device dimension).
+    pub fn local_device(&self) -> &str {
+        self.devices.first().map_or("", String::as_str)
+    }
+
+    /// Every device id in the cube, this device first.
+    pub fn device_ids(&self) -> &[String] {
+        &self.devices
     }
 
     /// The activity heatmap's days: from the Monday 52 weeks before the
@@ -291,15 +439,27 @@ impl Cube {
     /// under the tool/model filters. Independent of the selected range; rows
     /// without a timestamp and future-dated rows are outside the window.
     pub fn heat(&self, apps: Option<&[String]>, models: Option<&[String]>) -> Vec<HeatDay> {
+        self.heat_for(apps, models, None)
+    }
+
+    /// [`Cube::heat`] under a device filter (`None` = all devices).
+    pub fn heat_for(
+        &self,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+        devices: Option<&[String]>,
+    ) -> Vec<HeatDay> {
         let (start, today) = heat_bounds(self.off_ms, now_ms());
         let mut out = blank_heat(start, today);
         let (app_ok, model_ok) = (self.app_mask(apps), self.model_mask(models));
+        let device_ok = self.device_mask(devices);
         for g in &self.groups {
             if g.day == NO_DAY
                 || g.day < start
                 || g.day > today
                 || !app_ok[usize::from(g.app)]
                 || !model_ok[usize::from(g.model)]
+                || !device_ok[usize::from(g.device)]
             {
                 continue;
             }
@@ -323,6 +483,18 @@ impl Cube {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Option<OverviewParts> {
+        self.overview_parts_for(range, apps, models, None)
+    }
+
+    /// [`Cube::overview_parts`] under a device filter (`None` = all devices,
+    /// `Some(ids)` = exactly those; `Some(empty)` = nobody).
+    pub fn overview_parts_for(
+        &self,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+        devices: Option<&[String]>,
+    ) -> Option<OverviewParts> {
         // Hourly trends only exist for today; a single-day custom window
         // (hourly bars, maybe sub-day edges) goes to SQL.
         if range.hourly() && range != Range::Today {
@@ -335,7 +507,12 @@ impl Cube {
             return None;
         }
         let (app_ok, model_ok) = (self.app_mask(apps), self.model_mask(models));
-        let keep = |g: &&Group| app_ok[usize::from(g.app)] && model_ok[usize::from(g.model)];
+        let device_ok = self.device_mask(devices);
+        let keep = |g: &&Group| {
+            app_ok[usize::from(g.app)]
+                && model_ok[usize::from(g.model)]
+                && device_ok[usize::from(g.device)]
+        };
         let bounded = lo.is_some() || hi.is_some();
         let in_span = |g: &Group| {
             if g.day == NO_DAY {
@@ -396,7 +573,7 @@ impl Cube {
             .sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.name.cmp(&b.name)));
 
         let daily = if range == Range::Today {
-            self.hourly_trend(&app_ok, &model_ok)
+            self.hourly_trend(&app_ok, &model_ok, &device_ok)
         } else {
             self.daily_trend(
                 self.groups
@@ -449,10 +626,18 @@ impl Cube {
         out
     }
 
-    fn hourly_trend(&self, app_ok: &[bool], model_ok: &[bool]) -> Vec<TrendBucket> {
+    fn hourly_trend(
+        &self,
+        app_ok: &[bool],
+        model_ok: &[bool],
+        device_ok: &[bool],
+    ) -> Vec<TrendBucket> {
         let mut by_hour: BTreeMap<u8, (TrendBucket, BTreeMap<u16, u64>)> = BTreeMap::new();
         for h in &self.hours {
-            if !app_ok[usize::from(h.app)] || !model_ok[usize::from(h.model)] {
+            if !app_ok[usize::from(h.app)]
+                || !model_ok[usize::from(h.model)]
+                || !device_ok[usize::from(h.device)]
+            {
                 continue;
             }
             let (b, models) = by_hour.entry(h.hour).or_insert_with(|| {
@@ -493,6 +678,140 @@ impl Cube {
         mask(&self.models, models)
     }
 
+    fn device_mask(&self, devices: Option<&[String]>) -> Vec<bool> {
+        mask(&self.devices, devices)
+    }
+
+    /// Span totals per device for `range` (all devices, this one first) —
+    /// the per-device breakdown. `None` when the range edges are not day
+    /// boundaries in this frame (then [`Cube::peer_fold`] semantics apply).
+    pub fn device_totals(
+        &self,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Option<Vec<DeviceTotals>> {
+        let lo = self.bound(range.start_ms())?;
+        let hi = self.bound(range.end_ms())?;
+        let bounded = lo.is_some() || hi.is_some();
+        let (app_ok, model_ok) = (self.app_mask(apps), self.model_mask(models));
+        let mut out: Vec<DeviceTotals> = self
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(i, id)| DeviceTotals {
+                device_id: id.clone(),
+                local: i == 0,
+                span: Totals::default(),
+            })
+            .collect();
+        for g in &self.groups {
+            if !app_ok[usize::from(g.app)] || !model_ok[usize::from(g.model)] {
+                continue;
+            }
+            let inside = if g.day == NO_DAY {
+                !bounded
+            } else {
+                lo.is_none_or(|l| g.day >= l) && hi.is_none_or(|h| g.day < h)
+            };
+            if inside {
+                add(&mut out[usize::from(g.device)].span, g);
+            }
+        }
+        Some(out)
+    }
+
+    /// Peers' share of an overview at hour precision, for windows the
+    /// day-level groups cannot answer: buckets whose start lies in
+    /// `[start, end)`. Merged onto the SQL path's local result by
+    /// `Store::overview_from_cube_for`. Trend keys follow the range: local
+    /// "HH:00" for hourly ranges, else local "YYYY-MM-DD".
+    pub fn peer_fold(
+        &self,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+        devices: Option<&[String]>,
+    ) -> OverviewParts {
+        let (start, end) = (range.start_ms(), range.end_ms());
+        let today_start = day_start_ms(0);
+        let (app_ok, model_ok) = (self.app_mask(apps), self.model_mask(models));
+        let device_ok = self.device_mask(devices);
+        let hourly = range.hourly();
+        let mut parts = OverviewParts {
+            today: Totals::default(),
+            span: Totals::default(),
+            all: Totals::default(),
+            by_app: Vec::new(),
+            by_model: Vec::new(),
+            daily: Vec::new(),
+            apps: Vec::new(),
+            models: Vec::new(),
+        };
+        let mut by_app: BTreeMap<u16, AppSummary> = BTreeMap::new();
+        let mut by_model: BTreeMap<u16, ShareRow> = BTreeMap::new();
+        let mut buckets: BTreeMap<String, (TrendBucket, BTreeMap<u16, u64>)> = BTreeMap::new();
+        for p in &self.peer_hours {
+            let g = &p.group;
+            if !app_ok[usize::from(g.app)]
+                || !model_ok[usize::from(g.model)]
+                || !device_ok[usize::from(g.device)]
+            {
+                continue;
+            }
+            add(&mut parts.all, g);
+            let Some(ms) = p.start_ms else {
+                if start.is_none() && end.is_none() {
+                    add(&mut parts.span, g);
+                    add_app(&mut by_app, &self.apps, g);
+                    add_model(&mut by_model, &self.models, g);
+                }
+                continue;
+            };
+            if ms >= today_start {
+                add(&mut parts.today, g);
+            }
+            if start.is_some_and(|s| ms < s) || end.is_some_and(|e| ms >= e) {
+                continue;
+            }
+            add(&mut parts.span, g);
+            add_app(&mut by_app, &self.apps, g);
+            add_model(&mut by_model, &self.models, g);
+            let local = ms + self.off_ms;
+            let key = if hourly {
+                format!("{:02}:00", local.rem_euclid(DAY_MS) / HOUR_MS)
+            } else {
+                civil_date(local.div_euclid(DAY_MS))
+            };
+            let (b, m) = buckets.entry(key.clone()).or_insert_with(|| {
+                (
+                    TrendBucket {
+                        date: key,
+                        events: 0,
+                        tokens: 0,
+                        cost_usd: 0.0,
+                        top: Vec::new(),
+                    },
+                    BTreeMap::new(),
+                )
+            });
+            b.events += g.events;
+            b.tokens += g.headline();
+            b.cost_usd += g.cost;
+            *m.entry(g.model).or_default() += g.headline();
+        }
+        parts.by_app = by_app.into_values().collect();
+        parts.by_model = by_model.into_values().collect();
+        parts.daily = buckets
+            .into_values()
+            .map(|(mut b, m)| {
+                b.top = top3(&m, &self.models);
+                b
+            })
+            .collect();
+        parts
+    }
+
     /// A range edge as a day index; the outer `None` = not a day boundary in
     /// this cube's frame, the inner `None` = unbounded.
     fn bound(&self, ms: Option<i64>) -> Option<Option<i32>> {
@@ -529,6 +848,24 @@ impl Cube {
     pub fn group_count(&self) -> usize {
         self.groups.len()
     }
+
+    /// (events, headline tokens) per local day under a device filter — tests
+    /// compare re-bucketed peer data with SQL in arbitrary frames.
+    #[cfg(test)]
+    pub(crate) fn day_totals_for(&self, devices: Option<&[String]>) -> BTreeMap<i32, (u64, u64)> {
+        let ok = self.device_mask(devices);
+        let mut out: BTreeMap<i32, (u64, u64)> = BTreeMap::new();
+        for g in self
+            .groups
+            .iter()
+            .filter(|g| g.day != NO_DAY && ok[usize::from(g.device)])
+        {
+            let e = out.entry(g.day).or_default();
+            e.0 += g.events;
+            e.1 += g.headline();
+        }
+        out
+    }
 }
 
 fn mask(names: &[String], filter: Option<&[String]>) -> Vec<bool> {
@@ -536,6 +873,59 @@ fn mask(names: &[String], filter: Option<&[String]>) -> Vec<bool> {
         None => vec![true; names.len()],
         Some(list) => names.iter().map(|n| list.contains(n)).collect(),
     }
+}
+
+/// The device index of this ledger's own device.
+const LOCAL: u16 = 0;
+
+fn merge_group(into: &mut Group, g: &Group) {
+    into.events += g.events;
+    into.input += g.input;
+    into.output += g.output;
+    into.reasoning += g.reasoning;
+    into.cache_read += g.cache_read;
+    into.cache_write += g.cache_write;
+    into.unclassified += g.unclassified;
+    into.credits += g.credits;
+    into.cost += g.cost;
+    into.active_ms += g.active_ms;
+    into.duration_ms += g.duration_ms;
+}
+
+fn add_app(by_app: &mut BTreeMap<u16, AppSummary>, names: &[String], g: &Group) {
+    let a = by_app.entry(g.app).or_insert_with(|| AppSummary {
+        app: names[usize::from(g.app)].clone(),
+        events: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        unclassified_tokens: 0,
+        credits: 0.0,
+        cost_usd: 0.0,
+    });
+    a.events += g.events;
+    a.input_tokens += g.input;
+    a.output_tokens += g.output;
+    a.reasoning_tokens += g.reasoning;
+    a.cache_read_tokens += g.cache_read;
+    a.cache_write_tokens += g.cache_write;
+    a.unclassified_tokens += g.unclassified;
+    a.credits += g.credits;
+    a.cost_usd += g.cost;
+}
+
+fn add_model(by_model: &mut BTreeMap<u16, ShareRow>, names: &[String], g: &Group) {
+    let m = by_model.entry(g.model).or_insert_with(|| ShareRow {
+        name: names[usize::from(g.model)].clone(),
+        events: 0,
+        tokens: 0,
+        cost_usd: 0.0,
+    });
+    m.events += g.events;
+    m.tokens += g.headline();
+    m.cost_usd += g.cost;
 }
 
 fn add(t: &mut Totals, g: &Group) {

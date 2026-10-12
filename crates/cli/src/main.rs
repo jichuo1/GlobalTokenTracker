@@ -45,6 +45,10 @@ enum Cmd {
     Report {
         #[arg(default_value = "today")]
         span: String,
+        /// Device dimension: `all`, `local`, or paired devices by name / id
+        /// (comma-separated). Adds the per-device breakdown.
+        #[arg(long)]
+        device: Option<String>,
     },
     /// Cross-check ledger numbers against cc-switch's DB.
     Reconcile {
@@ -152,7 +156,11 @@ fn main() -> Result<()> {
                 eprintln!("  ERR {e}");
             }
         }
-        Cmd::Report { span } => report(&engine, &span)?,
+        Cmd::Report { span, device: None } => report(&engine, &span)?,
+        Cmd::Report {
+            span,
+            device: Some(device),
+        } => device_report(&engine, &span, &device)?,
         Cmd::Reconcile { ccswitch } => reconcile(&engine, ccswitch)?,
         Cmd::Sources => {
             println!("adapters: {}", engine.adapter_ids().join(", "));
@@ -362,6 +370,100 @@ fn local_offset() -> String {
 
 fn fmt_tok(n: u64) -> String {
     globaltokentracker_core::viewmodel::fmt::tokens_exact(n)
+}
+
+/// `report --device …`: the cube's device dimension (this device + synced
+/// LAN peers), with a per-device breakdown.
+fn device_report(engine: &Engine, span: &str, device: &str) -> Result<()> {
+    use globaltokentracker_core::{Cube, peer, viewmodel::Range};
+    let store = &engine.store;
+    let cube = Cube::build(store)?;
+    let (local_id, _) = peer::local_device(store)?;
+    let peers = peer::devices::list(store)?;
+    let filter: Option<Vec<String>> = match device {
+        "all" => None,
+        _ => Some(
+            device
+                .split(',')
+                .map(str::trim)
+                .map(|d| {
+                    if d == "local" || d == local_id {
+                        Ok(local_id.clone())
+                    } else {
+                        peers
+                            .iter()
+                            .find(|p| p.device_id == d || p.name == d)
+                            .map(|p| p.device_id.clone())
+                            .ok_or_else(|| anyhow::anyhow!("unknown device {d:?}"))
+                    }
+                })
+                .collect::<Result<_>>()?,
+        ),
+    };
+    let range = Range::from_key(span);
+    let vm = store.overview_from_cube_for(&cube, range, None, None, filter.as_deref())?;
+    let tot = &vm.span;
+    println!(
+        "\n== {span} · devices: {device} ==  events {} | in {} out {} reasoning {} cacheR {} cacheW {} | credits {:.2} | est. ${:.2}\n",
+        tot.events,
+        fmt_tok(tot.input_tokens),
+        fmt_tok(tot.output_tokens),
+        fmt_tok(tot.reasoning_tokens),
+        fmt_tok(tot.cache_read_tokens),
+        fmt_tok(tot.cache_write_tokens),
+        tot.credits,
+        tot.cost_usd
+    );
+    #[derive(Tabled)]
+    struct Row {
+        device: String,
+        id: String,
+        selected: String,
+        events: String,
+        tokens: String,
+        #[tabled(rename = "est_$")]
+        cost: String,
+        last_seen: String,
+        error: String,
+    }
+    let rows: Vec<Row> = vm
+        .devices
+        .iter()
+        .map(|d| Row {
+            device: if d.local && d.name != "This device" {
+                format!("{} (this device)", d.name)
+            } else {
+                d.name.clone()
+            },
+            id: d.device_id.chars().take(8).collect(),
+            selected: if d.selected { "yes" } else { "" }.into(),
+            events: d.span.events.to_string(),
+            tokens: fmt_tok(
+                d.span.input_tokens
+                    + d.span.output_tokens
+                    + d.span.cache_read_tokens
+                    + d.span.unclassified_tokens,
+            ),
+            cost: format!("{:.2}", d.span.cost_usd),
+            last_seen: d.last_seen_at.map_or(String::new(), |t| {
+                globaltokentracker_core::viewmodel::fmt::ts_short(Some(t))
+            }),
+            error: d.last_error_code.clone().unwrap_or_default(),
+        })
+        .collect();
+    println!("{}", Table::new(rows));
+    for w in &vm.device_warnings {
+        println!(
+            "warning: {} — {} ↔ {} ({}, {} days, {} identical hours)",
+            w.code,
+            &w.device_a[..8.min(w.device_a.len())],
+            &w.device_b[..8.min(w.device_b.len())],
+            w.app,
+            w.days,
+            w.matching_hours
+        );
+    }
+    Ok(())
 }
 
 fn report(engine: &Engine, span: &str) -> Result<()> {

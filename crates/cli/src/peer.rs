@@ -76,7 +76,17 @@ pub enum Command {
         #[arg(long, default_value_t = peer::PROTOCOL_VERSION)]
         protocol_version: u32,
     },
-    /// Viewers paired with this device, and devices this one has paired with.
+    /// Pull every enabled paired device into this ledger (incremental).
+    Sync {
+        /// Skip the mDNS lookup of paired devices' current addresses.
+        #[arg(long)]
+        no_discover: bool,
+        /// Per-device time budget in seconds.
+        #[arg(long, default_value_t = 45)]
+        timeout: u64,
+    },
+    /// Viewers paired with this device, devices this one has paired with, and
+    /// overlap warnings.
     List,
     /// Server side: revoke a viewer (by id or name); its token fails at once.
     Revoke { viewer: String },
@@ -104,8 +114,10 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
             no_advertise,
         } => serve(db, bind, name.as_deref(), *plaintext, !*no_advertise),
         Command::Discover { timeout, .. } => {
-            let (found, invalid) =
-                discovery::discover(db, Duration::from_secs((*timeout).clamp(1, 60)))?;
+            let (found, invalid) = discovery::discover(
+                &Store::open(db)?,
+                Duration::from_secs((*timeout).clamp(1, 60)),
+            )?;
             print(
                 &json!({"protocol": peer::PROTOCOL, "operation": "discover", "status": "ok",
                 "service": discovery::SERVICE_TYPE, "devices": found, "invalid_answers": invalid}),
@@ -113,7 +125,7 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
         }
         Command::Pair { addr, code, name } => {
             let name = name.clone().unwrap_or_else(default_name);
-            match pairing::pair(db, addr, code.trim(), &name)? {
+            match pairing::pair(&Store::open(db)?, addr, code.trim(), &name)? {
                 Ok(peer) => print(&json!({"protocol": peer::PROTOCOL,
                     "operation": "pair", "status": "ok", "peer": peer})),
                 Err(code) => fail("pair", code),
@@ -146,7 +158,7 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
                 String::new()
             };
             match client::pull(
-                db,
+                &Store::open(db)?,
                 target,
                 *plaintext,
                 !*no_discover,
@@ -164,11 +176,32 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
                 Err(code) => fail(endpoint, code),
             }
         }
+        Command::Sync {
+            no_discover,
+            timeout,
+        } => {
+            let store = Store::open(db)?;
+            let report = peer::sync::sync_all(
+                &store,
+                &peer::sync::SyncOptions {
+                    rediscover: !*no_discover,
+                    device_timeout: Duration::from_secs((*timeout).clamp(1, 600)),
+                },
+            )?;
+            print(
+                &json!({"protocol": peer::PROTOCOL, "operation": "sync", "status": "ok",
+                "report": report, "warnings": peer::merged::overlaps(&store)?}),
+            )
+        }
         Command::List => {
+            let store = Store::open(db)?;
             let trust = TrustStore::open(&peer_dir(db))?;
+            let (local_id, local_name) = peer::local_device(&store)?;
             print(
                 &json!({"protocol": peer::PROTOCOL, "operation": "list", "status": "ok",
-                "viewers": trust.viewers()?, "peers": trust.peers()?}),
+                "device": {"device_id": local_id, "name": local_name},
+                "viewers": trust.viewers()?, "peers": peer::devices::Registry::open(&store)?.list()?,
+                "warnings": peer::merged::overlaps(&store)?}),
             )
         }
         Command::Revoke { viewer } => {
@@ -182,8 +215,8 @@ pub fn run(db: &Path, command: &Command) -> Result<()> {
             }
         }
         Command::Forget { device } => {
-            let trust = TrustStore::open(&peer_dir(db))?;
-            match trust.forget(device) {
+            let store = Store::open(db)?;
+            match peer::devices::Registry::open(&store)?.forget(device) {
                 Ok(Some(p)) => print(&json!({"protocol": peer::PROTOCOL,
                     "operation": "forget", "status": "ok", "peer": p})),
                 Ok(None) => fail("forget", "unknown_peer"),

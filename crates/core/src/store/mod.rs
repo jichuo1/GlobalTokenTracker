@@ -14,7 +14,8 @@ pub use query::{
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 1;
+/// v2: LAN peer tables (`peers`, `peer_groups`, `peer_day_fps`, `peer_quotas`).
+const SCHEMA_VERSION: i64 = 2;
 
 /// Default database location: `~/.globaltokentracker/ledger.db`.
 ///
@@ -328,6 +329,9 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        // Every ledger has a stable device id (the device dimension's local
+        // key, and this device's id when it serves peers).
+        crate::peer::ensure_device_id(self)?;
         let version: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],
@@ -500,6 +504,11 @@ impl Store {
                     q.limit_value, q.used_percent, q.resets_at, q.raw_json],
         )?;
         Ok(true)
+    }
+
+    /// The ledger file (`None` for in-memory stores).
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     pub(crate) fn conn(&self) -> &Connection {

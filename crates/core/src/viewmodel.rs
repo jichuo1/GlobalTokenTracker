@@ -393,6 +393,34 @@ pub struct OverviewVm {
     pub heat: Vec<HeatDay>,
     /// Local UTC offset "+HH:MM" for display.
     pub tz_offset: String,
+    /// The device dimension: this device first, then paired LAN peers, each
+    /// with its span totals for the range (under the tool/model filters,
+    /// regardless of the device selection).
+    pub devices: Vec<DeviceVm>,
+    /// Device ids the aggregates above cover; `None` = all devices.
+    pub device_filter: Option<Vec<String>>,
+    /// Freshest quota per (app, account, window) across all devices — never
+    /// summed; each row names the device that reported it.
+    pub quotas_all_devices: Vec<crate::peer::merged::MergedQuota>,
+    /// Device pairs that probably count the same usage (flagged, not deduped).
+    pub device_warnings: Vec<crate::peer::merged::OverlapWarning>,
+}
+
+/// One device in the device dimension.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeviceVm {
+    pub device_id: String,
+    pub name: String,
+    /// This device ("this Mac/PC").
+    pub local: bool,
+    /// Included by the current device filter.
+    pub selected: bool,
+    pub enabled: bool,
+    pub last_seen_at: Option<i64>,
+    pub last_pull_at: Option<i64>,
+    pub last_error_code: Option<String>,
+    /// Span totals for the selected range.
+    pub span: Totals,
 }
 
 /// One collapsible section on the quota page: every window belonging to a
@@ -484,6 +512,9 @@ pub fn group_quotas(rows: Vec<QuotaRow>) -> Vec<QuotaGroupVm> {
 pub struct DetailVm {
     pub rows: Vec<EventRow>,
     pub total_events: u64,
+    /// Event rows are always this device's — peers share aggregates only.
+    pub device_id: String,
+    pub device_name: String,
 }
 
 pub fn local_utc_offset() -> String {
@@ -541,7 +572,7 @@ impl OverviewVm {
 impl Store {
     /// `overview`, but the aggregates come from `cube`; only the cheap
     /// range-independent extras are queried. Falls back to the SQL path when
-    /// the cube declines.
+    /// the cube declines. All devices.
     pub fn overview_from_cube(
         &self,
         cube: &crate::cube::Cube,
@@ -549,26 +580,124 @@ impl Store {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Result<OverviewVm> {
-        let Some(p) = cube.overview_parts(range, apps, models) else {
-            return self.overview(range, apps, models);
+        self.overview_from_cube_for(cube, range, apps, models, None)
+    }
+
+    /// [`Store::overview_from_cube`] under a device filter (`None` = all
+    /// devices). When the cube declines (sub-day edges, hourly custom
+    /// windows, stale "today") this device comes from the SQL path and the
+    /// peers from [`crate::cube::Cube::peer_fold`] at hour precision.
+    pub fn overview_from_cube_for(
+        &self,
+        cube: &crate::cube::Cube,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+        devices: Option<&[String]>,
+    ) -> Result<OverviewVm> {
+        let mut vm = if let Some(p) = cube.overview_parts_for(range, apps, models, devices) {
+            let quotas = self.latest_quotas()?;
+            OverviewVm {
+                today: p.today,
+                span: p.span,
+                all: p.all,
+                range,
+                by_app: p.by_app,
+                by_model: p.by_model,
+                daily: p.daily,
+                apps: p.apps,
+                models: p.models,
+                quota_groups: group_quotas(quotas.clone()),
+                quotas,
+                unpriced: self.unpriced_models()?,
+                heat: cube.heat_for(apps, models, devices),
+                tz_offset: local_utc_offset(),
+                devices: Vec::new(),
+                device_filter: None,
+                quotas_all_devices: Vec::new(),
+                device_warnings: Vec::new(),
+            }
+        } else {
+            let local = cube.local_device().to_string();
+            let include_local = devices.is_none_or(|d| d.contains(&local));
+            let none: &[String] = &[];
+            let mut vm =
+                self.overview(range, if include_local { apps } else { Some(none) }, models)?;
+            let peers = cube.peer_fold(range, apps, models, devices);
+            merge_parts(&mut vm, peers);
+            vm.apps = cube.app_names();
+            vm.models = cube.model_names(apps);
+            vm.heat = cube.heat_for(apps, models, devices);
+            vm
         };
-        let quotas = self.latest_quotas()?;
-        Ok(OverviewVm {
-            today: p.today,
-            span: p.span,
-            all: p.all,
-            range,
-            by_app: p.by_app,
-            by_model: p.by_model,
-            daily: p.daily,
-            apps: p.apps,
-            models: p.models,
-            quota_groups: group_quotas(quotas.clone()),
-            quotas,
-            unpriced: self.unpriced_models()?,
-            heat: cube.heat(apps, models),
-            tz_offset: local_utc_offset(),
-        })
+        vm.device_filter = devices.map(<[String]>::to_vec);
+        vm.devices = self.device_vms(cube, range, apps, models, devices)?;
+        vm.quotas_all_devices = crate::peer::merged::merged_quotas(self)?;
+        vm.device_warnings = crate::peer::merged::overlaps(self)?;
+        Ok(vm)
+    }
+
+    /// The device dimension with per-device span totals for `range`.
+    fn device_vms(
+        &self,
+        cube: &crate::cube::Cube,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+        devices: Option<&[String]>,
+    ) -> Result<Vec<DeviceVm>> {
+        let (local_id, local_name) = crate::peer::local_device(self)?;
+        let peers = crate::peer::devices::list(self)?;
+        let spans: Vec<(String, Totals)> = match cube.device_totals(range, apps, models) {
+            Some(t) => t.into_iter().map(|d| (d.device_id, d.span)).collect(),
+            None => {
+                let mut v = vec![(
+                    local_id.clone(),
+                    self.totals(range.start_ms(), range.end_ms(), apps, models)?,
+                )];
+                for id in cube.device_ids().iter().skip(1) {
+                    let only = [id.clone()];
+                    v.push((
+                        id.clone(),
+                        cube.peer_fold(range, apps, models, Some(&only)).span,
+                    ));
+                }
+                v
+            }
+        };
+        let span_of = |id: &str| {
+            spans
+                .iter()
+                .find(|(d, _)| d == id)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default()
+        };
+        let selected = |id: &str| devices.is_none_or(|d| d.iter().any(|x| x == id));
+        let mut out = vec![DeviceVm {
+            span: span_of(&local_id),
+            selected: selected(&local_id),
+            device_id: local_id,
+            name: local_name,
+            local: true,
+            enabled: true,
+            last_seen_at: None,
+            last_pull_at: None,
+            last_error_code: None,
+        }];
+        for p in peers {
+            out.push(DeviceVm {
+                span: span_of(&p.device_id),
+                selected: selected(&p.device_id),
+                device_id: p.device_id,
+                name: p.name,
+                local: false,
+                enabled: p.enabled,
+                last_seen_at: p.last_seen_at,
+                last_pull_at: p.last_pull_at,
+                last_error_code: p.last_error_code,
+            });
+        }
+        Ok(out)
     }
 
     pub fn overview(
@@ -625,6 +754,10 @@ impl Store {
             unpriced: self.unpriced_models()?,
             heat: self.heat_days(apps, models, since)?,
             tz_offset: tz,
+            devices: Vec::new(),
+            device_filter: None,
+            quotas_all_devices: Vec::new(),
+            device_warnings: Vec::new(),
         })
     }
 
@@ -635,11 +768,90 @@ impl Store {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Result<DetailVm> {
+        let (device_id, device_name) = crate::peer::local_device(self)?;
         Ok(DetailVm {
             rows: self.events_page(page_size, page * page_size, apps, models)?,
             total_events: self.event_count(apps, models)?,
+            device_id,
+            device_name,
         })
     }
+}
+
+fn add_totals(t: &mut Totals, o: &Totals) {
+    t.events += o.events;
+    t.input_tokens += o.input_tokens;
+    t.output_tokens += o.output_tokens;
+    t.reasoning_tokens += o.reasoning_tokens;
+    t.cache_read_tokens += o.cache_read_tokens;
+    t.cache_write_tokens += o.cache_write_tokens;
+    t.unclassified_tokens += o.unclassified_tokens;
+    t.credits += o.credits;
+    t.cost_usd += o.cost_usd;
+    t.active_ms += o.active_ms;
+}
+
+fn cost_desc(a: f64, b: f64) -> std::cmp::Ordering {
+    b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Add peers' parts onto a (local) overview: totals sum, per-app and
+/// per-model rows merge by name, trend buckets merge by key. A merged
+/// bucket's top-3 is drawn from the local top-3 plus the peers' models.
+fn merge_parts(vm: &mut OverviewVm, p: crate::cube::OverviewParts) {
+    add_totals(&mut vm.today, &p.today);
+    add_totals(&mut vm.span, &p.span);
+    add_totals(&mut vm.all, &p.all);
+    for a in p.by_app {
+        match vm.by_app.iter_mut().find(|x| x.app == a.app) {
+            Some(x) => {
+                x.events += a.events;
+                x.input_tokens += a.input_tokens;
+                x.output_tokens += a.output_tokens;
+                x.reasoning_tokens += a.reasoning_tokens;
+                x.cache_read_tokens += a.cache_read_tokens;
+                x.cache_write_tokens += a.cache_write_tokens;
+                x.unclassified_tokens += a.unclassified_tokens;
+                x.credits += a.credits;
+                x.cost_usd += a.cost_usd;
+            }
+            None => vm.by_app.push(a),
+        }
+    }
+    vm.by_app
+        .sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.app.cmp(&b.app)));
+    for m in p.by_model {
+        match vm.by_model.iter_mut().find(|x| x.name == m.name) {
+            Some(x) => {
+                x.events += m.events;
+                x.tokens += m.tokens;
+                x.cost_usd += m.cost_usd;
+            }
+            None => vm.by_model.push(m),
+        }
+    }
+    vm.by_model
+        .sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.name.cmp(&b.name)));
+    for b in p.daily {
+        match vm.daily.iter_mut().find(|x| x.date == b.date) {
+            Some(x) => {
+                x.events += b.events;
+                x.tokens += b.tokens;
+                x.cost_usd += b.cost_usd;
+                for (name, t) in b.top {
+                    match x.top.iter_mut().find(|m| m.0 == name) {
+                        Some(m) => m.1 += t,
+                        None => x.top.push((name, t)),
+                    }
+                }
+                x.top
+                    .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                x.top.truncate(3);
+            }
+            None => vm.daily.push(b),
+        }
+    }
+    vm.daily.sort_by(|a, b| a.date.cmp(&b.date));
 }
 
 /// Human formatting helpers shared by CLI and UI.

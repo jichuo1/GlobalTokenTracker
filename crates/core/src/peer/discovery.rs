@@ -10,14 +10,13 @@
 //!
 //! Uses `mdns-sd`: pure Rust, runs its own daemon thread (no async runtime).
 
-use super::trust::{Peer, TrustStore};
+use super::devices::PeerDevice;
 use super::{Identity, PROTOCOL_VERSION, clean_name};
 use anyhow::{Context, Result};
 use mdns_sd::{IfKind, ResolvedService, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub const SERVICE_TYPE: &str = "_gtt._tcp.local.";
@@ -157,7 +156,7 @@ fn address_rank(a: &SocketAddr) -> (u8, String) {
 /// arrive once per interface and address family), and compare against
 /// paired devices.
 /// Returns the devices and the number of answers with invalid TXT records.
-pub fn merge(sightings: &[Sighting], peers: &[Peer]) -> (Vec<Found>, usize) {
+pub fn merge(sightings: &[Sighting], peers: &[PeerDevice]) -> (Vec<Found>, usize) {
     let mut by_id: BTreeMap<(String, String), Found> = BTreeMap::new();
     let mut invalid = 0;
     for s in sightings {
@@ -240,9 +239,9 @@ pub fn browse(timeout: Duration, done: impl Fn(&Sighting) -> bool) -> Result<Vec
 }
 
 /// `peer discover`: devices on the network, merged and checked against the
-/// paired devices in `<data dir>/peer`.
-pub fn discover(db: &Path, timeout: Duration) -> Result<(Vec<Found>, usize)> {
-    let peers = TrustStore::open(&super::keys::peer_dir(db))?.peers()?;
+/// ledger's paired devices.
+pub fn discover(store: &crate::store::Store, timeout: Duration) -> Result<(Vec<Found>, usize)> {
+    let peers = super::devices::list(store)?;
     let sightings = browse(timeout, |_| false)?;
     Ok(merge(&sightings, &peers))
 }

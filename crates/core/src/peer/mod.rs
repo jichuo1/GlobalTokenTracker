@@ -16,11 +16,14 @@
 //! equivalence tests below.
 
 pub mod client;
+pub mod devices;
 pub mod discovery;
 pub mod keys;
+pub mod merged;
 mod net;
 pub mod pairing;
 pub mod server;
+pub mod sync;
 pub mod trust;
 
 use crate::coordination::{ALLOWANCE_WINDOWS, columns, finite, label, opaque};
@@ -776,18 +779,33 @@ fn schema_version(tx: &Connection) -> rusqlite::Result<Option<i64>> {
     }
 }
 
+/// This ledger's device id, created once (Store open runs this).
+pub(crate) fn ensure_device_id(store: &Store) -> anyhow::Result<String> {
+    match store.get_state(DEVICE_ID_KEY)? {
+        Some(id) if valid_device_id(&id) => Ok(id),
+        _ => {
+            let id = new_device_id();
+            store.set_state(DEVICE_ID_KEY, &id)?;
+            Ok(id)
+        }
+    }
+}
+
+/// This device as the device dimension shows it: id and display name.
+pub fn local_device(store: &Store) -> anyhow::Result<(String, String)> {
+    let id = ensure_device_id(store)?;
+    let name = store
+        .get_state(DEVICE_NAME_KEY)?
+        .and_then(|n| clean_name(&n))
+        .unwrap_or_else(|| "This device".into());
+    Ok((id, name))
+}
+
 /// Load (or create once) this device's identity. Read-write: call it where a
 /// [`Store`] is open anyway — `peer serve` startup or a shell — never from
 /// the read-only protocol path. `name` (when given) is sanitized and saved.
 pub fn ensure_identity(store: &Store, name: Option<&str>) -> anyhow::Result<Identity> {
-    let device_id = match store.get_state(DEVICE_ID_KEY)? {
-        Some(id) if valid_device_id(&id) => id,
-        _ => {
-            let id = new_device_id();
-            store.set_state(DEVICE_ID_KEY, &id)?;
-            id
-        }
-    };
+    let device_id = ensure_device_id(store)?;
     if let Some(name) = name.and_then(clean_name) {
         store.set_state(DEVICE_NAME_KEY, &name)?;
     }
@@ -807,7 +825,7 @@ pub fn ensure_identity(store: &Store, name: Option<&str>) -> anyhow::Result<Iden
     })
 }
 
-fn valid_device_id(id: &str) -> bool {
+pub(crate) fn valid_device_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -850,7 +868,7 @@ fn valid_date(day: &str) -> bool {
 }
 
 /// Epoch ms of UTC midnight opening `YYYY-MM-DD`.
-fn date_start_ms(day: &str) -> Option<i64> {
+pub(crate) fn date_start_ms(day: &str) -> Option<i64> {
     let date: jiff::civil::Date = day.parse().ok()?;
     let ts = date.to_zoned(jiff::tz::TimeZone::UTC).ok()?.timestamp();
     (civil_date(ts.as_millisecond().div_euclid(DAY_MS)) == day).then(|| ts.as_millisecond())
@@ -920,6 +938,7 @@ pub const ERROR_CODES: &[&str] = &[
     "pairing_refused",
     "pairing_code_reused",
     "invalid_code",
+    "pairing_self",
     "not_paired",
     "ambiguous_peer",
     "connect_failed",
@@ -927,6 +946,8 @@ pub const ERROR_CODES: &[&str] = &[
     "plaintext_not_allowed",
     "peer_fingerprint_mismatch",
     "malformed_response",
+    "sync_failed",
+    "sync_timeout",
     "unknown_viewer",
     "ambiguous_viewer",
     "unknown_peer",

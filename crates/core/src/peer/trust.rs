@@ -2,10 +2,10 @@
 //!
 //! Server side (`viewers`): one row per paired viewer holding only the
 //! SHA-256 of its bearer token, its name, created/last-seen and revocation
-//! time. Viewer side (`peers`): the pinned certificate fingerprint, address
-//! and bearer token of each paired device. Kept apart from the ledger so the
-//! protocol's ledger reads stay read-only; the file lives in the owner-only
-//! peer directory.
+//! time. Viewer side (`peer_tokens`): the bearer token for each paired
+//! device — the only secret, so it stays in this owner-only file; everything
+//! else about paired devices lives in the ledger's `peers` table
+//! ([`super::devices`]).
 
 use super::keys::{ct_eq, ensure_private_dir, hex};
 use anyhow::{Context, Result};
@@ -31,13 +31,14 @@ pub struct Viewer {
     pub revoked_at: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Peer {
+/// A paired device as step-2 builds kept it in `peer.db` (migrated into the
+/// ledger by [`super::devices`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LegacyPeer {
     pub fingerprint: String,
     pub device_id: String,
     pub device_name: String,
     pub address: String,
-    #[serde(skip_serializing)]
     pub token: String,
     pub paired_at: i64,
     pub last_pulled_at: Option<i64>,
@@ -71,10 +72,8 @@ impl TrustStore {
                 id TEXT PRIMARY KEY, name TEXT NOT NULL,
                 token_sha256 TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL,
                 last_seen_at INTEGER, revoked_at INTEGER);
-             CREATE TABLE IF NOT EXISTS peers(
-                fingerprint TEXT PRIMARY KEY, device_id TEXT NOT NULL,
-                device_name TEXT NOT NULL, address TEXT NOT NULL, token TEXT NOT NULL,
-                paired_at INTEGER NOT NULL, last_pulled_at INTEGER);
+             CREATE TABLE IF NOT EXISTS peer_tokens(
+                device_id TEXT PRIMARY KEY, token TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS pair_failures(
                 code_sha256 TEXT PRIMARY KEY, at INTEGER NOT NULL);",
         )?;
@@ -178,31 +177,47 @@ impl TrustStore {
 
     // ── viewer side ────────────────────────────────────────────────────
 
-    /// Save (or replace, on re-pairing) a paired device.
-    pub fn save_peer(&self, peer: &Peer) -> Result<()> {
+    /// The bearer token for a paired device.
+    pub(crate) fn token(&self, device_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT token FROM peer_tokens WHERE device_id=?1",
+                [device_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn set_token(&self, device_id: &str, token: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO peers(fingerprint,device_id,device_name,address,token,paired_at,last_pulled_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![
-                peer.fingerprint,
-                peer.device_id,
-                peer.device_name,
-                peer.address,
-                peer.token,
-                peer.paired_at,
-                peer.last_pulled_at
-            ],
+            "INSERT OR REPLACE INTO peer_tokens(device_id, token) VALUES(?1, ?2)",
+            params![device_id, token],
         )?;
         Ok(())
     }
 
-    pub fn peers(&self) -> Result<Vec<Peer>> {
+    pub(crate) fn delete_token(&self, device_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM peer_tokens WHERE device_id=?1", [device_id])?;
+        Ok(())
+    }
+
+    /// Step-2 viewer rows (pins + tokens in this file), if any are left.
+    pub(crate) fn legacy_peers(&self) -> Result<Vec<LegacyPeer>> {
+        let exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='peers'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(Vec::new());
+        }
         let mut st = self.conn.prepare(
-            "SELECT fingerprint,device_id,device_name,address,token,paired_at,last_pulled_at
-             FROM peers ORDER BY device_name,fingerprint",
+            "SELECT fingerprint,device_id,device_name,address,token,paired_at,last_pulled_at FROM peers",
         )?;
         let rows = st.query_map([], |r| {
-            Ok(Peer {
+            Ok(LegacyPeer {
                 fingerprint: r.get(0)?,
                 device_id: r.get(1)?,
                 device_name: r.get(2)?,
@@ -215,44 +230,31 @@ impl TrustStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The paired device `selector` names: full fingerprint (or a prefix of
-    /// at least 8 characters), device id, device name or saved address.
-    pub fn find_peer(&self, selector: &str) -> Result<Option<Peer>> {
-        let selector_lc = selector.to_ascii_lowercase();
-        let matches: Vec<Peer> = self
-            .peers()?
-            .into_iter()
-            .filter(|p| {
-                p.fingerprint == selector_lc
-                    || (selector.len() >= 8 && p.fingerprint.starts_with(&selector_lc))
-                    || p.device_id == selector
-                    || p.device_name == selector
-                    || p.address == selector
-            })
-            .collect();
-        match matches.len() {
-            0 => Ok(None),
-            1 => Ok(matches.into_iter().next()),
-            _ => Err(Ambiguous.into()),
-        }
+    /// Drop the step-2 viewer table once its rows live in the ledger.
+    pub(crate) fn drop_legacy_peers(&self) -> Result<()> {
+        self.conn.execute_batch("DROP TABLE IF EXISTS peers")?;
+        Ok(())
     }
 
-    /// Drop a paired device (its pin and token).
-    pub fn forget(&self, selector: &str) -> Result<Option<Peer>> {
-        let Some(peer) = self.find_peer(selector)? else {
-            return Ok(None);
-        };
-        self.conn.execute(
-            "DELETE FROM peers WHERE fingerprint=?1",
-            [&peer.fingerprint],
+    #[cfg(test)]
+    pub(crate) fn insert_legacy_peer(&self, p: &LegacyPeer) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS peers(
+                fingerprint TEXT PRIMARY KEY, device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL, address TEXT NOT NULL, token TEXT NOT NULL,
+                paired_at INTEGER NOT NULL, last_pulled_at INTEGER)",
         )?;
-        Ok(Some(peer))
-    }
-
-    pub(crate) fn touch_peer(&self, fingerprint: &str, now: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE peers SET last_pulled_at=?2 WHERE fingerprint=?1",
-            params![fingerprint, now],
+            "INSERT INTO peers VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                p.fingerprint,
+                p.device_id,
+                p.device_name,
+                p.address,
+                p.token,
+                p.paired_at,
+                p.last_pulled_at
+            ],
         )?;
         Ok(())
     }

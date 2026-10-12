@@ -1,16 +1,16 @@
 //! Viewer side: connect to a peer (TLS with a pinned certificate, or
 //! plaintext to loopback only) and pull one endpoint.
 
-use super::keys::{PinVerifier, peer_dir};
+use super::devices::Registry;
+use super::keys::PinVerifier;
 use super::net::{IO_TIMEOUT, Stream, Wire};
 use super::server::DEFAULT_PORT;
-use super::trust::{Peer, TrustStore};
+use crate::store::Store;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, StreamOwned};
 use serde_json::Value;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -115,8 +115,76 @@ fn exchange(wire: &mut Wire, request: &str) -> Result<(u16, Value), &'static str
 /// A failed pull: a fixed code for the caller's JSON failure document.
 pub type PullOutcome = Result<(u16, Value), &'static str>;
 
+/// Where and how to reach one device.
+#[derive(Clone, Debug)]
+pub(crate) struct Target {
+    pub candidates: Vec<SocketAddr>,
+    /// Pinned certificate fingerprint (`None`: unpaired, `hello` only).
+    pub pin: Option<String>,
+    pub token: Option<String>,
+    pub plaintext: bool,
+}
+
+/// One response, and which candidate address answered it.
+#[derive(Debug)]
+pub(crate) struct Fetched {
+    pub addr: SocketAddr,
+    pub status: u16,
+    pub body: Value,
+}
+
+/// GET one endpoint, trying each candidate in order. Every TLS candidate is
+/// pin-checked before anything (the token included) is sent; a fingerprint
+/// mismatch anywhere is the error reported when no candidate works.
+pub(crate) fn fetch(
+    target: &Target,
+    version: u32,
+    endpoint: &str,
+    query: &str,
+) -> Result<Fetched, &'static str> {
+    let mut failure = "connect_failed";
+    let mut connected = None;
+    for &addr in &target.candidates {
+        let verifier = PinVerifier::new(target.pin.as_deref());
+        match connect(addr, (!target.plaintext).then_some(&verifier)) {
+            Ok(wire) => {
+                connected = Some((addr, wire, verifier));
+                break;
+            }
+            Err(code) if failure != "peer_fingerprint_mismatch" => failure = code,
+            Err(_) => {}
+        }
+    }
+    let (addr, mut wire, verifier) = connected.ok_or(failure)?;
+    let query = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{query}")
+    };
+    let auth = target
+        .token
+        .as_ref()
+        .filter(|_| endpoint != "hello")
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "GET /peer/v{version}/{endpoint}{query} HTTP/1.1\r\nHost: {addr}\r\n{auth}\
+         Accept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    let (status, body) = exchange(&mut wire, &request)?;
+    // Over TLS the identity a server claims must be the certificate it used.
+    if status == 200
+        && !target.plaintext
+        && endpoint == "hello"
+        && body["fingerprint"].as_str() != verifier.seen().as_deref()
+    {
+        return Err("peer_fingerprint_mismatch");
+    }
+    Ok(Fetched { addr, status, body })
+}
+
 /// Pull `endpoint` from `target` — a paired device (fingerprint, device id,
-/// name or saved address) or a bare address. Paired devices are reached over
+/// name or last address) or a bare address. Paired devices are reached over
 /// TLS with their pinned fingerprint and bearer token; an unpaired address
 /// allows `hello` only. `plaintext` is honoured for loopback addresses only.
 ///
@@ -125,7 +193,7 @@ pub type PullOutcome = Result<(u16, Value), &'static str>;
 /// known address. Every candidate is pin-verified; a newly working address
 /// is saved.
 pub fn pull(
-    db: &Path,
+    store: &Store,
     target: &str,
     plaintext: bool,
     rediscover: bool,
@@ -140,12 +208,21 @@ pub fn pull(
             Vec::new()
         }
     };
-    pull_via(db, target, plaintext, &locate, version, endpoint, query)
+    pull_via(store, target, plaintext, &locate, version, endpoint, query)
+}
+
+/// Candidate addresses for a paired device: freshly located first, then the
+/// last address that worked.
+pub(crate) fn candidates_for(located: &[SocketAddr], last_address: &str) -> Vec<SocketAddr> {
+    super::discovery::candidates(located, last_address)
+        .iter()
+        .filter_map(|c| resolve(c).ok())
+        .collect()
 }
 
 /// [`pull`] with the mDNS lookup supplied by the caller (tests).
 pub(crate) fn pull_via(
-    db: &Path,
+    store: &Store,
     target: &str,
     plaintext: bool,
     locate: &dyn Fn(&str, &str) -> Vec<SocketAddr>,
@@ -153,82 +230,52 @@ pub(crate) fn pull_via(
     endpoint: &str,
     query: &str,
 ) -> anyhow::Result<PullOutcome> {
-    let trust = TrustStore::open(&peer_dir(db))?;
-    let found = match trust.find_peer(target) {
+    let registry = Registry::open(store)?;
+    let found = match registry.find(target) {
         Ok(found) => found,
         Err(e) if e.is::<super::trust::Ambiguous>() => return Ok(Err("ambiguous_peer")),
         Err(e) => return Err(e),
     };
     // An explicit address is used as given; a paired device may move.
-    let (peer, candidates) = if let Some(peer) = found {
-        let located = locate(&peer.device_id, &peer.fingerprint);
-        let candidates: Vec<SocketAddr> = super::discovery::candidates(&located, &peer.address)
-            .iter()
-            .filter_map(|c| resolve(c).ok())
-            .collect();
-        (Some(peer), candidates)
+    let (device, candidates) = if let Some(device) = found {
+        let located = locate(&device.device_id, &device.fingerprint);
+        let candidates = candidates_for(&located, &device.last_address);
+        (Some(device), candidates)
     } else {
         let addr = match resolve(target) {
             Ok(a) => a,
             Err(code) => return Ok(Err(code)),
         };
-        match trust.find_peer(&addr.to_string()) {
-            Ok(peer) => (peer, vec![addr]),
+        match registry.find(&addr.to_string()) {
+            Ok(device) => (device, vec![addr]),
             Err(_) => return Ok(Err("ambiguous_peer")),
         }
     };
-    if endpoint != "hello" && peer.is_none() {
+    if endpoint != "hello" && device.is_none() {
         return Ok(Err("not_paired"));
     }
-    let pin = peer.as_ref().map(|p| p.fingerprint.as_str());
-    let mut failure = "connect_failed";
-    let mut connected = None;
-    for addr in candidates {
-        let verifier = PinVerifier::new(pin);
-        match connect(addr, (!plaintext).then_some(&verifier)) {
-            Ok(wire) => {
-                connected = Some((addr, wire, verifier));
-                break;
-            }
-            // A mismatch anywhere is the most important thing to report.
-            Err(code) if failure != "peer_fingerprint_mismatch" => failure = code,
-            Err(_) => {}
+    let token = match &device {
+        Some(d) => registry.token(&d.device_id)?,
+        None => None,
+    };
+    if endpoint != "hello" && token.is_none() {
+        return Ok(Err("not_paired"));
+    }
+    let target = Target {
+        candidates,
+        pin: device.as_ref().map(|d| d.fingerprint.clone()),
+        token,
+        plaintext,
+    };
+    let fetched = match fetch(&target, version, endpoint, query) {
+        Ok(f) => f,
+        Err(code) => return Ok(Err(code)),
+    };
+    if let (200, Some(d)) = (fetched.status, &device) {
+        let address = fetched.addr.to_string();
+        if address != d.last_address && !plaintext {
+            registry.set_address(&d.device_id, &address)?;
         }
     }
-    let Some((addr, mut wire, verifier)) = connected else {
-        return Ok(Err(failure));
-    };
-    let query = if query.is_empty() {
-        String::new()
-    } else {
-        format!("?{query}")
-    };
-    let auth = peer
-        .as_ref()
-        .filter(|_| endpoint != "hello")
-        .map(|p| format!("Authorization: Bearer {}\r\n", p.token))
-        .unwrap_or_default();
-    let request = format!(
-        "GET /peer/v{version}/{endpoint}{query} HTTP/1.1\r\nHost: {addr}\r\n{auth}\
-         Accept: application/json\r\nConnection: close\r\n\r\n"
-    );
-    let mut result = exchange(&mut wire, &request);
-    // Over TLS the identity a server claims must be the certificate it used.
-    if let (Ok((200, body)), false) = (&result, plaintext)
-        && endpoint == "hello"
-        && body["fingerprint"].as_str() != verifier.seen().as_deref()
-    {
-        result = Err("peer_fingerprint_mismatch");
-    }
-    if let (Ok((200, _)), Some(p)) = (&result, &peer) {
-        let address = addr.to_string();
-        if address != p.address && !plaintext {
-            trust.save_peer(&Peer {
-                address,
-                ..p.clone()
-            })?;
-        }
-        trust.touch_peer(&p.fingerprint, crate::store::now_ms())?;
-    }
-    Ok(result)
+    Ok(Ok((fetched.status, fetched.body)))
 }
