@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -90,11 +90,24 @@ pub fn bind(addr: &str, tls: bool) -> Result<TcpListener> {
 /// own thread; beyond [`MAX_CONNECTIONS`] concurrent ones the server answers
 /// `503 server_busy` and closes.
 pub fn serve(listener: &TcpListener, state: Arc<ServerState>) -> Result<()> {
+    serve_until(listener, state, &AtomicBool::new(false))
+}
+
+/// [`serve`] until `stop` is set; the setter then wakes the accept loop by
+/// connecting once (see `share::Sharing::stop`).
+pub fn serve_until(
+    listener: &TcpListener,
+    state: Arc<ServerState>,
+    stop: &AtomicBool,
+) -> Result<()> {
     if !state.tls() && !listener.local_addr()?.ip().is_loopback() {
         anyhow::bail!("peer: plaintext is only allowed on loopback");
     }
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
         let Ok(stream) = stream else { continue };
         if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
             active.fetch_sub(1, Ordering::SeqCst);

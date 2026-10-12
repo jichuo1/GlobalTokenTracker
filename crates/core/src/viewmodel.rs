@@ -552,9 +552,35 @@ impl OverviewVm {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> bool {
-        let Some(p) = cube.overview_parts(range, apps, models) else {
+        self.apply_cube_for(cube, range, apps, models, None)
+    }
+
+    /// [`OverviewVm::apply_cube`] under a device filter: also re-folds each
+    /// device's span totals and selection (names and sync status stay as the
+    /// last full load set them).
+    pub fn apply_cube_for(
+        &mut self,
+        cube: &crate::cube::Cube,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+        devices: Option<&[String]>,
+    ) -> bool {
+        let Some(p) = cube.overview_parts_for(range, apps, models, devices) else {
             return false;
         };
+        let Some(spans) = cube.device_totals(range, apps, models) else {
+            return false;
+        };
+        for d in &mut self.devices {
+            d.span = spans
+                .iter()
+                .find(|t| t.device_id == d.device_id)
+                .map(|t| t.span.clone())
+                .unwrap_or_default();
+            d.selected = devices.is_none_or(|f| f.contains(&d.device_id));
+        }
+        self.device_filter = devices.map(<[String]>::to_vec);
         self.range = range;
         self.today = p.today;
         self.span = p.span;
@@ -564,7 +590,7 @@ impl OverviewVm {
         self.daily = p.daily;
         self.apps = p.apps;
         self.models = p.models;
-        self.heat = cube.heat(apps, models);
+        self.heat = cube.heat_for(apps, models, devices);
         true
     }
 }

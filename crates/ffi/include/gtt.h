@@ -26,6 +26,12 @@ char *gtt_load(const char *req_json);
  *   {"op":"set_enabled","device":"…","enabled":bool} → {device_id, enabled}
  *   {"op":"pair","addr":"host:port","code":"123456","name"?} → {device}
  *   {"op":"discover","timeout_secs"?:n}              → {devices, invalid_answers}
+ * Sharing this device (TLS on 0.0.0.0:4319 + mDNS; one share per process):
+ *   {"op":"share_start","name"?}  {"op":"share_stop"}  {"op":"share_status"}
+ *   {"op":"share_new_code"}       {"op":"revoke","viewer":"id|name"}
+ *   → {sharing, status?:{device_id, device_name, fingerprint, bind, port,
+ *       advertised, code?, code_expires_in?}, viewers:[{id,name,created_at,
+ *       last_seen_at,revoked_at}]}
  * Protocol failures: {"ok":false,"error":"<code>","code":"<code>"} with the
  * fixed codes of docs/PEER_API.md (pairing_failed, peer_fingerprint_mismatch …). */
 char *gtt_peer(const char *req_json);

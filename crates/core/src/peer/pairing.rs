@@ -93,6 +93,14 @@ impl Pairing {
         Ok(code)
     }
 
+    /// The code on offer and how long it stays valid (`None` once used,
+    /// burned or expired) — for a shell that shows it.
+    pub fn current(&self, now: Instant) -> Option<(String, Duration)> {
+        let (code, expires) = self.code.as_ref()?;
+        let left = expires.saturating_duration_since(now);
+        (!left.is_zero()).then(|| (code.clone(), left))
+    }
+
     /// Still backing off after a failure.
     pub fn locked(&self, now: Instant) -> bool {
         self.locked_until.is_some_and(|t| now < t)

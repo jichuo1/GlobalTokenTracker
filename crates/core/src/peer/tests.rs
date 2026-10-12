@@ -2069,3 +2069,44 @@ fn one_failing_device_does_not_block_the_others() {
             .is_none()
     );
 }
+
+// ── in-process sharing (shells) ───────────────────────────────────────────
+
+#[test]
+fn an_in_process_share_pairs_serves_revokes_and_stops() {
+    let server_f = fixture();
+    fill(&server_f.store);
+    let viewer = fixture();
+    let share =
+        super::share::Sharing::start(&server_f.path, "127.0.0.1:0", Some("Shared PC"), true)
+            .unwrap();
+    let st = share.status();
+    assert_eq!(st.device_name, "Shared PC");
+    assert!(!st.advertised, "loopback shares are not advertised");
+    assert_eq!(st.fingerprint.len(), 64);
+    let code = st.code.clone().unwrap();
+    assert!(st.code_expires_in.is_some_and(|s| s > 100));
+    let addr = share.local_addr().to_string();
+    let peer = pairing::pair(&viewer.store, &addr, &code, "Laptop")
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.fingerprint, st.fingerprint);
+    // The code is single use and gone from the status.
+    assert!(share.status().code.is_none());
+    let fresh = share.new_code().unwrap();
+    assert_eq!(share.status().code.as_deref(), Some(fresh.as_str()));
+    let r = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
+    assert!(r.devices[0].ok, "{r:?}");
+    let viewers = share.viewers().unwrap();
+    assert_eq!(viewers.len(), 1);
+    assert!(share.revoke("Laptop").unwrap().is_some());
+    let r = sync_all_via(&viewer.store, &quick(), &no_locate()).unwrap();
+    assert_eq!(r.devices[0].error_code.as_deref(), Some("auth_invalid"));
+    assert_eq!(super::share::viewers(&server_f.path).unwrap().len(), 1);
+    share.stop();
+    assert!(
+        std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500))
+            .is_err(),
+        "the port is closed after stop"
+    );
+}

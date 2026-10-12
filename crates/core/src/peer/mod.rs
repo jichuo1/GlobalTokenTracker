@@ -23,6 +23,7 @@ pub mod merged;
 mod net;
 pub mod pairing;
 pub mod server;
+pub mod share;
 pub mod sync;
 pub mod trust;
 

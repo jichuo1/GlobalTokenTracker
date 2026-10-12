@@ -406,6 +406,32 @@ enum PeerOp {
     Discover {
         timeout_secs: Option<u64>,
     },
+    /// Share this device on the LAN (TLS, mDNS) — `name` saved if given.
+    ShareStart {
+        name: Option<String>,
+    },
+    ShareStop,
+    /// `{sharing, status?, viewers}`.
+    ShareStatus,
+    /// Replace the pairing code on offer.
+    ShareNewCode,
+    /// Revoke a paired viewer by id or name.
+    Revoke {
+        viewer: String,
+    },
+}
+
+/// The running share, if any (one per process).
+static SHARING: Mutex<Option<peer::share::Sharing>> = Mutex::new(None);
+
+fn share_status() -> Result<Value, Coded> {
+    let viewers = peer::share::viewers(&default_db_path()).map_err(err)?;
+    let guard = SHARING.lock().map_err(|e| e.to_string())?;
+    Ok(json!({
+        "sharing": guard.is_some(),
+        "status": guard.as_ref().map(peer::share::Sharing::status),
+        "viewers": viewers,
+    }))
 }
 
 /// A peer failure with a fixed code (`{"ok":false,"error":code,"code":code}`).
@@ -494,6 +520,46 @@ fn peer_op(op: PeerOp) -> Result<Value, Coded> {
                 coded(peer::pairing::pair(&store, &addr, code.trim(), &name).map_err(err)?)?;
             Ok(json!({ "device": device }))
         }
+        PeerOp::ShareStart { name } => {
+            let mut guard = SHARING.lock().map_err(|e| e.to_string())?;
+            if guard.is_none() {
+                *guard = Some(
+                    peer::share::Sharing::start(
+                        &default_db_path(),
+                        peer::share::LAN_BIND,
+                        name.as_deref(),
+                        true,
+                    )
+                    .map_err(err)?,
+                );
+            }
+            drop(guard);
+            share_status()
+        }
+        PeerOp::ShareStop => {
+            let running = SHARING.lock().map_err(|e| e.to_string())?.take();
+            if let Some(s) = running {
+                s.stop();
+            }
+            share_status()
+        }
+        PeerOp::ShareStatus => share_status(),
+        PeerOp::ShareNewCode => {
+            {
+                let guard = SHARING.lock().map_err(|e| e.to_string())?;
+                let s = coded(guard.as_ref().ok_or("pairing_unavailable"))?;
+                s.new_code().map_err(err)?;
+            }
+            share_status()
+        }
+        PeerOp::Revoke { viewer } => match peer::share::revoke(&default_db_path(), &viewer) {
+            Ok(Some(_)) => share_status(),
+            Ok(None) => Err(Coded("code:unknown_viewer".into())),
+            Err(e) if e.is::<peer::trust::Ambiguous>() => {
+                Err(Coded("code:ambiguous_viewer".into()))
+            }
+            Err(e) => Err(err(e)),
+        },
         PeerOp::Discover { timeout_secs } => {
             let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(3).clamp(1, 30));
             let (devices, invalid) = peer::discovery::discover(&store, timeout).map_err(err)?;
