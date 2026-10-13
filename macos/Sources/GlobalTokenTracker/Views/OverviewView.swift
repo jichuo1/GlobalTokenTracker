@@ -383,7 +383,7 @@ private struct ShareGrid: View, Equatable {
         let byToolTokens = vm.byApp.map { (Fmt.app($0.app), Double($0.tokens)) }
         let byModelTokens = vm.byModel.map { ($0.name, Double($0.tokens)) }
         Card(title: "\(Text(vm.range.title)) · Share") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 16)], spacing: 16) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 24, alignment: .top)], alignment: .leading, spacing: 20) {
                 Donut(title: "By Tool · Cost", items: byToolCost, format: Fmt.usd)
                 Donut(title: "By Model · Cost", items: byModelCost, format: Fmt.usd)
                 Donut(title: "By Tool · Tokens", items: byToolTokens) { Fmt.tokensCompact(UInt64(max(0, $0))) }
@@ -447,6 +447,7 @@ private struct Donut: View {
                         .foregroundStyle(by: .value("Name", s.name))
                         .opacity(selected == nil || selected?.name == s.name ? 1 : 0.4)
                 }
+                .chartForegroundStyleScale(domain: slices.map(\.name), range: slices.indices.map(Self.color))
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $selectedAngle)
                 .chartFont()
@@ -462,20 +463,33 @@ private struct Donut: View {
                     .frame(maxWidth: 90)
                 }
                 .frame(height: 150)
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(slices) { s in
-                        HStack {
-                            Text(s.name).lineLimit(1)
-                            Spacer(minLength: 8)
+                // Legend: swatch, name, the slice's own figure and its share.
+                Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 4) {
+                    ForEach(Array(slices.enumerated()), id: \.element.id) { i, s in
+                        GridRow {
+                            RoundedRectangle(cornerRadius: 2).fill(Self.color(i)).frame(width: 8, height: 8)
+                            Text(s.name).lineLimit(1).truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .help(s.name)
+                            Text(format(s.costUsd))
+                                .monospacedDigit().gridColumnAlignment(.trailing)
+                                .contentTransition(.numericText(value: s.costUsd))
                             Text(Fmt.percent(s.costUsd / total * 100))
-                                .foregroundStyle(.secondary).monospacedDigit()
+                                .foregroundStyle(.secondary).monospacedDigit().gridColumnAlignment(.trailing)
                                 .contentTransition(.numericText(value: s.costUsd / total))
                         }
                         .scaledFont(.caption)
+                        .opacity(selected == nil || selected?.name == s.name ? 1 : 0.45)
                     }
                 }
             }
         }
+    }
+
+    /// Same palette for wedges and legend swatches, by rank.
+    static func color(_ i: Int) -> Color {
+        let palette: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .gray]
+        return palette[min(i, palette.count - 1)]
     }
 }
 
