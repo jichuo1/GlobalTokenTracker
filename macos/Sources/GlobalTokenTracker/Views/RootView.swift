@@ -342,33 +342,71 @@ struct PriceSearchField: View {
 }
 
 /// Sidebar footer: last scan time / error, Finder-style secondary text.
+/// Scan status under the sidebar. Both lines always exist and only their
+/// text changes, so a new scan, the ticking "updated … ago" and the scan
+/// time roll like the rest of the figures instead of views swapping.
 struct SidebarStatus: View {
     @Environment(AppModel.self) private var model
 
+    private static let relative: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.dateTimeStyle = .named
+        f.unitsStyle = .full
+        return f
+    }()
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if let err = model.lastError {
-                Label(err, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-            } else if model.isScanning {
-                Label("Scanning…", systemImage: "arrow.triangle.2.circlepath")
-            } else if let at = model.lastScanAt {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let s = status(now: ctx.date)
+            VStack(alignment: .leading, spacing: 2) {
                 Label {
-                    Text("Updated \(at, format: .relative(presentation: .named))")
+                    Text(verbatim: s.line1)
+                        .lineLimit(2)
+                        .contentTransition(Motion.reduced ? .opacity : .numericText())
                 } icon: {
-                    Image(systemName: "checkmark.circle")
+                    Image(systemName: s.symbol)
+                        .contentTransition(.symbolEffect(.replace))
+                        .symbolEffect(.rotate, isActive: model.isScanning)
                 }
-                if let ms = model.lastScanMs {
-                    Text("Scan took \(ms) ms").padding(.leading, 22)
-                }
+                .foregroundStyle(s.warning ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                Text(verbatim: s.line2.isEmpty ? " " : s.line2)
+                    .padding(.leading, 22)
+                    .contentTransition(Motion.reduced ? .opacity : .numericText())
+                    .opacity(s.line2.isEmpty ? 0 : 1)
             }
+            .animation(Motion.resolved(Motion.select), value: s)
         }
         .scaledFont(.caption)
         .foregroundStyle(.secondary)
+        .monospacedDigit()
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private struct Status: Equatable {
+        var symbol: String
+        var line1: String
+        var line2: String
+        var warning = false
+    }
+
+    private func status(now: Date) -> Status {
+        // The last scan time stays while a new scan runs: no line pops.
+        let took = model.lastScanMs.map { String(localized: "Scan took \($0) ms") } ?? ""
+        if let err = model.lastError {
+            return Status(symbol: "exclamationmark.triangle.fill", line1: err, line2: took, warning: true)
+        }
+        if model.isScanning {
+            return Status(symbol: "arrow.triangle.2.circlepath", line1: String(localized: "Scanning…"), line2: took)
+        }
+        guard let at = model.lastScanAt else {
+            return Status(symbol: "circle.dashed", line1: String(localized: "Scanning…"), line2: "")
+        }
+        // Whole seconds, never in the future (clock skew would read "in 1 s").
+        let ago = min(0, at.timeIntervalSince(now).rounded(.down))
+        let when = Self.relative.localizedString(fromTimeInterval: ago)
+        return Status(symbol: "checkmark.circle", line1: String(localized: "Updated \(when)"), line2: took)
     }
 }
 
