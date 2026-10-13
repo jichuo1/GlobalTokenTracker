@@ -140,6 +140,17 @@ enum ScrollerStyle {
             ) { _ in
                 MainActor.assumeIsolated { apply() }
             }
+            // Text size changed in Settings: re-measure the tables' rows.
+            NotificationCenter.default.addObserver(
+                forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    let size = UserDefaults.standard.double(forKey: Prefs.textSizeKey)
+                    guard size != lastTextSize else { return }
+                    lastTextSize = size
+                    apply()
+                }
+            }
         }
         for window in NSApp.windows {
             guard let root = window.contentView else { continue }
@@ -173,6 +184,56 @@ enum ScrollerStyle {
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
     }
 
+    /// Text size each table's fixed row height was measured at.
+    private static var measuredAt: [ObjectIdentifier: Double] = [:]
+    private static var retryArmed = false
+    private static var retries = 0
+    private static var lastTextSize: Double?
+
+    /// SwiftUI's Table runs its NSTableView with automatic row heights:
+    /// every row scrolling into view had AppKit run Auto Layout over each
+    /// cell's hosting view to measure it — half the main-thread time of a
+    /// table scroll (profiled), and the frames it dropped. Every row here is
+    /// one line, so the height never varies: measure one row once, at the
+    /// current text size, and use it as a fixed height. A text size change
+    /// switches automatic heights back on for one measurement.
+    private static func fixRowHeight(_ table: NSTableView) {
+        let id = ObjectIdentifier(table)
+        let size = UserDefaults.standard.double(forKey: Prefs.textSizeKey)
+        if let at = measuredAt[id], at != size {
+            table.usesAutomaticRowHeights = true
+            measuredAt[id] = nil
+            retryLater()
+            return
+        }
+        guard table.usesAutomaticRowHeights else { return }
+        guard table.numberOfRows > 0 else {
+            retryLater() // rows arrive after the page settles
+            return
+        }
+        let height = table.rect(ofRow: 0).height - table.intercellSpacing.height
+        guard height > 4 else { return }
+        retries = 0
+        table.usesAutomaticRowHeights = false
+        table.rowHeight = height.rounded()
+        if MotionProbe.enabled {
+            FileHandle.standardError.write(Data("[rows] fixed \(table.rowHeight) pt for \(table.numberOfRows) rows\n".utf8))
+        }
+        measuredAt[id] = size
+    }
+
+    private static func retryLater() {
+        // A table may simply be empty (no sources yet): give up after a
+        // while; the next page turn calls apply() again anyway.
+        guard !retryArmed, retries < 10 else { return }
+        retries += 1
+        retryArmed = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            retryArmed = false
+            apply()
+        }
+    }
+
     private static func visit(_ view: NSView) {
         if let scroll = view as? NSScrollView {
             if scroll.scrollerStyle != .overlay { scroll.scrollerStyle = .overlay }
@@ -183,6 +244,7 @@ enum ScrollerStyle {
             if let table = scroll.documentView as? NSTableView {
                 scroll.hasHorizontalScroller = false
                 fit(table, into: scroll.contentView.bounds.width)
+                fixRowHeight(table)
             }
         }
         for sub in view.subviews { visit(sub) }

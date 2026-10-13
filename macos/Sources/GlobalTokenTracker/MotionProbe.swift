@@ -23,6 +23,8 @@ enum ProbeFlags {
     /// Pages become interactive when the spring is removed, not when it is
     /// logically complete (the old behaviour, for A/B).
     static let lateSettle = env["GTT_PROBE_LATE_SETTLE"] != nil
+    /// The resting page at exactly 0° (no 3D transform) — for A/B.
+    static let flatRest = env["GTT_PROBE_FLAT_REST"] != nil
 }
 
 @MainActor
@@ -54,6 +56,7 @@ final class MotionProbe: NSObject {
             link.add(to: .main, forMode: .common)
             self.link = link
             let scrollOnly = ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_ALL"] != nil
+                || ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_PAGES"] != nil
             let tour = Page.allCases + Page.allCases.reversed()
             let order = scrollOnly ? [] : tour + tour + [.overview]
             var prev = model.page
@@ -93,25 +96,47 @@ final class MotionProbe: NSObject {
             }
             // Scrolling: an animated scroll down and back up on the Overview
             // (SwiftUI cards + charts) and the Details table (AppKit).
-            let scrollPages = ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_ALL"] != nil
-                ? Page.allCases : [Page.overview, .detail]
+            let scrollPages = ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_PAGES"]
+                .map { $0.split(separator: ",").compactMap { Page(rawValue: String($0)) } }
+                ?? (ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_ALL"] != nil
+                    ? Page.allCases : [Page.overview, .detail])
             for page in scrollPages {
                 model.page = page
                 try? await Task.sleep(for: .milliseconds(1500))
                 guard let scroll = largestVisibleScrollView(in: view) else { continue }
+                let wheel = ProcessInfo.processInfo.environment["GTT_PROBE_WHEEL"] != nil
                 for (dir, label) in [(1.0, "down"), (-1.0, "up")] {
                     let clip = scroll.contentView
                     let maxY = max(0, (scroll.documentView?.frame.height ?? 0) - clip.bounds.height)
-                    let target = dir > 0 ? min(maxY, clip.bounds.origin.y + 2400) : 0
+                    let distance = Double(ProcessInfo.processInfo.environment["GTT_PROBE_SCROLL_PX"] ?? "") ?? 2400
+                    let target = dir > 0 ? min(maxY, clip.bounds.origin.y + distance) : 0
                     gaps.removeAll()
                     last = 0
                     recording = true
-                    NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 1.0
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                        clip.animator().setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: target))
+                    if wheel, let window = scroll.window {
+                        // Real scroll-wheel events (pixel deltas, one per
+                        // frame) through the window, like a fast trackpad
+                        // swipe: AppKit's responsive scrolling path.
+                        let point = scroll.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), to: nil)
+                        let screen = window.convertPoint(toScreen: point)
+                        let flipped = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.height ?? 0) - screen.y)
+                        for _ in 0..<66 {
+                            if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                                wheel1: Int32(dir > 0 ? -30 : 30), wheel2: 0, wheel3: 0) {
+                                cg.location = flipped
+                                if let ev = NSEvent(cgEvent: cg) { window.sendEvent(ev) }
+                            }
+                            try? await Task.sleep(for: .milliseconds(16))
+                        }
+                        try? await Task.sleep(for: .milliseconds(100))
+                    } else {
+                        NSAnimationContext.runAnimationGroup { ctx in
+                            ctx.duration = 1.0
+                            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                            clip.animator().setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: target))
+                        }
+                        try? await Task.sleep(for: .milliseconds(1150))
                     }
-                    try? await Task.sleep(for: .milliseconds(1150))
                     recording = false
                     scroll.reflectScrolledClipView(clip)
                     report("scroll \(page.rawValue) \(label)")
@@ -236,7 +261,7 @@ enum ToolbarProbe {
                 try? await Task.sleep(for: .seconds(2))
                 if let y = env["GTT_TOOLBAR_SCROLL"].flatMap(Double.init), let root = window.contentView {
                     // Every page stays mounted: scroll each page's scroller.
-                    func visit(_ v: NSView) {
+                    @MainActor func visit(_ v: NSView) {
                         if let s = v as? NSScrollView, s.frame.width > 300,
                            (s.documentView?.frame.height ?? 0) > s.contentView.bounds.height {
                             s.contentView.setBoundsOrigin(NSPoint(x: 0, y: y))

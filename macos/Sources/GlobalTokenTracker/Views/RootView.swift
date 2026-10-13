@@ -163,7 +163,7 @@ struct PageDeck: View {
     /// At exactly 0° SwiftUI drops the 3D transform layer; re-inserting it
     /// when a turn starts re-hosted the page (tables, charts) — 100–145 ms
     /// stalls. Visually identical to 0.
-    static let restAngle = 0.001
+    static let restAngle = ProbeFlags.flatRest ? 0 : 0.001
 
     private func turn(to new: Page) {
         guard new != target else { return }
