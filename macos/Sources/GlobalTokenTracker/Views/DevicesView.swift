@@ -58,7 +58,9 @@ struct DevicesView: View {
                 Text(model.peers.map { String($0.device.deviceId.prefix(8)) } ?? "—")
                     .monospaced().textSelection(.enabled)
             }
-            Toggle(isOn: Binding(get: { model.isSharing }, set: { model.setSharing($0) })) {
+            // The switch is the wish; while a start is pending or retrying
+            // it stays on and the line below says why it isn't running yet.
+            Toggle(isOn: Binding(get: { model.wantsSharing }, set: { model.setSharing($0) })) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Share This Mac")
                     Text("Paired devices on this network can read this Mac's hourly usage totals.")
@@ -85,7 +87,15 @@ struct DevicesView: View {
                 }
                 .transition(.opacity)
             }
-            if let err = model.shareError {
+            if model.wantsSharing && !model.isSharing {
+                if let err = model.shareError {
+                    Label(err, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange).scaledFont(.callout)
+                } else {
+                    Label("Starting sharing…", systemImage: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.secondary).scaledFont(.callout)
+                }
+            } else if let err = model.shareError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange).scaledFont(.callout)
             }

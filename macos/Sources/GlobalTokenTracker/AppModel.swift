@@ -13,6 +13,7 @@
 // - published values are assigned only when they differ (Equatable VMs).
 import AppKit
 import Foundation
+import Network
 import Observation
 import SwiftUI
 
@@ -308,6 +309,7 @@ final class AppModel {
         guard !started else { return }
         started = true
         watchScrolling()
+        watchWakeAndNetwork()
         Task {
             info = try? await Core.info()
             externalInterface = try? await Core.externalInterface(set: nil)
@@ -318,7 +320,7 @@ final class AppModel {
             armUpdates()
             await loadPeers()
             await nameThisMac()
-            if defaults.bool(forKey: "lanSharing") {
+            if wantsSharing {
                 setSharing(true)
             } else {
                 await refreshShare()
@@ -393,6 +395,31 @@ final class AppModel {
             return
         }
         Task { await runLoad(req) }
+    }
+
+    // MARK: Sleep / network
+
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+
+    /// After sleep or a network change, re-check sharing (and nudge a peer
+    /// sync): a share that couldn't start comes back without waiting for
+    /// the next 15-second knock.
+    private func watchWakeAndNetwork() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.ensureSharing()
+                self?.syncPeers(ifDue: true)
+            }
+        }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor in self?.ensureSharing() }
+        }
+        monitor.start(queue: DispatchQueue(label: "gtt.network"))
+        pathMonitor = monitor
     }
 
     // MARK: Scrolling
@@ -702,6 +729,7 @@ final class AppModel {
         peerSyncTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.syncPeers(ifDue: true)
+                self?.ensureSharing()
                 if self?.isSharing == true { await self?.refreshShare() }
                 let hidden = self.map { !$0.windowVisible } ?? false
                 try? await Task.sleep(for: .seconds(hidden ? 120 : 15), tolerance: .seconds(hidden ? 30 : 3))
@@ -722,18 +750,37 @@ final class AppModel {
     }
 
     /// Turn LAN sharing on or off; remembered across launches.
+    /// Sharing the user asked for (remembered across launches). Only the
+    /// switch — or a mutual pairing — changes it; a failed start never does.
+    private(set) var wantsSharing = UserDefaults.standard.bool(forKey: "lanSharing") {
+        didSet { defaults.set(wantsSharing, forKey: "lanSharing") }
+    }
+
     func setSharing(_ on: Bool) {
         guard !isSwitchingShare else { return }
+        wantsSharing = on
+        startOrStopSharing(on)
+    }
+
+    /// Bring sharing back if it is wanted but not running — after a start
+    /// that failed (port 4319 briefly held by an old process during an
+    /// update or relaunch), after sleep, or after a network change. Quiet:
+    /// called from the background knock.
+    func ensureSharing() {
+        guard wantsSharing, !isSharing, !isSwitchingShare else { return }
+        startOrStopSharing(true)
+    }
+
+    private func startOrStopSharing(_ on: Bool) {
         isSwitchingShare = true
-        shareError = nil
-        defaults.set(on, forKey: "lanSharing")
         Task {
             defer { isSwitchingShare = false }
             do {
                 applyShare(try await on ? Core.shareStart() : Core.shareStop())
+                shareError = nil
             } catch {
+                // Keep the wish: the background knock retries every 15 s.
                 shareError = Self.peerMessage(error)
-                if on { defaults.set(false, forKey: "lanSharing") }
                 await refreshShare()
             }
         }
@@ -831,7 +878,7 @@ final class AppModel {
                 name: peers.map(\.device.name).flatMap { $0 == "This device" ? nil : $0 })
             // Mutual pairing started sharing so the other device can read
             // this Mac; keep it on across launches.
-            if r.sharingStarted { defaults.set(true, forKey: "lanSharing") }
+            if r.sharingStarted { wantsSharing = true }
         } catch {
             return Self.peerMessage(error)
         }
@@ -870,6 +917,9 @@ final class AppModel {
     /// core's fixed codes → words (docs/PEER_API.md).
     static func peerMessage(_ error: Error) -> String {
         guard case CoreError.engine(let code) = error else { return error.localizedDescription }
+        if code.contains("Address already in use") || code.contains("os error 48") {
+            return String(localized: "Port 4319 is in use — another copy of GlobalTokenTracker may be sharing on this Mac. Retrying…")
+        }
         return peerMessage(code: code)
     }
 

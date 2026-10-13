@@ -406,3 +406,5 @@
 "On the other device, turn on sharing. It shows a six-digit code that is valid for two minutes and works once. Pairing is mutual: afterwards both devices see each other's usage, and this Mac starts sharing too." = "在另一台设备上开启共享，它会显示一个 6 位配对码，2 分钟内有效且只能使用一次。配对是双向的：完成后两台设备都能看到彼此的用量，本机也会开始共享。";
 "By Device · Cost" = "按设备 · 费用";
 "By Device · Tokens" = "按设备 · Tokens";
+"Starting sharing…" = "正在开启共享…";
+"Port 4319 is in use — another copy of GlobalTokenTracker may be sharing on this Mac. Retrying…" = "端口 4319 被占用——本机可能有另一个 GlobalTokenTracker 正在共享。正在重试…";
