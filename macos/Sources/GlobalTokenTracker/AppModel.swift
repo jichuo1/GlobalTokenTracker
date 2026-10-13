@@ -749,13 +749,13 @@ final class AppModel {
         if (try? await Core.setDeviceName(name)) != nil { await loadPeers() }
     }
 
-    /// Turn LAN sharing on or off; remembered across launches.
     /// Sharing the user asked for (remembered across launches). Only the
     /// switch — or a mutual pairing — changes it; a failed start never does.
     private(set) var wantsSharing = UserDefaults.standard.bool(forKey: "lanSharing") {
         didSet { defaults.set(wantsSharing, forKey: "lanSharing") }
     }
 
+    /// Turn LAN sharing on or off; remembered across launches.
     func setSharing(_ on: Bool) {
         guard !isSwitchingShare else { return }
         wantsSharing = on
