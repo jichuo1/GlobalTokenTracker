@@ -2,6 +2,30 @@
 //! arrays — NOT append-only — so this uses the Sqlite-kind (adapter-managed
 //! watermark) path with a {len, mtime} freshness check.
 //!
+//! Two generations are read side by side:
+//!
+//! **SDK sessions (Cline 4.x VS Code extension, CLI 3.x, desktop)** — every
+//! surface writes `<sessions>/<id>/<id>.messages.json` (messages contract
+//! v1: `{version:1, sessionId, messages:[…]}`, a bare array in early
+//! builds) next to the manifest `<id>.json`. `<sessions>` is
+//! `$CLINE_SESSION_DATA_DIR` > `$CLINE_DATA_DIR/sessions` >
+//! `$CLINE_DIR/data/sessions` > `~/.cline/data/sessions`
+//! (`@cline/shared/storage` `resolveSessionDataDir`). The terminal assistant
+//! message of each completed turn carries `metrics {inputTokens,
+//! outputTokens, cacheReadTokens, cacheWriteTokens, cost}`, `modelInfo {id,
+//! provider}`, `ts` (ms) and a stable `id`; a retried turn keeps the earlier
+//! attempt's metrics (each counted once — they were both billed). The SDK
+//! normalizes `inputTokens` to the FULL prompt, cache reads and writes
+//! included (`services/usage.ts`; its own cost formula subtracts them), so
+//! the uncached input is `inputTokens − cacheRead − cacheWrite`. `cost` is 0
+//! for BYOK and included-plan usage (cline/cline#14474) — treated as
+//! unknown and priced from the price book. Subagents are sessions of their
+//! own and counted from their own files. A session whose messages carry no
+//! metrics falls back to the manifest's `metadata.usage` totals.
+//!
+//! **Legacy tasks (Cline ≤ 3.x)** — described below; still read for history
+//! recorded before the SDK.
+//!
 //! Hosts and roots (verified against cline source):
 //!   - CLI / standalone: `$CLINE_DATA_DIR` > `$CLINE_DIR/data` >
 //!     `~/.cline/data/tasks/<taskId>/ui_messages.json`
@@ -63,6 +87,35 @@ fn cli_data_root() -> PathBuf {
         return PathBuf::from(d).join("data");
     }
     crate::sync::home(".cline/data")
+}
+
+/// Where SDK sessions live (`resolveSessionDataDir`).
+fn sdk_sessions_root() -> PathBuf {
+    if let Ok(d) = std::env::var("CLINE_SESSION_DATA_DIR")
+        && !d.trim().is_empty()
+    {
+        return PathBuf::from(d.trim());
+    }
+    cli_data_root().join("sessions")
+}
+
+/// `<sessions>/<id>/<id>.messages.json` for every SDK session.
+fn sdk_message_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for e in rd.flatten() {
+            let dir = e.path();
+            let Some(id) = dir.file_name().map(|s| s.to_string_lossy().to_string()) else {
+                continue;
+            };
+            let file = dir.join(format!("{id}.messages.json"));
+            if file.is_file() {
+                out.push(file);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// All task dirs across hosts: CLI data dir + every editor's globalStorage.
@@ -181,6 +234,11 @@ impl SourceAdapter for Cline {
 
     fn watch_roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![cli_data_root()];
+        // Usually inside the data dir; separate when relocated by env.
+        let sessions = sdk_sessions_root();
+        if !sessions.starts_with(cli_data_root()) {
+            roots.push(sessions);
+        }
         if let Some(cfg) = dirs::config_dir()
             && let Ok(rd) = std::fs::read_dir(&cfg)
         {
@@ -197,17 +255,27 @@ impl SourceAdapter for Cline {
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        Ok(task_dirs()
+        let legacy = task_dirs().into_iter().map(|(dir, _)| SourceItem {
+            key: dir.to_string_lossy().to_string(),
+            path: dir,
+            kind: SourceKind::Sqlite,
+        });
+        let sessions = sdk_message_files(&sdk_sessions_root())
             .into_iter()
-            .map(|(dir, _)| SourceItem {
-                key: dir.to_string_lossy().to_string(),
-                path: dir,
+            .map(|file| SourceItem {
+                key: file.to_string_lossy().to_string(),
+                path: file,
                 kind: SourceKind::Sqlite,
-            })
-            .collect())
+            });
+        Ok(legacy.chain(sessions).collect())
     }
 
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        // SDK sessions are discovered as their messages file; legacy tasks
+        // as their task directory.
+        if item.path.is_file() {
+            return scan_sdk_session(item, store);
+        }
         let ui = item.path.join("ui_messages.json");
         let meta = std::fs::metadata(&ui)?;
         let mut state: ClineState = store
@@ -376,6 +444,150 @@ impl SourceAdapter for Cline {
     }
 }
 
+/// One SDK session file (see the module docs).
+fn scan_sdk_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+    let file = &item.path;
+    let meta = std::fs::metadata(file)?;
+    let mut state: ClineState = store
+        .load_cursor(&item.key)?
+        .state
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut out = ScanOutcome::default();
+    if !state.cold && state.len == meta.len() && state.mtime_ms == mtime_ms {
+        return Ok(out); // unchanged since last scan
+    }
+    let parsed: Option<Value> = std::fs::read_to_string(file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let Some(parsed) = parsed else {
+        // Mid-write: try again on the next change.
+        out.notes
+            .push(format!("{}: unparseable session messages", file.display()));
+        return Ok(out);
+    };
+    let file_name = file
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let session_id = parsed["sessionId"]
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| file_name.trim_end_matches(".messages.json").to_string());
+    let messages: Vec<Value> = match &parsed {
+        Value::Array(a) => a.clone(),
+        v => v["messages"].as_array().cloned().unwrap_or_default(),
+    };
+    let manifest: Value = file
+        .parent()
+        .map(|d| d.join(format!("{session_id}.json")))
+        .and_then(|m| std::fs::read_to_string(m).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let project = manifest["cwd"]
+        .as_str()
+        .or_else(|| manifest["workspace_root"].as_str())
+        .map(String::from);
+    let event = |key: String,
+                 ts: Option<i64>,
+                 usage: &Value,
+                 model: Option<String>,
+                 provider: Option<String>,
+                 raw: String| {
+        let cache_read = num(&usage["cacheReadTokens"]);
+        let cache_write = num(&usage["cacheWriteTokens"]);
+        // The SDK's input is the full prompt; GTT stores the uncached part.
+        let input = num(&usage["inputTokens"]).saturating_sub(cache_read + cache_write);
+        let cost = fnum(&usage["cost"])
+            .or_else(|| fnum(&usage["totalCost"]))
+            .filter(|c| *c > 0.0);
+        UsageEvent {
+            dedup_key: key,
+            app: apps::CLINE.into(),
+            session_id: Some(session_id.clone()),
+            project: project.clone(),
+            provider_id: provider,
+            model,
+            ts_start: ts,
+            input_tokens: input,
+            output_tokens: num(&usage["outputTokens"]),
+            reasoning_tokens: num(&usage["reasoningTokens"]) + num(&usage["thoughtsTokenCount"]),
+            cache_read_tokens: cache_read,
+            cache_write_5m_tokens: cache_write,
+            cost_usd: cost,
+            cost_source: cost.map(|_| CostSource::ProviderReported),
+            provenance: Provenance::LocalJsonl,
+            raw_ref: Some(raw),
+            ..Default::default()
+        }
+    };
+    for (i, m) in messages.iter().enumerate() {
+        if m["role"].as_str() != Some("assistant") {
+            continue;
+        }
+        let metrics = &m["metrics"];
+        if !metrics.is_object() {
+            continue;
+        }
+        let tokens = num(&metrics["inputTokens"])
+            + num(&metrics["outputTokens"])
+            + num(&metrics["cacheReadTokens"])
+            + num(&metrics["cacheWriteTokens"]);
+        if tokens == 0 && !fnum(&metrics["cost"]).is_some_and(|c| c > 0.0) {
+            continue;
+        }
+        let id = m["id"]
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| format!("#{i}"));
+        let ts = epoch_ms(&m["ts"]);
+        out.events.push(event(
+            format!("cline-sdk:{session_id}:{id}"),
+            ts,
+            metrics,
+            m["modelInfo"]["id"].as_str().map(String::from),
+            m["modelInfo"]["provider"].as_str().map(String::from),
+            format!("{}#{id}", file.display()),
+        ));
+    }
+    // No per-turn metrics (an older SDK build, a cloud session): the
+    // manifest's session totals, at the session's end.
+    if out.events.is_empty() {
+        let usage = &manifest["metadata"]["usage"];
+        let total = num(&usage["inputTokens"]) + num(&usage["outputTokens"]);
+        if total > 0 {
+            let ts = epoch_ms(&manifest["ended_at"]).or_else(|| epoch_ms(&manifest["started_at"]));
+            out.events.push(event(
+                format!("cline-sdk:{session_id}:session"),
+                ts,
+                usage,
+                manifest["model"].as_str().map(String::from),
+                manifest["provider"].as_str().map(String::from),
+                format!("{}#session", file.display()),
+            ));
+        }
+    }
+    state.cold = false;
+    state.len = meta.len();
+    state.mtime_ms = mtime_ms;
+    store.save_cursor(
+        apps::CLINE,
+        &item.key,
+        file,
+        state.len,
+        state.mtime_ms,
+        Some(&serde_json::to_string(&state)?),
+    )?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +597,97 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// `<root>/<id>/<id>.messages.json` (+ manifest) in a temp sessions dir.
+    fn sdk_fixture(
+        tag: &str,
+        id: &str,
+        messages: &str,
+        manifest: Option<&str>,
+    ) -> (TmpDir, PathBuf) {
+        let root = std::env::temp_dir().join(format!("gtt-cline-sdk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{id}.messages.json"));
+        std::fs::write(&file, messages).unwrap();
+        if let Some(m) = manifest {
+            std::fs::write(dir.join(format!("{id}.json")), m).unwrap();
+        }
+        (TmpDir(root), file)
+    }
+
+    fn scan_file(file: &Path, store: &Store) -> ScanOutcome {
+        let item = SourceItem {
+            key: file.to_string_lossy().to_string(),
+            path: file.to_path_buf(),
+            kind: SourceKind::Sqlite,
+        };
+        Cline.scan_sqlite(&item, store).unwrap()
+    }
+
+    #[test]
+    fn sdk_sessions_count_each_completed_turn_with_uncached_input() {
+        // Messages contract v1: metrics on each turn's terminal assistant
+        // message; a retried turn keeps the failed attempt's metrics.
+        let messages = r#"{"version":1,"sessionId":"sess_1","agent":"lead","messages":[
+          {"id":"u1","role":"user","content":"hi"},
+          {"id":"a0","role":"assistant","content":"thinking","ts":1779256800000},
+          {"id":"a1","role":"assistant","content":"done","ts":1779256801000,
+           "modelInfo":{"id":"claude-sonnet-4.6","provider":"anthropic"},
+           "metrics":{"inputTokens":12000,"outputTokens":800,"cacheReadTokens":9000,"cacheWriteTokens":1000,"cost":0.05}},
+          {"id":"a2","role":"assistant","content":"retry","ts":1779256802000,
+           "modelInfo":{"id":"gpt-6-luna","provider":"openai"},
+           "metrics":{"inputTokens":500,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":0,"cost":0}}
+        ]}"#;
+        let manifest = r#"{"version":1,"session_id":"sess_1","cwd":"/work/app","model":"claude-sonnet-4.6","provider":"anthropic"}"#;
+        let (_tmp, file) = sdk_fixture("turns", "sess_1", messages, Some(manifest));
+        let store = Store::open_memory().unwrap();
+        let out = scan_file(&file, &store);
+        assert_eq!(out.events.len(), 2, "one event per turn with metrics");
+        let a1 = &out.events[0];
+        assert_eq!(a1.dedup_key, "cline-sdk:sess_1:a1");
+        // inputTokens is the full prompt: 12000 − 9000 read − 1000 write.
+        assert_eq!(a1.input_tokens, 2000);
+        assert_eq!(a1.cache_read_tokens, 9000);
+        assert_eq!(a1.cache_write_5m_tokens, 1000);
+        assert_eq!(a1.output_tokens, 800);
+        assert_eq!(a1.cost_usd, Some(0.05));
+        assert_eq!(a1.model.as_deref(), Some("claude-sonnet-4.6"));
+        assert_eq!(a1.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(a1.project.as_deref(), Some("/work/app"));
+        assert_eq!(a1.ts_start, Some(1779256801000));
+        // A zero cost (BYOK / included usage) is unknown, not free.
+        let a2 = &out.events[1];
+        assert_eq!(a2.cost_usd, None);
+        assert_eq!(a2.model.as_deref(), Some("gpt-6-luna"));
+        // Unchanged file: nothing on the next scan.
+        assert!(scan_file(&file, &store).events.is_empty());
+    }
+
+    #[test]
+    fn sdk_sessions_fall_back_to_manifest_totals_and_accept_bare_arrays() {
+        let manifest = r#"{"version":1,"session_id":"sess_2","cwd":"/w","model":"m-1","provider":"p",
+          "started_at":"2026-10-01T08:00:00Z","ended_at":"2026-10-01T09:00:00Z",
+          "metadata":{"usage":{"inputTokens":3000,"outputTokens":200,"cacheReadTokens":1000,"cacheWriteTokens":0,"totalCost":0.02}}}"#;
+        let (_tmp, file) = sdk_fixture("fallback", "sess_2", "[]", Some(manifest));
+        let store = Store::open_memory().unwrap();
+        let out = scan_file(&file, &store);
+        assert_eq!(out.events.len(), 1);
+        let e = &out.events[0];
+        assert_eq!(e.dedup_key, "cline-sdk:sess_2:session");
+        assert_eq!(e.input_tokens, 2000);
+        assert_eq!(e.cost_usd, Some(0.02));
+        assert_eq!(e.model.as_deref(), Some("m-1"));
+        assert!(e.ts_start.is_some());
+
+        // An early-SDK bare array with metrics needs no manifest.
+        let bare = r#"[{"id":"x","role":"assistant","ts":1779256800000,"metrics":{"inputTokens":10,"outputTokens":5}}]"#;
+        let (_tmp2, file2) = sdk_fixture("bare", "sess_3", bare, None);
+        let out = scan_file(&file2, &store);
+        assert_eq!(out.events.len(), 1);
+        assert_eq!(out.events[0].session_id.as_deref(), Some("sess_3"));
     }
 
     fn task_fixture(tag: &str) -> (TmpDir, PathBuf, PathBuf) {

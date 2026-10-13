@@ -139,7 +139,7 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 | OpenCode / ZCode / Grok / WorkBuddy | 本地日志 | ✅ 精确 |
 | MiniMax Code / Kimi Code | 本地日志 | ✅ 精确 |
 | DeepSeek Harness（CLI / DSH Desktop） | 本地会话 `~/.dsh/sessions/…` | ✅ 精确 |
-| Cline | `ui_messages.json` + 编辑器 globalStorage | ✅ 精确（含工具自报成本） |
+| Cline | 4.x / CLI 3.x / 桌面版：`~/.cline/data/sessions/<id>/<id>.messages.json`；旧版任务：`ui_messages.json` + 编辑器 globalStorage | ✅ 精确（含工具自报成本；自带密钥记为 $0 的按价目表计价） |
 | Command Code | 本地 JSONL | ✅ 精确（含工具自报成本） |
 | Antigravity（应用 / IDE / `agy` CLI） | 本地会话库 `~/.gemini/antigravity*/…/*.db` | ✅ 精确（含思考 token；无缓存写数据） |
 | CodeBuddy IDE | `state.vscdb` / 会话库 | 🟡 会话级 + 模型倍率 |

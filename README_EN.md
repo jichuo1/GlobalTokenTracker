@@ -52,7 +52,7 @@ The Windows UI is native WinUI 3 (Rust + windows-reactor); the macOS app is nati
 | Devin CLI | Local `devin/cli/sessions.db` | ✅ exact (incl. TTFT) |
 | OpenCode / ZCode / Grok / WorkBuddy / MiniMax Code / Kimi Code | Local logs | ✅ exact |
 | DeepSeek Harness (CLI / DSH Desktop) | Local sessions `~/.dsh/sessions/…` | ✅ exact |
-| Cline | `ui_messages.json` + editor globalStorage | ✅ exact (self-reported cost) |
+| Cline | 4.x / CLI 3.x / desktop: `~/.cline/data/sessions/<id>/<id>.messages.json`; older tasks: `ui_messages.json` + editor globalStorage | ✅ exact (self-reported cost; a $0 BYOK cost is priced from the price book) |
 | Command Code | Local JSONL | ✅ exact (self-reported cost) |
 | Antigravity (app / IDE / `agy` CLI) | Local conversation databases `~/.gemini/antigravity*/…/*.db` | ✅ exact (incl. thinking tokens; no cache-write data) |
 | CodeBuddy IDE | `state.vscdb` / sessions | 🟡 session-level + model multipliers |
