@@ -133,6 +133,7 @@ enum Fmt {
         case "commandcode": "Command Code"
         case "gemini_antigravity": "Antigravity"
         case "dsh": "DeepSeek Harness"
+        case "freebuff": "Freebuff"
         default: id
         }
     }

@@ -471,6 +471,7 @@ pub fn app_display(app: &str) -> &str {
         "commandcode" => "Command Code",
         "gemini_antigravity" => "Antigravity",
         "dsh" => "DeepSeek Harness",
+        "freebuff" => "Freebuff",
         other => other,
     }
 }

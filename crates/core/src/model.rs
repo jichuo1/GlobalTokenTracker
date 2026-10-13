@@ -25,6 +25,7 @@ pub mod apps {
     pub const CLINE: &str = "cline";
     pub const COMMANDCODE: &str = "commandcode";
     pub const DSH: &str = "dsh";
+    pub const FREEBUFF: &str = "freebuff";
 }
 
 /// Where the raw record came from (spec §5 `provenance`).
