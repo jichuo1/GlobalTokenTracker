@@ -9,14 +9,71 @@
 //! lateness up to ~13 min on real data (a long request lands far behind the
 //! timestamp watermark and a `started_at > mark` filter drops it forever).
 //! `rowid` is monotone with insertion order → nothing is missed. One-time
-//! migration: `adapter_state = "rowid-v2"` resets the timestamp cursor so all
-//! rows rescan once (dedup keys unchanged → upsert is idempotent).
+//! migrations reset the cursor so all rows rescan once (dedup keys
+//! unchanged → upsert replaces in place): `rowid-v2` (timestamp → rowid
+//! watermark), `rowid-v3` (input semantics, below).
+//!
+//! Input semantics: `input_tokens` is what the provider reported. For the
+//! OpenAI-style providers ZCode is used with (DeepSeek, Zhipu, custom
+//! OpenAI-compatible endpoints) that is `prompt_tokens` — the FULL prompt,
+//! cache reads included — while an Anthropic-style endpoint reports the
+//! uncached part only. Stored as-is, a cached DeepSeek request (478,589
+//! input of which 478,208 cache reads) was billed entirely at the uncached
+//! rate. Each row is classified, most reliable evidence first:
+//!   1. `raw_usage_json`: `prompt_tokens` → includes cache; Anthropic's
+//!      `cache_read_input_tokens` / `cache_creation_input_tokens` without
+//!      `prompt_tokens` → excludes it;
+//!   2. `provider_total_tokens` = input + output (+ reasoning) while cache
+//!      tokens exist → includes; = input + output + cache → excludes;
+//!   3. otherwise input ≥ cache read + write → includes (an uncached part
+//!      can't be smaller than zero, and an Anthropic-style input is almost
+//!      never larger than the cached prefix it follows).
+//!
+//! Included cache is subtracted (`normalize::input_excludes_cache`).
 
 use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
+use crate::normalize::input_excludes_cache;
 use crate::store::Store;
 use anyhow::Result;
 use std::path::PathBuf;
+
+/// Cursor marker; a new value forces one full rescan (see module docs).
+const STATE: &str = "rowid-v3";
+
+/// Does this row's `input_tokens` include the cached tokens? (module docs)
+pub(crate) fn input_includes_cache(
+    input: u64,
+    output: u64,
+    reasoning: u64,
+    cache_read: u64,
+    cache_write: u64,
+    provider_total: Option<u64>,
+    raw_usage: Option<&str>,
+) -> bool {
+    let cache = cache_read + cache_write;
+    if cache == 0 {
+        return false; // nothing to subtract either way
+    }
+    if let Some(raw) = raw_usage.and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok()) {
+        let has = |k: &str| raw.get(k).is_some() || raw.pointer(&format!("/usage/{k}")).is_some();
+        if has("prompt_tokens") || has("promptTokens") {
+            return true;
+        }
+        if has("cache_read_input_tokens") || has("cache_creation_input_tokens") {
+            return false;
+        }
+    }
+    if let Some(total) = provider_total.filter(|t| *t > 0) {
+        if total == input + output || total == input + output + reasoning {
+            return true;
+        }
+        if total == input + output + cache || total == input + output + reasoning + cache {
+            return false;
+        }
+    }
+    input >= cache
+}
 
 /// Providers whose usage is already ingested by their own adapters (§6.4).
 const CROSS_PROVIDERS: &[&str] = &["anthropic", "openai", "google"];
@@ -55,18 +112,32 @@ impl SourceAdapter for ZCode {
         // Migration: pre-"rowid-v2" cursors held a `started_at` epoch-ms
         // watermark that missed late-inserted rows (inserts happen at request
         // completion). Reset once → full rescan; dedup keys make it idempotent.
-        let migrated = cur.state.as_deref() == Some("rowid-v2");
+        let migrated = cur.state.as_deref() == Some(STATE);
         let since_rowid = if migrated { cur.offset as i64 } else { 0 };
         let conn = super::opencode::open_ro(&item.path)?;
-        let mut st = conn.prepare(
+        // Older ZCode builds lack the provider total / raw usage columns.
+        let columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('model_usage')")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let col = |name: &str| {
+            if columns.iter().any(|c| c == name) {
+                name.to_string()
+            } else {
+                "NULL".to_string()
+            }
+        };
+        let mut st = conn.prepare(&format!(
             "SELECT rowid, logical_request_id, attempt_index, session_id, turn_id,
                     provider_id, model_id, status, started_at, completed_at,
                     duration_ms, time_to_first_token_ms,
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_creation_input_tokens, cache_read_input_tokens,
-                    error_type
+                    error_type, {}, {}
              FROM model_usage WHERE rowid > ?1 ORDER BY rowid",
-        )?;
+            col("provider_total_tokens"),
+            col("raw_usage_json"),
+        ))?;
         let rows = st.query_map(rusqlite::params![since_rowid], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -87,6 +158,8 @@ impl SourceAdapter for ZCode {
                 r.get::<_, Option<i64>>(15)?.unwrap_or(0) as u64,
                 r.get::<_, Option<i64>>(16)?.unwrap_or(0) as u64,
                 r.get::<_, Option<String>>(17)?,
+                r.get::<_, Option<i64>>(18)?,
+                r.get::<_, Option<String>>(19)?,
             ))
         })?;
 
@@ -115,6 +188,8 @@ impl SourceAdapter for ZCode {
                 tcw,
                 tcr,
                 err_ty,
+                provider_total,
+                raw_usage,
             ) = row?;
             if status.as_deref() == Some("running") {
                 out.skipped += 1;
@@ -136,6 +211,20 @@ impl SourceAdapter for ZCode {
                 continue;
             }
 
+            let includes = input_includes_cache(
+                tin,
+                tout,
+                treason,
+                tcr,
+                tcw,
+                provider_total.map(|t| t.max(0) as u64),
+                raw_usage.as_deref(),
+            );
+            let tin = if includes {
+                input_excludes_cache(tin, tcr, tcw)
+            } else {
+                tin
+            };
             out.events.push(UsageEvent {
                 dedup_key: format!("zcode:{lrid}:{attempt}"),
                 app: apps::ZCODE.into(),
@@ -170,7 +259,7 @@ impl SourceAdapter for ZCode {
                 &item.path,
                 next.max(0) as u64,
                 0,
-                Some("rowid-v2"),
+                Some(STATE),
             )?;
         }
         Ok(out)
@@ -188,6 +277,88 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn input_semantics_are_classified_per_row() {
+        // The reported case: DeepSeek prompt_tokens include the cache.
+        assert!(input_includes_cache(
+            478_589, 469, 0, 478_208, 0, None, None
+        ));
+        assert!(input_includes_cache(
+            478_589,
+            469,
+            0,
+            478_208,
+            0,
+            None,
+            Some(
+                r#"{"prompt_tokens":478589,"completion_tokens":469,"prompt_tokens_details":{"cached_tokens":478208}}"#
+            )
+        ));
+        // Provider total = input + output → inclusive; total that also
+        // counts the cache on top → exclusive.
+        assert!(input_includes_cache(
+            5_000,
+            100,
+            0,
+            4_000,
+            0,
+            Some(5_100),
+            None
+        ));
+        assert!(!input_includes_cache(
+            300,
+            100,
+            0,
+            4_000,
+            0,
+            Some(4_400),
+            None
+        ));
+        // Anthropic-style raw usage: input excludes the cache.
+        assert!(!input_includes_cache(
+            9_000,
+            50,
+            0,
+            2_000,
+            500,
+            None,
+            Some(
+                r#"{"input_tokens":9000,"output_tokens":50,"cache_read_input_tokens":2000,"cache_creation_input_tokens":500}"#
+            )
+        ));
+        // Small fresh input after a big cached prefix: exclusive.
+        assert!(!input_includes_cache(120, 30, 0, 50_000, 0, None, None));
+        // No cache: nothing to subtract.
+        assert!(!input_includes_cache(1_000, 10, 0, 0, 0, None, None));
+    }
+
+    #[test]
+    fn cached_openai_style_rows_bill_only_the_uncached_part() {
+        let (db, _dir) = fixture_db("semantics");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE model_usage ADD COLUMN provider_total_tokens INTEGER;
+             ALTER TABLE model_usage ADD COLUMN raw_usage_json TEXT;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO model_usage(id, logical_request_id, attempt_index, session_id,
+               provider_id, model_id, status, started_at, input_tokens, output_tokens,
+               cache_read_input_tokens, provider_total_tokens)
+             VALUES ('d', 'req-d', 0, 's', 'builtin:deepseek', 'deepseek-v4.1-flash',
+               'completed', 1000000, 478589, 469, 478208, 479058)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let store = Store::open_memory().unwrap();
+        let out = ZCode.scan_sqlite(&item_for(&db), &store).unwrap();
+        let e = &out.events[0];
+        assert_eq!(e.input_tokens, 381, "478,589 − 478,208 cached");
+        assert_eq!(e.cache_read_tokens, 478_208);
+        assert_eq!(e.output_tokens, 469);
     }
 
     fn fixture_db(tag: &str) -> (PathBuf, TmpDir) {
@@ -269,7 +440,7 @@ mod tests {
         let out = ZCode.scan_sqlite(&item, &store).unwrap();
         assert_eq!(out.events.len(), 1, "migration must rescan all rows");
         let cur = store.load_cursor(&item.key).unwrap();
-        assert_eq!(cur.state.as_deref(), Some("rowid-v2"));
+        assert_eq!(cur.state.as_deref(), Some(STATE));
         // Second scan: nothing new.
         let out = ZCode.scan_sqlite(&item, &store).unwrap();
         assert!(out.events.is_empty());
