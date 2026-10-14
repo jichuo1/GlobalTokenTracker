@@ -39,6 +39,7 @@ private struct CurrentPageDeck: View {
 
     var body: some View {
         PageDeck(page: model.page)
+            .background { if !ProbeFlags.fitToolbar { ChromeMeasure() } }
             // Delivered after the layout pass that measured it: a toolbar
             // item resized during AppKit's own layout is never re-measured
             // (it stayed too wide and moved to the » overflow menu).
@@ -167,6 +168,8 @@ struct PageDeck: View {
 
     private func turn(to new: Page) {
         guard new != target else { return }
+        TurnTrace.begin("\(target.rawValue) → \(new.rawValue)")
+        model.beginMotion()
         let from = target
         let distance = abs(Self.index(new) - Self.index(from))
         // Every face the drum will pass must exist.
@@ -176,18 +179,21 @@ struct PageDeck: View {
         turnID += 1
         let forward = Self.index(new) > Self.index(from)
         let spring = Self.spring(distance: distance)
-        // The title-bar controls crossfade a little into the turn, in Core
-        // Animation (see ChromeFader): no per-frame work competes with the
-        // drum, and the one re-layout it costs lands after the drum's most
-        // expensive first frames.
+        // The title-bar controls crossfade with the turn, in Core Animation
+        // (see ChromeFader): no per-frame work competes with the drum. The
+        // one re-layout it costs joins the turn's first frame — measured
+        // cheaper than a second late frame 120 ms in (309 vs 402 late
+        // frames over the same tours).
         toolbarTurn?.cancel()
         if !ProbeFlags.noToolbarMotion {
-            let lead = reduceMotion ? 0 : min(0.12, spring.travel * 0.25)
+            let lead = ProbeFlags.toolbarLead ?? 0
             toolbarTurn = Task { @MainActor in
                 if lead > 0 { try? await Task.sleep(for: .seconds(lead)) }
                 guard !Task.isCancelled, target == new else { return }
-                ChromeFader.crossfade(duration: reduceMotion ? 0.15 : 0.3) {
-                    model.toolbarPage = new
+                TurnTrace.timed("toolbar crossfade") {
+                    ChromeFader.crossfade(duration: reduceMotion ? 0.15 : 0.3) {
+                        model.toolbarPage = new
+                    }
                 }
             }
         }
@@ -219,8 +225,10 @@ struct PageDeck: View {
             // A later click may have re-targeted the drum; only the final
             // destination becomes interactive.
             guard target == new else { return }
+            TurnTrace.mark("logically complete")
             settled = new
             settleChrome(for: new)
+            model.endMotion(after: 0.25)
         }
     }
 
@@ -232,13 +240,16 @@ struct PageDeck: View {
         chromeTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(reduceMotion || ProbeFlags.lateSettle ? 0 : 450))
             guard !Task.isCancelled, target == page else { return }
-            accessible = page
-            if !ProbeFlags.noChrome { model.chromePage = page }
+            TurnTrace.mark("settle")
+            TurnTrace.timed("  accessibility") { accessible = page }
+            TurnTrace.timed("  window title") { if !ProbeFlags.noChrome { model.chromePage = page } }
             if ProbeFlags.noToolbarMotion { model.toolbarPage = page }
-            ScrollerStyle.apply()
-            if let w = NSApp.keyWindow, let v = w.contentView {
-                w.enableCursorRects()
-                w.invalidateCursorRects(for: v)
+            TurnTrace.timed("  scrollers") { ScrollerStyle.apply() }
+            TurnTrace.timed("  cursor rects") {
+                if let w = NSApp.keyWindow, let v = w.contentView {
+                    w.enableCursorRects()
+                    w.invalidateCursorRects(for: v)
+                }
             }
         }
     }
@@ -347,6 +358,7 @@ struct PriceSearchField: View {
 /// time roll like the rest of the figures instead of views swapping.
 struct SidebarStatus: View {
     @Environment(AppModel.self) private var model
+    @ViewState private var held: Status?
 
     private static let relative: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -357,7 +369,8 @@ struct SidebarStatus: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { ctx in
-            let s = status(now: ctx.date)
+            // Held while something moves (see AppModel.inMotion).
+            let s = model.inMotion ? (held ?? status(now: ctx.date)) : status(now: ctx.date)
             VStack(alignment: .leading, spacing: 2) {
                 Label {
                     Text(verbatim: s.line1)
@@ -366,7 +379,7 @@ struct SidebarStatus: View {
                 } icon: {
                     Image(systemName: s.symbol)
                         .contentTransition(.symbolEffect(.replace))
-                        .symbolEffect(.rotate, isActive: model.isScanning)
+                        .symbolEffect(.rotate, isActive: model.isScanning && !model.inMotion)
                 }
                 .foregroundStyle(s.warning ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                 Text(verbatim: s.line2.isEmpty ? " " : s.line2)
@@ -376,6 +389,7 @@ struct SidebarStatus: View {
             }
             .animation(Motion.resolved(Motion.select), value: s)
         }
+        .onChange(of: model.inMotion) { _, moving in held = moving ? status(now: .now) : nil }
         .scaledFont(.caption)
         .foregroundStyle(.secondary)
         .monospacedDigit()

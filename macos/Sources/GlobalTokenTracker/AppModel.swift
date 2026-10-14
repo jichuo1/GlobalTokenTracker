@@ -71,9 +71,11 @@ final class AppModel {
 
     // MARK: Data
     private(set) var vm: OverviewVM?
-    private(set) var detailRows: [EventRow] = []
+    /// The Details rows, loaded around the viewport (RowFeed.swift); only
+    /// the totals are observed, so a page landing never re-renders SwiftUI.
+    @ObservationIgnored let detailFeed = DetailFeed()
     private(set) var detailTotal: UInt64 = 0
-    private(set) var detailLoadingMore = false
+    private(set) var detailEmpty = true
     private(set) var sources: SourcesResult?
     private(set) var prices: PricesResult?
     private(set) var info: CoreInfo?
@@ -145,6 +147,8 @@ final class AppModel {
     var toolbarPage: Page = .overview
     /// Width of the detail column — the title-bar chrome spans it.
     var chromeWidth: CGFloat = 0
+    /// Natural width of the title-bar row per density (see ChromeMeasure).
+    var chromeRowWidths: [Page: [ChromeDensity: CGFloat]] = [:]
     /// Overview card order and visibility (edited from the toolbar panel).
     var overviewLayout = OverviewLayout.load() {
         didSet { if overviewLayout != oldValue { overviewLayout.save() } }
@@ -428,6 +432,27 @@ final class AppModel {
     /// AppKit's notifications — every SwiftUI scroll view and table here is
     /// an NSScrollView. Not observed by views.
     @ObservationIgnored private var liveScrolls = 0
+    /// Something on screen is moving — a live scroll or a page turn.
+    /// Decorative animations (the sidebar's rolling status digits, drawn
+    /// on the CPU with a blur) hold still meanwhile, so every frame goes to
+    /// the motion. Two changes per scroll or turn, read by little.
+    private(set) var inMotion = false
+    @ObservationIgnored private var motionRelease: Task<Void, Never>?
+
+    func beginMotion() {
+        guard !ProbeFlags.noHold else { return }
+        motionRelease?.cancel()
+        if !inMotion { inMotion = true }
+    }
+
+    func endMotion(after seconds: Double = 0.35) {
+        motionRelease?.cancel()
+        motionRelease = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard let self, !Task.isCancelled, self.liveScrolls == 0 else { return }
+            self.inMotion = false
+        }
+    }
     @ObservationIgnored private var scrollEndedAt = Date.distantPast
     @ObservationIgnored private var scrollObservers: [NSObjectProtocol] = []
 
@@ -435,13 +460,17 @@ final class AppModel {
         let center = NotificationCenter.default
         scrollObservers = [
             center.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.liveScrolls += 1 }
+                MainActor.assumeIsolated {
+                    self?.liveScrolls += 1
+                    self?.beginMotion()
+                }
             },
             center.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.liveScrolls = max(0, self.liveScrolls - 1)
                     self.scrollEndedAt = .now
+                    if self.liveScrolls == 0 { self.endMotion() }
                 }
             },
         ]
@@ -511,46 +540,14 @@ final class AppModel {
     /// Keep pages the user already scrolled through: a refresh only prepends
     /// rows that are new since the last load (the table is newest-first).
     private func mergeDetail(_ d: DetailBundle) {
-        detailTotal = d.total
-        if detailNeedsReset || detailRows.count <= d.rows.count {
-            detailNeedsReset = false
-            if d.rows != detailRows { detailRows = d.rows }
-            return
-        }
-        let known = Set(detailRows.lazy.map(\.id))
-        let fresh = d.rows.prefix { !known.contains($0.id) }
-        if !fresh.isEmpty { detailRows.insert(contentsOf: fresh, at: 0) }
-    }
-
-    /// Index of each loaded detail row (for prefetch distance), rebuilt
-    /// lazily when the rows change.
-    private var detailIndex: [String: Int] = [:]
-    private var detailIndexCount = -1
-
-    func isNearDetailEnd(_ id: String, within n: Int) -> Bool {
-        if detailIndexCount != detailRows.count || detailIndex.count != detailRows.count {
-            detailIndex = Dictionary(detailRows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
-            detailIndexCount = detailRows.count
-        }
-        guard let i = detailIndex[id] else { return false }
-        return i >= detailRows.count - n
-    }
-
-    /// Infinite-scroll page for the details table.
-    func loadMoreDetail() {
-        guard !detailLoadingMore, UInt64(detailRows.count) < detailTotal else { return }
-        detailLoadingMore = true
-        let req = PageRequest(
-            offset: Int64(detailRows.count), limit: nil,
-            apps: appFilter.map { Array($0).sorted() },
-            models: modelFilter.map { Array($0).sorted() }
-        )
-        Task {
-            defer { detailLoadingMore = false }
-            if let page = try? await Core.detailPage(req) {
-                detailRows.append(contentsOf: page.rows)
-            }
-        }
+        if detailTotal != d.total { detailTotal = d.total }
+        if detailEmpty != d.rows.isEmpty { detailEmpty = d.rows.isEmpty }
+        let restart = detailNeedsReset
+        if detailNeedsReset { detailNeedsReset = false }
+        detailFeed.reset(total: Int(d.total), first: d.rows,
+                         apps: appFilter.map { Array($0).sorted() },
+                         models: modelFilter.map { Array($0).sorted() },
+                         restart: restart)
     }
 
     func loadSources() {

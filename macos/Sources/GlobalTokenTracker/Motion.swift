@@ -124,7 +124,10 @@ struct DrumRoll: ViewModifier, Animatable {
             .overlay(Color.black.opacity(0.22 * t).allowsHitTesting(false))
             .rotation3DEffect(.degrees(clamped), axis: (x: 1, y: 0, z: 0), anchor: .center, perspective: 0.2)
             .scaleEffect(scale)
-            .offset(y: -radius * sin(a) * scale)
+            // A render-time translation, not .offset: offset re-frames hosted
+            // AppKit views every frame, and a re-framed NSTextField repaints
+            // — the native tables' cells redrew through every turn.
+            .transformEffect(CGAffineTransform(translationX: 0, y: -radius * sin(a) * scale))
             // Reaches ~0 exactly at the parked angle: the previous page used
             // to stay 40% visible at the window edge until the turn fully
             // settled — an unfinished seam. 0.001 (not 0) keeps its layers.

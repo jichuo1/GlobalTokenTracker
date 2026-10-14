@@ -73,6 +73,8 @@
 "No Requests" = "没有请求";
 "Nothing matches the current tool and model filters." = "当前工具和模型筛选下没有匹配项。";
 "Showing %lld of %@" = "已显示 %lld / %@";
+"%@ requests" = "共 %@ 条请求";
+"Copy Model Name" = "拷贝模型名称";
 
 /* Quota page */
 "No Quota Data" = "暂无配额数据";

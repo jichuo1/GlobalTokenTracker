@@ -61,7 +61,18 @@ private struct ChromeDensityKey: EnvironmentKey {
     static let defaultValue = ChromeDensity.full
 }
 
+/// Set on ChromeMeasure's hidden rows: the page a row is measured for
+/// (nil: the toolbar's current page).
+private struct ChromeMeasurePageKey: EnvironmentKey {
+    static let defaultValue: Page? = nil
+}
+
 extension EnvironmentValues {
+    var chromeMeasurePage: Page? {
+        get { self[ChromeMeasurePageKey.self] }
+        set { self[ChromeMeasurePageKey.self] = newValue }
+    }
+
     var chromeDensity: ChromeDensity {
         get { self[ChromeDensityKey.self] }
         set { self[ChromeDensityKey.self] = newValue }
@@ -106,16 +117,28 @@ private struct ChromeButtonBody: View {
 /// The whole title-bar row as one toolbar item, sized to the detail column
 /// rather than to its content: a page turn changes what is inside it, never
 /// its width, so AppKit never re-lays out the toolbar mid-turn.
+///
+/// One row at one density. The densities' natural widths are measured
+/// off-screen (`ChromeMeasure`) and cached on the model; picking from those
+/// keeps a single row in the toolbar. A ViewThatFits over all five here
+/// cost ~33 ms per page turn: the toolbar converts every candidate into
+/// platform items and re-measures them on each update, and the turn's
+/// crossfade forces that layout synchronously mid-turn.
 struct ChromeBar: View {
     let width: CGFloat
+    @Environment(AppModel.self) private var model
 
     var body: some View {
+        let widths = model.chromeRowWidths[model.toolbarPage] ?? [:]
+        // The row's room: the frame below less the paddings.
+        let room = max(240, width - 44) - 16
         Group {
-            if ProbeFlags.fixedDensity {
-                row(.full)
+            if widths.count == ChromeDensity.allCases.count && !ProbeFlags.fitToolbar {
+                Self.row(ChromeDensity.allCases.first { (widths[$0] ?? .infinity) <= room } ?? .tiny)
             } else {
+                // Until the first measurement lands (launch).
                 ViewThatFits(in: .horizontal) {
-                    ForEach(ChromeDensity.allCases, id: \.self) { row($0) }
+                    ForEach(ChromeDensity.allCases, id: \.self) { Self.row($0) }
                 }
             }
         }
@@ -130,7 +153,7 @@ struct ChromeBar: View {
         .background(ChromeHostFinder())
     }
 
-    private func row(_ density: ChromeDensity) -> some View {
+    static func row(_ density: ChromeDensity) -> some View {
         HStack(spacing: 12) {
             LeadingChrome()
             Spacer(minLength: 12)
@@ -146,6 +169,37 @@ struct ChromeBar: View {
 /// a CATransition snapshots the old and new layer trees once and the
 /// window server blends them, so the turn pays for one layout, not one per
 /// frame.
+/// The title-bar row's natural width for every page at every density,
+/// measured by hidden copies in the window content, each pinned to its page
+/// (`chromeMeasurePage`). They re-measure only when what a row shows
+/// changes (range, filters, text size, language) — not on a page turn, so
+/// the toolbar swap mid-turn costs no measuring — and outside the toolbar's
+/// costly item machinery.
+struct ChromeMeasure: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        ZStack {
+            ForEach(Page.allCases) { page in
+                ForEach(ChromeDensity.allCases, id: \.self) { density in
+                    ChromeBar.row(density)
+                        .fixedSize()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width.rounded(.up) } action: { w in
+                            if model.chromeRowWidths[page]?[density] != w {
+                                model.chromeRowWidths[page, default: [:]][density] = w
+                            }
+                        }
+                }
+                .environment(\.chromeMeasurePage, page)
+            }
+        }
+        .frame(width: 0, height: 0)
+        .hidden()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 @MainActor
 enum ChromeFader {
     fileprivate static weak var host: NSView?
@@ -228,9 +282,10 @@ private struct ChromeHostFinder: NSViewRepresentable {
 struct LeadingChrome: View {
     @Environment(AppModel.self) private var model
     @Environment(\.chromeDensity) private var density
+    @Environment(\.chromeMeasurePage) private var measurePage
 
     var body: some View {
-        let page = model.toolbarPage
+        let page = measurePage ?? model.toolbarPage
         HStack(spacing: 0) {
             RangeBar(dimmed: page == .detail)
                 .fixedSize()
@@ -412,9 +467,10 @@ private struct PageTitle: View {
 
 struct TrailingChrome: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.chromeMeasurePage) private var measurePage
 
     var body: some View {
-        let page = model.toolbarPage
+        let page = measurePage ?? model.toolbarPage
         HStack(spacing: 8) {
             // Each page's actions, all mounted; only the current page's take
             // room in the row.

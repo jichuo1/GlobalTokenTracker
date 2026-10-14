@@ -12,89 +12,16 @@ struct DetailView: View {
     @ViewState private var selection: EventRow.ID?
 
     var body: some View {
-        Table(model.detailRows, selection: $selection) {
-            TableColumn("Time") { r in
-                Text(RowText.of(r).time).monospacedDigit()
-                    .help(RowText.of(r).timeLong)
-                    // Infinite scroll: the last visible row asks for the next page.
-                    // Deferred a run-loop turn — mutating the rows while
-                    // NSTableView is laying out cells is a reentrant delegate
-                    // operation (AppKit warns now, will assert later).
-                    // Prefetch: ask for the next page while ~60 rows remain, so
-                    // it has arrived by the time the scroll reaches the end
-                    // (fetching at the last row hitched mid-scroll).
-                    .onAppear {
-                        guard model.isNearDetailEnd(r.id, within: 60) else { return }
-                        Task { @MainActor in model.loadMoreDetail() }
-                    }
-            }
-            // Widths sum to fit a normal window, so the table never needs a
-            // horizontal scroller (it covered the last rows and the Cost /
-            // Duration columns ended up off-screen).
-            .width(min: 84, ideal: 104)
-            TableColumn("Tool") { r in Text(Fmt.app(r.app)) }
-                .width(min: 56, ideal: 76)
-            TableColumn("Model") { r in
-                // Windows: the raw model, else the pricing model, else "—".
-                Text(r.model ?? r.pricingModel ?? "—")
-                    .foregroundStyle(.secondary)
-                    .help(r.pricingModel.map { String(localized: "Priced as \($0)") } ?? "")
-            }
-            .width(min: 100, ideal: 170)
-            TableColumn("Project") { r in
-                Text(r.project.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(r.project ?? "")
-            }
-            .width(min: 76, ideal: 140)
-            TableColumn("Input") { r in num(r.inputTokens) }.width(min: 44, ideal: 64)
-            TableColumn("Output") { r in num(r.outputTokens) }.width(min: 52, ideal: 72)
-            TableColumn("Cache") { r in
-                num(r.cacheReadTokens + r.cacheWriteTokens, secondary: true)
-                    .help(String(localized: "Read \(Fmt.tokensExact(r.cacheReadTokens)) · Write \(Fmt.tokensExact(r.cacheWriteTokens))"))
-            }
-            .width(min: 70, ideal: 92)
-            TableColumn("Cost") { r in CostCell(row: r) }
-                .width(min: 72, ideal: 104)
-            TableColumn("Duration") { r in
-                Text(r.durationMs.map { Fmt.duration(ms: UInt64(max(0, $0))) } ?? "—")
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    // Keep clear of the overlay scroller's lane.
-                    .padding(.trailing, ScrollerStyle.lane)
-            }
-            .width(min: 58, ideal: 74)
-        }
-        // Provenance (raw_ref: source file + offset) — the Windows row tooltip,
-        // here as a context menu so it can be copied for reconciliation.
-        .contextMenu(forSelectionType: EventRow.ID.self) { ids in
-            if let id = ids.first, let r = model.detailRows.first(where: { $0.id == id }) {
-                if let ref = r.rawRef {
-                    Text(ref)
-                    Button("Copy Source Reference") { copy(ref) }
-                }
-                if let sid = r.sessionId {
-                    Button("Copy Session ID") { copy(sid) }
-                }
-                if let p = r.project {
-                    Button("Reveal Project in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
-                    }
-                    .disabled(!FileManager.default.fileExists(atPath: p))
-                }
-            }
-        }
+        NativeTable(feed: model.detailFeed, columns: Self.columns, selection: $selection, menu: menu)
         .overlay {
-            if model.detailRows.isEmpty && model.vm != nil {
+            if model.detailEmpty && model.vm != nil {
                 EmptyState(title: "No Requests", symbol: "tray",
                            message: "Nothing matches the current tool and model filters.")
             }
         }
         .safeAreaInset(edge: .bottom) {
             HStack {
-                Text("Showing \(model.detailRows.count) of \(Fmt.count(model.detailTotal))")
-                if model.detailLoadingMore { ProgressView().controlSize(.small) }
+                Text("\(Fmt.count(model.detailTotal)) requests")
                 if model.vm?.hasPeers == true {
                     // Peers share hourly totals, not events.
                     Text("This Mac's events only").foregroundStyle(.tertiary)
@@ -111,49 +38,82 @@ struct DetailView: View {
         }
     }
 
-    private func num(_ n: UInt64, secondary: Bool = false) -> some View {
-        Text(n == 0 ? "—" : Fmt.tokensExact(n))
-            .monospacedDigit()
-            .foregroundStyle(n == 0 ? AnyShapeStyle(.tertiary) : secondary ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-            .frame(maxWidth: .infinity, alignment: .trailing)
+    private static let columns: [NativeColumn<EventRow>] = [
+        NativeColumn(id: "time", title: "Time", min: 84, ideal: 104, mono: true) { r in
+            NativeCell(text: RowText.of(r).time, tooltip: RowText.of(r).timeLong)
+        },
+        NativeColumn(id: "tool", title: "Tool", min: 56, ideal: 76) { r in NativeCell(text: Fmt.app(r.app)) },
+        // Windows: the raw model, else the pricing model, else "—".
+        NativeColumn(id: "model", title: "Model", min: 100, ideal: 170) { r in
+            NativeCell(text: r.model ?? r.pricingModel ?? "—", tone: .secondary,
+                       tooltip: r.pricingModel.map { String(localized: "Priced as \($0)") })
+        },
+        NativeColumn(id: "project", title: "Project", min: 76, ideal: 140) { r in
+            NativeCell(text: r.project.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—",
+                       tooltip: r.project, truncation: .byTruncatingMiddle)
+        },
+        NativeColumn(id: "input", title: "Input", min: 44, ideal: 64, trailing: true, mono: true) { r in num(r.inputTokens) },
+        NativeColumn(id: "output", title: "Output", min: 52, ideal: 72, trailing: true, mono: true) { r in num(r.outputTokens) },
+        NativeColumn(id: "cache", title: "Cache", min: 70, ideal: 92, trailing: true, mono: true) { r in
+            var c = num(r.cacheReadTokens + r.cacheWriteTokens, secondary: true)
+            c.tooltip = String(localized: "Read \(Fmt.tokensExact(r.cacheReadTokens)) · Write \(Fmt.tokensExact(r.cacheWriteTokens))")
+            return c
+        },
+        NativeColumn(id: "cost", title: "Cost", min: 72, ideal: 104, trailing: true, mono: true) { r in costCell(r) },
+        NativeColumn(id: "duration", title: "Duration", min: 58, ideal: 74, trailing: true, mono: true) { r in
+            NativeCell(text: r.durationMs.map { Fmt.duration(ms: UInt64(max(0, $0))) } ?? "—")
+        },
+    ]
+
+    private static func num(_ n: UInt64, secondary: Bool = false) -> NativeCell {
+        NativeCell(text: n == 0 ? "—" : Fmt.tokensExact(n),
+                   tone: n == 0 ? .tertiary : secondary ? .secondary : .primary)
+    }
+
+    /// Cost, same rules as the WinUI `event_row`: USD, else credits ("12cr");
+    /// "≈" estimated, "↺" provider-reported; unclassified tokens replace the
+    /// figure; an "unpriced" badge when no source knows the model.
+    private static func costCell(_ row: EventRow) -> NativeCell {
+        var s: String
+        if row.unclassifiedTokens > 0 {
+            s = String(localized: "Unclassified · \(Fmt.tokensExact(row.unclassifiedTokens)) tokens")
+        } else {
+            s = row.costUsd.map(Fmt.usd)
+                ?? row.credits.map { "\($0.formatted(.number.precision(.fractionLength(0...1))))cr" }
+                ?? "—"
+            switch row.costSource {
+            case "estimated": s += " ≈"
+            case "provider_reported": s += " ↺"
+            default: break
+            }
+        }
+        return NativeCell(text: s, tooltip: row.costSource,
+                          badge: row.costSource == "unpriced" ? ("unpriced", .systemOrange) : nil)
+    }
+
+    /// Provenance (raw_ref: source file + offset) — the Windows row tooltip,
+    /// here as a context menu so it can be copied for reconciliation.
+    private func menu(_ r: EventRow) -> [NativeMenuItem] {
+        var items: [NativeMenuItem] = []
+        if let ref = r.rawRef {
+            items.append(NativeMenuItem(title: ref))
+            items.append(NativeMenuItem(title: String(localized: "Copy Source Reference")) { copy(ref) })
+        }
+        if let sid = r.sessionId {
+            items.append(NativeMenuItem(title: String(localized: "Copy Session ID")) { copy(sid) })
+        }
+        if let p = r.project {
+            items.append(NativeMenuItem(title: String(localized: "Reveal Project in Finder"),
+                                        enabled: FileManager.default.fileExists(atPath: p)) {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
+            })
+        }
+        return items
     }
 
     private func copy(_ s: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(s, forType: .string)
-    }
-}
-
-/// Cost cell, same rules as the WinUI `event_row`: USD, else credits ("12cr");
-/// "≈" estimated, "↺" provider-reported; unclassified tokens replace the
-/// figure; an "unpriced" pill when no source knows the model.
-private struct CostCell: View {
-    let row: EventRow
-
-    private var text: String {
-        if row.unclassifiedTokens > 0 {
-            return String(localized: "Unclassified · \(Fmt.tokensExact(row.unclassifiedTokens)) tokens")
-        }
-        var s = row.costUsd.map(Fmt.usd)
-            ?? row.credits.map { "\($0.formatted(.number.precision(.fractionLength(0...1))))cr" }
-            ?? "—"
-        switch row.costSource {
-        case "estimated": s += " ≈"
-        case "provider_reported": s += " ↺"
-        default: break
-        }
-        return s
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Spacer(minLength: 0)
-            if row.costSource == "unpriced" {
-                Pill(text: "unpriced", tint: .orange)
-            }
-            Text(text).monospacedDigit().lineLimit(1)
-        }
-        .help(row.costSource ?? "")
     }
 }
 
@@ -309,22 +269,12 @@ struct PricesView: View {
     var body: some View {
         @Bindable var model = model
         let rows = model.prices?.rows ?? []
-        Table(rows) {
-            TableColumn("Model") { p in Text(p.model).textSelection(.enabled) }
-                .width(min: 160, ideal: 240)
-            TableColumn("Input") { p in price(p.input) }.width(min: 70, ideal: 90)
-            TableColumn("Output") { p in price(p.output) }.width(min: 70, ideal: 90)
-            TableColumn("Cache Read") { p in price(p.cacheRead) }.width(min: 80, ideal: 100)
-            TableColumn("Cache Write") { p in price(p.cacheWrite) }.width(min: 80, ideal: 100)
-            TableColumn("Source") { p in Text(p.source).foregroundStyle(.secondary) }
-                .width(min: 80, ideal: 110)
-            TableColumn("Agreement") { p in
-                Pill(text: "\(p.agree)/\(p.total)", tint: p.disputed ? .orange : .secondary)
-                    .help(tooltip(p))
-                    .padding(.trailing, ScrollerStyle.lane)
-            }
-            .width(min: 70, ideal: 90)
-        }
+        NativeTable(rows: rows, columns: columns, menu: { p in
+            [NativeMenuItem(title: String(localized: "Copy Model Name")) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(p.model, forType: .string)
+            }]
+        })
         .overlay {
             if model.prices != nil && rows.isEmpty {
                 EmptyState(title: "No Matching Models", symbol: "magnifyingglass")
@@ -367,15 +317,27 @@ struct PricesView: View {
         .background(.bar)
     }
 
-    private func price(_ v: Double) -> some View {
-        Text(v > 0 ? Fmt.perMillion(v) : "—")
-            .monospacedDigit()
-            .frame(maxWidth: .infinity, alignment: .trailing)
+    private var columns: [NativeColumn<PriceRow>] {
+        let price = { (v: Double) in NativeCell(text: v > 0 ? Fmt.perMillion(v) : "—") }
+        return [
+            NativeColumn(id: "model", title: "Model", min: 160, ideal: 240) { p in
+                NativeCell(text: p.model)
+            },
+            NativeColumn(id: "input", title: "Input", min: 70, ideal: 90, trailing: true, mono: true) { price($0.input) },
+            NativeColumn(id: "output", title: "Output", min: 70, ideal: 90, trailing: true, mono: true) { price($0.output) },
+            NativeColumn(id: "cacheRead", title: "Cache Read", min: 80, ideal: 100, trailing: true, mono: true) { price($0.cacheRead) },
+            NativeColumn(id: "cacheWrite", title: "Cache Write", min: 80, ideal: 100, trailing: true, mono: true) { price($0.cacheWrite) },
+            NativeColumn(id: "source", title: "Source", min: 80, ideal: 110) { p in NativeCell(text: p.source, tone: .secondary) },
+            NativeColumn(id: "agreement", title: "Agreement", min: 70, ideal: 90) { p in
+                NativeCell(text: "", tooltip: Self.tooltip(p),
+                           badge: ("\(p.agree)/\(p.total)", p.disputed ? .systemOrange : .secondaryLabelColor))
+            },
+        ]
     }
 
     /// The WinUI corroboration tooltip: the adopted price, who it's from and
     /// how many agree, then every source's quote with its stance and alias.
-    private func tooltip(_ p: PriceRow) -> String {
+    private static func tooltip(_ p: PriceRow) -> String {
         let money = { (i: Double, o: Double) in "\(Fmt.perMillion(i)) / \(Fmt.perMillion(o))" }
         var head = money(p.input, p.output)
         if p.cacheRead > 0 { head += " · " + String(localized: "cache read \(Fmt.perMillion(p.cacheRead))") }

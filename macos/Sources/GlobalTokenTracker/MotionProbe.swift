@@ -25,8 +25,13 @@ enum ProbeFlags {
     static let lateSettle = env["GTT_PROBE_LATE_SETTLE"] != nil
     /// The resting page at exactly 0° (no 3D transform) — for A/B.
     static let flatRest = env["GTT_PROBE_FLAT_REST"] != nil
-    /// The title bar pinned to one density, no ViewThatFits (A/B).
-    static let fixedDensity = env["GTT_PROBE_FIXED_DENSITY"] != nil
+    /// The title bar fits itself with ViewThatFits over every density, no
+    /// measured widths (the old behaviour, for A/B).
+    static let fitToolbar = env["GTT_PROBE_FIT_TOOLBAR"] != nil
+    /// Decorative animations keep running through scrolls and turns (A/B).
+    static let noHold = env["GTT_PROBE_NO_HOLD"] != nil
+    /// Seconds into a turn the title-bar swap happens (A/B; default 0.12).
+    static let toolbarLead = env["GTT_PROBE_TOOLBAR_LEAD"].flatMap(Double.init)
 }
 
 @MainActor
@@ -122,10 +127,14 @@ final class MotionProbe: NSObject {
                         let point = scroll.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), to: nil)
                         let screen = window.convertPoint(toScreen: point)
                         let flipped = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.height ?? 0) - screen.y)
-                        for _ in 0..<66 {
+                        for step in 0..<66 {
                             if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                                 wheel1: Int32(dir > 0 ? -30 : 30), wheel2: 0, wheel3: 0) {
                                 cg.location = flipped
+                                // Trackpad phases (began / changed / ended), so
+                                // AppKit runs a live scroll as for a real swipe.
+                                cg.setIntegerValueField(.scrollWheelEventScrollPhase,
+                                                        value: step == 0 ? 1 : step == 65 ? 4 : 2)
                                 if let ev = NSEvent(cgEvent: cg) { window.sendEvent(ev) }
                             }
                             try? await Task.sleep(for: .milliseconds(16))
@@ -168,7 +177,10 @@ final class MotionProbe: NSObject {
     @objc private func tick(_ link: CADisplayLink) {
         interval = link.targetTimestamp - link.timestamp
         guard recording else { return }
-        if last > 0 { gaps.append(link.timestamp - last) }
+        if last > 0 {
+            gaps.append(link.timestamp - last)
+            if link.timestamp - last > interval * 1.5 { TurnTrace.lateFrame(link.timestamp - last) }
+        }
         last = link.timestamp
     }
 
@@ -330,5 +342,47 @@ enum ToolbarProbe {
 
     private static func log(_ s: String) {
         FileHandle.standardError.write(Data("[toolbar] \(s) \(Date().timeIntervalSince1970)\n".utf8))
+    }
+}
+
+/// Turn timeline for the probe — inert unless GTT_MOTION_PROBE is set:
+/// `mark` logs a step's time since the turn began, and a run-loop observer
+/// logs every main-thread pass busier than 24 ms on the same clock, so a
+/// stall can be pinned to the step that caused it.
+@MainActor
+enum TurnTrace {
+    private static var t0 = CACurrentMediaTime()
+    private static var passStart = CACurrentMediaTime()
+    private static var installed = false
+
+    static func begin(_ what: String) {
+        guard MotionProbe.enabled else { return }
+        install()
+        t0 = CACurrentMediaTime()
+        mark("begin \(what)")
+    }
+
+    static func mark(_ what: String, since start: CFTimeInterval? = nil) {
+        guard MotionProbe.enabled else { return }
+        let now = CACurrentMediaTime()
+        let took = start.map { String(format: " (%.1f ms)", (now - $0) * 1000) } ?? ""
+        FileHandle.standardError.write(Data(String(format: "[trace] %6.0f ms  %@%@\n", (now - t0) * 1000, what, took).utf8))
+    }
+
+    /// Run `body`, logging how long it took.
+    static func timed<T>(_ what: String, _ body: () -> T) -> T {
+        guard MotionProbe.enabled else { return body() }
+        let s = CACurrentMediaTime()
+        let r = body()
+        mark(what, since: s)
+        return r
+    }
+
+    private static func install() { installed = true }
+
+    /// A frame that came late (from the probe's display link).
+    static func lateFrame(_ gap: CFTimeInterval) {
+        guard MotionProbe.enabled, CACurrentMediaTime() - t0 < 3 else { return }
+        mark(String(format: "── frame late: %.0f ms", gap * 1000))
     }
 }
