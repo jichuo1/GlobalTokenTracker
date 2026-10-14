@@ -45,7 +45,7 @@
 
 ## 项目简介
 
-GlobalTokenTracker 是一个桌面程序（当前版本 0.8.4，支持 Windows 与 macOS），用来统一统计本机各 AI 编码工具的用量：token 计数、按价目表估算的美元成本、订阅配额/额度余量、延迟与模型分布。它只读取各工具写在磁盘上的本地日志与状态文件做增量统计，数据全部存放在本机 SQLite 账本中，过程不产生网络上报。
+GlobalTokenTracker 是一个桌面程序（当前版本 0.8.5，支持 Windows 与 macOS），用来统一统计本机各 AI 编码工具的用量：token 计数、按价目表估算的美元成本、订阅配额/额度余量、延迟与模型分布。它只读取各工具写在磁盘上的本地日志与状态文件做增量统计，数据全部存放在本机 SQLite 账本中，过程不产生网络上报。
 
 Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS 版是原生 SwiftUI 应用；两者共用同一套 Rust 核心（适配器、计价、账本），同一份日志在两个平台上得出相同的数字。目标是小体积、冷启动快、长期常驻托盘/菜单栏稳定。
 
@@ -270,7 +270,7 @@ macOS（需要 Rust 与 Swift 6.2+，Command Line Tools 即可，无需 Xcode）
 
 ```bash
 macos/scripts/build-app.sh --universal                  # target/macos/GlobalTokenTracker.app
-macos/scripts/build-dmg.sh v0.8.4                       # 安装用磁盘映像
+macos/scripts/build-dmg.sh v0.8.5                       # 安装用磁盘映像
 cargo build --release -p globaltokentracker-cli         # CLI：target/release/globaltokentracker-cli
 ```
 
