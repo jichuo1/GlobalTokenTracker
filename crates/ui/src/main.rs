@@ -1902,11 +1902,22 @@ impl Component for Shell {
                         self.load_page_data(page, context);
                     }
                 }
+                // A reload that found the same data changes nothing: replacing
+                // it re-rendered every realized row while the page slid in.
                 match res {
-                    Ok(PageData::Sources(rows)) => self.sources = Some(rows),
+                    Ok(PageData::Sources(rows)) => {
+                        if self.sources.as_ref() != Some(&rows) {
+                            self.sources = Some(rows);
+                        }
+                    }
                     Ok(PageData::Prices(t)) => {
-                        self.prices = Some(t);
-                        self.refresh_price_view();
+                        let same = self.prices.as_ref().is_some_and(|old| {
+                            old.synced_at == t.synced_at && *old.rows == *t.rows
+                        });
+                        if !same {
+                            self.prices = Some(t);
+                            self.refresh_price_view();
+                        }
                     }
                     Err(e) => {
                         diag!("[page] {page:?} load failed: {e}");

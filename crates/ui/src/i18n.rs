@@ -441,6 +441,9 @@ pub fn en(zh: &str) -> &str {
         "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）。配对是双向的，在任一端完成配对后两台设备即可互相查看。" => {
             "Paired devices on this network can read this PC's hourly usage totals (TLS-encrypted, pairing code required). Pairing is mutual: pairing from either side lets both devices see each other."
         }
+        "同一局域网中已配对的设备可只读查看本机按小时汇总的用量。配对是双向的，任一端完成配对即可互相查看。" => {
+            "Paired devices on this network can read this PC's hourly usage totals. Pairing is mutual: pairing from either side lets both see each other."
+        }
         "正在启动或停止共享…" => "Starting or stopping sharing…",
         "共享失败：{}" => "Sharing failed: {}",
         "本机地址" => "This PC's address",

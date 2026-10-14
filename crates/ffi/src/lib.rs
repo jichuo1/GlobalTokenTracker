@@ -14,7 +14,7 @@
 #![allow(unsafe_code)]
 
 use globaltokentracker_core::store::default_db_path;
-use globaltokentracker_core::store::{PriceRow, filter_prices};
+use globaltokentracker_core::store::{PriceRow, filter_price_indices};
 use globaltokentracker_core::viewmodel::{QuickRange, Range, rank_quotas};
 use globaltokentracker_core::{
     Cube, Engine, Store, adapters, external_interface, peer, pricing, quota, trend, update,
@@ -32,13 +32,28 @@ const DETAIL_PAGE_SIZE: i64 = 200;
 /// touched a few days refresh it instead of rebuilding (see `Cube::refreshed`).
 static CUBE: Mutex<Option<Arc<Cube>>> = Mutex::new(None);
 
-/// Price table as last read (rows + live sync stamp): search keystrokes
-/// filter this in memory via core's `filter_prices` instead of re-querying.
-/// Dropped on every price refresh.
+/// Price table as last read (rows + live sync stamp + version): search
+/// keystrokes filter this in memory via core's `filter_price_indices`
+/// instead of re-querying. Dropped on every price refresh.
 static PRICES: Mutex<Option<PriceTable>> = Mutex::new(None);
 
-/// Rows + the live-source sync stamp they were read with.
-type PriceTable = (Arc<Vec<PriceRow>>, Option<i64>);
+/// Rows, the live-source sync stamp they were read with, and a content
+/// version (see `price_version`).
+type PriceTable = (Arc<Vec<PriceRow>>, Option<i64>, u64);
+
+/// A hash of what the price table shows, kept within 53 bits so it survives
+/// a JSON number on the Swift side exactly. Equal versions = equal rows.
+fn price_version(rows: &[PriceRow], synced_at: Option<i64>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    synced_at.hash(&mut h);
+    rows.len().hash(&mut h);
+    for r in rows {
+        // Every field a row or its tooltip shows.
+        serde_json::to_string(r).unwrap_or_default().hash(&mut h);
+    }
+    h.finish() & ((1u64 << 53) - 1)
+}
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -47,6 +62,9 @@ struct PricesReq {
     disputed_only: bool,
     /// Re-read the table from the ledger (page opened, after a refresh).
     reload: bool,
+    /// Version of the table the shell already holds: when it is current the
+    /// rows are left out of the reply (1.7 MB of JSON for ~2,300 models).
+    known: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -237,28 +255,30 @@ fn prices(req: PricesReq) -> Result<Value, String> {
     if req.reload || cache.is_none() {
         let store = open()?;
         let rows = store.price_rows(5000).map_err(|e| e.to_string())?;
-        *cache = Some((
-            Arc::new(rows),
-            pricing::last_live_sync(&store).unwrap_or(None),
-        ));
+        let synced_at = pricing::last_live_sync(&store).unwrap_or(None);
+        let version = price_version(&rows, synced_at);
+        *cache = Some((Arc::new(rows), synced_at, version));
     }
-    let (all, synced_at) = cache.clone().ok_or("price table unavailable")?;
+    let (all, synced_at, version) = cache.clone().ok_or("price table unavailable")?;
     drop(cache);
-    let filtering = !req.query.trim().is_empty() || req.disputed_only;
-    let shown: Vec<PriceRow> = if filtering {
-        filter_prices(&all, &req.query, req.disputed_only)
-    } else {
-        all.as_ref().clone()
-    };
-    let rows: Vec<Value> = shown
-        .iter()
-        .map(|r| {
-            let mut v = json!(r);
-            v["disputed"] = json!(r.disputed());
-            v
-        })
-        .collect();
-    Ok(json!({ "rows": rows, "total": all.len(), "synced_at": synced_at }))
+    let mut reply = json!({ "total": all.len(), "synced_at": synced_at, "version": version });
+    // The whole table only when the shell doesn't hold this version yet.
+    if req.known != Some(version) {
+        let rows: Vec<Value> = all
+            .iter()
+            .map(|r| {
+                let mut v = json!(r);
+                v["disputed"] = json!(r.disputed());
+                v
+            })
+            .collect();
+        reply["rows"] = json!(rows);
+    }
+    // A search is positions into that table, best matches first.
+    if !req.query.trim().is_empty() || req.disputed_only {
+        reply["shown"] = json!(filter_price_indices(&all, &req.query, req.disputed_only));
+    }
+    Ok(reply)
 }
 
 // No `power::worker` here: shells call us on *their* thread pool (Swift's
@@ -694,8 +714,10 @@ pub extern "C" fn gtt_sources() -> *mut c_char {
     guarded(sources)
 }
 
-/// Price table filtered by core's search (`{query, disputed_only, reload}`),
-/// plus the unfiltered total and the live-source sync stamp.
+/// The price table and core's search over it (`{query, disputed_only,
+/// reload, known}`): `{total, synced_at, version, rows?, shown?}` — `rows`
+/// (the whole table) only when `known` isn't the current version, `shown`
+/// (positions into it, best first) only while searching.
 ///
 /// # Safety
 /// `req_json` is NULL or a valid NUL-terminated UTF-8 string that outlives the call.

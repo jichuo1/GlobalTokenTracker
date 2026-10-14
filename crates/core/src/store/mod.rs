@@ -10,7 +10,7 @@ use std::path::Path;
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
     AppSummary, ArchiveReport, DailyRow, EventRow, MODEL_EXPR, PriceQuote, PriceRow, QuotaRow,
-    ShareRow, SourceHealth, Totals, filter_prices,
+    ShareRow, SourceHealth, Totals, filter_price_indices, filter_prices,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -553,6 +553,42 @@ mod tests {
             provenance: Provenance::LocalJsonl,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn events_pages_tile_tied_timestamps_without_gaps_or_repeats() {
+        let s = Store::open_memory().unwrap();
+        // 25 requests in the same millisecond, among others around them.
+        for i in 0..40 {
+            let mut e = ev(&format!("k{i}"), 1, None);
+            e.ts_start = Some(if (5..30).contains(&i) {
+                1_000
+            } else {
+                i as i64
+            });
+            e.raw_ref = Some(format!("r{i}"));
+            s.upsert_event(&e).unwrap();
+        }
+        let mut seen = Vec::new();
+        for page in 0..8 {
+            for r in s.events_page(5, page * 5, None, None).unwrap() {
+                seen.push(r.raw_ref.unwrap());
+            }
+        }
+        let mut unique = seen.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(seen.len(), 40);
+        assert_eq!(unique.len(), 40, "a row repeated across pages");
+        // Overlapping, unaligned chunks (the Mac feed) agree with the pages.
+        let a: Vec<_> = s
+            .events_page(7, 3, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.raw_ref)
+            .collect();
+        let b: Vec<_> = seen[3..10].iter().cloned().map(Some).collect();
+        assert_eq!(a, b);
     }
 
     #[test]

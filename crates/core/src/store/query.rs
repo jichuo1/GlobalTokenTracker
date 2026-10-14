@@ -56,7 +56,7 @@ pub struct QuotaRow {
 }
 
 /// One source's say on a model, for the corroboration tooltip.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PriceQuote {
     pub source: String,
     /// The id this source uses for the model.
@@ -68,7 +68,7 @@ pub struct PriceQuote {
 }
 
 /// A model as the price book resolves it — the consensus of every source.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PriceRow {
     /// Display id (the spelling most sources use).
     pub model: String,
@@ -145,6 +145,15 @@ fn flatten(s: &str) -> String {
 /// `disputed_only` keeps only models the sources disagree on. An empty query
 /// with the toggle off matches everything.
 pub fn filter_prices(rows: &[PriceRow], query: &str, disputed_only: bool) -> Vec<PriceRow> {
+    filter_price_indices(rows, query, disputed_only)
+        .into_iter()
+        .map(|i| rows[i].clone())
+        .collect()
+}
+
+/// `filter_prices` as positions into `rows` — what a shell that already
+/// holds the table needs per keystroke (a few bytes, not the rows again).
+pub fn filter_price_indices(rows: &[PriceRow], query: &str, disputed_only: bool) -> Vec<usize> {
     let tokens: Vec<String> = query
         .split(|c: char| c.is_whitespace() || c == ',')
         .map(flatten)
@@ -152,18 +161,25 @@ pub fn filter_prices(rows: &[PriceRow], query: &str, disputed_only: bool) -> Vec
         .collect();
     let hits = rows
         .iter()
-        .filter(|r| (!disputed_only || r.disputed()) && r.matches(&tokens));
+        .enumerate()
+        .filter(|(_, r)| (!disputed_only || r.disputed()) && r.matches(&tokens));
     let Some(first) = tokens.first() else {
-        return hits.cloned().collect();
+        return hits.map(|(i, _)| i).collect();
     };
-    let (mut head, mut tail): (Vec<PriceRow>, Vec<PriceRow>) = hits
-        .cloned()
-        .partition(|r| flatten(&r.model).starts_with(first.as_str()));
+    // Ids that start with the first word before ids that merely contain it.
+    let (mut head, mut tail) = (Vec::new(), Vec::new());
+    for (i, r) in hits {
+        if flatten(&r.model).starts_with(first.as_str()) {
+            head.push(i);
+        } else {
+            tail.push(i);
+        }
+    }
     head.append(&mut tail);
     head
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SourceHealth {
     pub source: String,
     pub enabled: bool,
@@ -689,6 +705,11 @@ impl super::Store {
 
     /// Detail-page rows: newest events first. `apps`/`models` scope to the
     /// checked sets; `None` = unfiltered.
+    /// One page of request rows, newest first. Ties on `ts_start` are
+    /// broken by rowid: without it SQLite may order equal timestamps
+    /// differently from one query to the next, and OFFSET paging (the Mac's
+    /// viewport feed, the Windows pages) showed a row twice or skipped it at
+    /// a page boundary. Same index scan either way (rowid is in the index).
     pub fn events_page(
         &self,
         limit: i64,
@@ -705,7 +726,7 @@ impl super::Store {
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
                     credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens
-             FROM usage_events {w} ORDER BY ts_start DESC LIMIT ?{li} OFFSET ?{oi}"
+             FROM usage_events {w} ORDER BY ts_start DESC, rowid DESC LIMIT ?{li} OFFSET ?{oi}"
         ))?;
         let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
             Ok(EventRow {

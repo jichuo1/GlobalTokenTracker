@@ -78,6 +78,11 @@ final class AppModel {
     private(set) var detailEmpty = true
     private(set) var sources: SourcesResult?
     private(set) var prices: PricesResult?
+    /// The whole price table as core last sent it, and its version: opening
+    /// the page or searching then moves a version number and a list of
+    /// positions across the FFI instead of 1.7 MB of rows each time.
+    @ObservationIgnored private var priceTable: [PriceRow] = []
+    @ObservationIgnored private var priceVersion: UInt64?
     private(set) var info: CoreInfo?
     private(set) var trend: TrendSeries?
     /// Quotas most-pressing first (core's rank_quotas) — the overview strip.
@@ -551,7 +556,8 @@ final class AppModel {
     }
 
     func loadSources() {
-        Task { if let s = try? await Core.sources() { sources = s } }
+        // Unchanged data changes nothing (no table refresh as the page arrives).
+        Task { if let s = try? await Core.sources(), s != sources { sources = s } }
     }
 
     /// Latest-wins: a slower earlier search must not overwrite a newer one.
@@ -560,9 +566,18 @@ final class AppModel {
     func loadPrices(reload: Bool = false) {
         priceGen += 1
         let gen = priceGen
-        let req = Core.PricesRequest(query: priceQuery, disputedOnly: priceDisputedOnly, reload: reload)
+        let req = Core.PricesRequest(query: priceQuery, disputedOnly: priceDisputedOnly,
+                                     reload: reload, known: priceVersion)
         Task {
-            if let p = try? await Core.prices(req), gen == priceGen, p != prices { prices = p }
+            guard let r = try? await Core.prices(req), gen == priceGen else { return }
+            if let rows = r.rows {
+                priceTable = rows
+                priceVersion = r.version
+            }
+            guard priceVersion == r.version else { return }
+            let shown = r.shown.map { $0.compactMap { $0 < priceTable.count ? priceTable[$0] : nil } } ?? priceTable
+            let p = PricesResult(rows: shown, total: r.total, syncedAt: r.syncedAt)
+            if p != prices { prices = p }
         }
     }
 

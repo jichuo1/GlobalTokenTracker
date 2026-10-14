@@ -408,7 +408,7 @@ struct AdapterInfo: Decodable, Sendable, Equatable {
     var name: String
 }
 
-struct SourcesResult: Decodable, Sendable {
+struct SourcesResult: Decodable, Sendable, Equatable {
     var health: [SourceHealth]
     var adapters: [AdapterInfo]
 }
@@ -435,6 +435,16 @@ struct PriceRow: Decodable, Sendable, Identifiable, Equatable {
     /// Sources disagree on this model (core's PriceRow::disputed).
     var disputed: Bool
     var id: String { model }
+}
+
+/// Core's price reply: the whole table only when the held version is stale,
+/// a search as positions into it.
+struct PricesReply: Decodable, Sendable {
+    var rows: [PriceRow]?
+    var shown: [Int]?
+    var total: Int
+    var syncedAt: Int64?
+    var version: UInt64
 }
 
 struct PricesResult: Decodable, Sendable, Equatable {

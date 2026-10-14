@@ -83,9 +83,11 @@ enum Core {
         var query = ""
         var disputedOnly = false
         var reload = false
+        /// The table version already held (rows are left out when current).
+        var known: UInt64?
     }
 
-    nonisolated static func prices(_ req: PricesRequest) async throws -> PricesResult {
+    nonisolated static func prices(_ req: PricesRequest) async throws -> PricesReply {
         let json = encode(req)
         return try await detached { try call { json.withCString { gtt_prices($0) } } }
     }

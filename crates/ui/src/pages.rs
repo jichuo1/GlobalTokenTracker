@@ -3461,44 +3461,121 @@ fn switch(theme: &Theme, is_on: bool, toggled: Callback<bool>) -> View {
     ])
 }
 
-/// Settings "LAN sharing": switch, address to give other devices, the
-/// one-time pairing code, and the viewers paired with this PC.
+/// A settings row whose value column gets the full width (setting_row
+/// keeps controls at their natural width in a horizontal stack, which left
+/// wrapping text and right-aligned buttons no room).
+fn setting_row_wide(
+    theme: &Theme,
+    label: &'static str,
+    note: Option<&'static str>,
+    value: View,
+) -> View {
+    let mut left: Vec<View> = vec![
+        TextBlock::new()
+            .text(tr(label))
+            .font_size(theme.body_size)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .text_wrapping(TextWrapping::Wrap)
+            .into(),
+    ];
+    if let Some(n) = note {
+        left.push(subtle_text(theme, tr(n).to_string()));
+    }
+    Grid::new()
+        .columns([
+            GridLength::Pixel(300.0 * font_scale(theme)),
+            GridLength::STAR,
+        ])
+        .column_spacing(16.0)
+        .children([
+            cell(
+                0,
+                StackPanel::new()
+                    .spacing(3.0)
+                    .vertical_alignment(VerticalAlignment::Top)
+                    .keyed_children(keyed(left)),
+            ),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(value),
+        ])
+}
+
+/// Hairline between groups inside a settings card.
+fn card_rule(theme: &Theme) -> View {
+    Border::new().height(1.0).background(theme.divider).into()
+}
+
+/// Settings "LAN sharing": the switch (with its live status beside it),
+/// this PC's addresses and certificate, the one-time pairing code, the
+/// viewers paired with this PC, and the firewall note. Every line sits in
+/// the label | value columns or spans the card — no loose full-width text.
 fn share_rows(
     config: &UiConfig,
     share: &crate::devices::ShareState,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
 ) -> Vec<View> {
-    let mut rows: Vec<View> = vec![setting_row(
+    // The switch, and under it what sharing is doing right now.
+    let mut switch_col: Vec<View> = vec![switch(
+        theme,
+        config.share_lan,
+        ctx.callback(Msg::SetShareLan),
+    )];
+    if share.busy {
+        switch_col.push(subtle_text(theme, t!("正在启动或停止共享…").into()));
+    } else if let Some(e) = &share.error {
+        switch_col.push(warn_text(theme, tf!("共享失败：{}", e)));
+    }
+    let mut rows: Vec<View> = vec![setting_row_wide(
         theme,
         "共享本机用量",
         Some(
-            "开启后，同一局域网中已配对的设备可只读查看本机按小时汇总的用量（TLS 加密，需配对码）。配对是双向的，在任一端完成配对后两台设备即可互相查看。",
+            "同一局域网中已配对的设备可只读查看本机按小时汇总的用量。配对是双向的，任一端完成配对即可互相查看。",
         ),
-        switch(theme, config.share_lan, ctx.callback(Msg::SetShareLan)),
+        vstack(4.0, switch_col),
     )];
-    if share.busy {
-        rows.push(subtle_text(theme, t!("正在启动或停止共享…").into()));
-    }
-    if let Some(e) = &share.error {
-        rows.push(warn_text(theme, tf!("共享失败：{}", e)));
-    }
+
     if let Some(st) = &share.status {
-        let addr = if st.addresses.is_empty() {
-            tf!("本机 IP:{}", st.port)
+        rows.push(card_rule(theme));
+        // One address per line (several network adapters made one long,
+        // clipped line), then the certificate the other side pins.
+        let mut addr_col: Vec<View> = if st.addresses.is_empty() {
+            vec![
+                TextBlock::new()
+                    .text(tf!("本机 IP:{}", st.port))
+                    .font_size(theme.body_size)
+                    .into(),
+            ]
         } else {
-            st.addresses.join(" · ")
+            st.addresses
+                .iter()
+                .map(|a| {
+                    TextBlock::new()
+                        .text(a.clone())
+                        .font_size(theme.body_size)
+                        .is_text_selection_enabled(true)
+                        .into()
+                })
+                .collect()
         };
-        rows.push(setting_row(
+        addr_col.push(subtle_text(
+            theme,
+            tf!(
+                "证书指纹 {}…（对方配对后固定此身份）",
+                st.fingerprint.chars().take(16).collect::<String>()
+            ),
+        ));
+        rows.push(setting_row_wide(
             theme,
             "本机地址",
             Some("在另一台设备的“设备 → 添加设备”中填写此地址"),
-            TextBlock::new()
-                .text(addr)
-                .font_size(theme.body_size)
-                .is_text_selection_enabled(true)
-                .into(),
+            vstack(3.0, addr_col),
         ));
+
+        // The code large on its own line with its button; when it expires
+        // underneath.
         let code_view: View = match &st.code {
             Some(code) => {
                 let until = share
@@ -3510,93 +3587,109 @@ fn share_rows(
                         tf!("有效至 {}", fmt::ts_short(Some(ms)))
                     })
                     .unwrap_or_default();
-                StackPanel::new()
-                    .orientation(Orientation::Horizontal)
-                    .spacing(12.0)
-                    .children((
-                        TextBlock::new()
-                            .text(format!("{} {}", &code[..3], &code[3..]))
-                            .font_size(theme.title_size)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .is_text_selection_enabled(true)
-                            .vertical_alignment(VerticalAlignment::Center),
-                        TextBlock::new()
-                            .text(until)
-                            .font_size(theme.label_size)
-                            .foreground(theme.subtle)
-                            .vertical_alignment(VerticalAlignment::Center),
-                        Button::new()
-                            .on_click(ctx.callback(|_| Msg::ShareNewCode))
-                            .content(t!("新配对码")),
-                    ))
+                vstack(
+                    4.0,
+                    vec![
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(16.0)
+                            .children((
+                                TextBlock::new()
+                                    .text(format!("{} {}", &code[..3], &code[3..]))
+                                    .font_size(theme.title_size)
+                                    .font_weight(FontWeight::SEMI_BOLD)
+                                    .is_text_selection_enabled(true)
+                                    .vertical_alignment(VerticalAlignment::Center),
+                                Button::new()
+                                    .vertical_alignment(VerticalAlignment::Center)
+                                    .on_click(ctx.callback(|_| Msg::ShareNewCode))
+                                    .content(t!("新配对码")),
+                            )),
+                        subtle_text(theme, until),
+                    ],
+                )
             }
             None => Button::new()
                 .on_click(ctx.callback(|_| Msg::ShareNewCode))
                 .content(t!("生成配对码")),
         };
-        rows.push(setting_row(
+        rows.push(setting_row_wide(
             theme,
             "配对码",
             Some("2 分钟内有效，只能使用一次；连续输错 5 次后作废"),
             code_view,
         ));
-        rows.push(subtle_text(
-            theme,
-            tf!(
-                "证书指纹 {}…（对方配对后固定此身份）",
-                st.fingerprint.chars().take(16).collect::<String>()
-            ),
-        ));
     }
+
     let active: Vec<&globaltokentracker_core::peer::trust::Viewer> = share
         .viewers
         .iter()
         .filter(|v| v.revoked_at.is_none())
         .collect();
     if !active.is_empty() {
-        let mut list: Vec<View> = Vec::new();
-        for v in active {
+        rows.push(card_rule(theme));
+        // Spans the card: name and when on the left, Revoke at the right
+        // edge, a hairline between viewers.
+        let mut list: Vec<View> = vec![vstack(
+            3.0,
+            vec![
+                TextBlock::new()
+                    .text(tr("已配对的查看方"))
+                    .font_size(theme.body_size)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .into(),
+                subtle_text(theme, t!("撤销后立即失效，需重新配对才能再次查看").into()),
+            ],
+        )];
+        for (i, v) in active.into_iter().enumerate() {
             let id = v.id.clone();
+            if i > 0 {
+                list.push(card_rule(theme));
+            }
             list.push(
-                Grid::new()
-                    .columns([GridLength::STAR, GridLength::Auto])
-                    .children([
-                        cell(
-                            0,
-                            vstack(
-                                2.0,
-                                vec![
-                                    TextBlock::new()
-                                        .text(v.name.clone())
-                                        .font_size(theme.body_size)
-                                        .into(),
-                                    subtle_text(
-                                        theme,
-                                        tf!(
-                                            "配对于 {} · 最近访问 {}",
-                                            fmt::ts_short(Some(v.created_at)),
-                                            fmt::ts_short(v.last_seen_at)
+                Border::new().padding(Thickness::xy(0.0, 4.0)).content(
+                    Grid::new()
+                        .columns([GridLength::STAR, GridLength::Auto])
+                        .column_spacing(16.0)
+                        .children([
+                            cell(
+                                0,
+                                vstack(
+                                    2.0,
+                                    vec![
+                                        TextBlock::new()
+                                            .text(v.name.clone())
+                                            .font_size(theme.body_size)
+                                            .text_trimming(TextTrimming::CharacterEllipsis)
+                                            .into(),
+                                        subtle_text(
+                                            theme,
+                                            tf!(
+                                                "配对于 {} · 最近访问 {}",
+                                                fmt::ts_short(Some(v.created_at)),
+                                                fmt::ts_short(v.last_seen_at)
+                                            ),
                                         ),
-                                    ),
-                                ],
+                                    ],
+                                ),
                             ),
-                        ),
-                        cell(
-                            1,
-                            Button::new()
-                                .on_click(ctx.callback(move |_| Msg::Revoke(id.clone())))
-                                .content(t!("撤销")),
-                        ),
-                    ]),
+                            Border::new()
+                                .grid_column(1)
+                                .vertical_alignment(VerticalAlignment::Center)
+                                .content(
+                                    Button::new()
+                                        .on_click(ctx.callback(move |_| Msg::Revoke(id.clone())))
+                                        .content(t!("撤销")),
+                                ),
+                        ]),
+                ),
             );
         }
-        rows.push(setting_row(
-            theme,
-            "已配对的查看方",
-            Some("撤销后立即失效，需重新配对才能再次查看"),
-            vstack(8.0, list),
-        ));
+        rows.push(vstack(6.0, list));
     }
+
+    // Footnote, set apart from the controls.
+    rows.push(card_rule(theme));
     rows.push(subtle_text(
         theme,
         t!("Windows 防火墙只应对“专用”网络放行 TCP 4319 与 UDP 5353；安装程序会添加对应规则（需要管理员确认）。").into(),

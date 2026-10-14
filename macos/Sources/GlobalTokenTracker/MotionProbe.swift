@@ -273,6 +273,10 @@ enum ToolbarProbe {
             if let page = env["GTT_TOOLBAR_PAGE"].flatMap(Page.init(rawValue:)) {
                 model.page = page
                 if let range = env["GTT_TOOLBAR_RANGE"] { model.selectPreset(range) }
+                if let q = env["GTT_TOOLBAR_PRICE_QUERY"] {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    model.priceQuery = q
+                }
                 try? await Task.sleep(for: .seconds(2))
                 // Apply settings in order, the way the Settings page does
                 // ("key=value;…"; "-" removes the key; numbers stay numbers),
