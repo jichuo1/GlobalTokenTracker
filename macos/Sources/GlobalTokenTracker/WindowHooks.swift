@@ -104,18 +104,20 @@ private struct AppTint: ViewModifier {
     }
 }
 
-private struct ChartFont: ViewModifier {
+struct ChartFont: ViewModifier {
     @AppStorage(Prefs.chartFontKey) private var family = ""
     @Environment(\.textScale) private var scale
 
     /// Axis/label text follows both the chart font and the text size.
     func body(content: Content) -> some View {
+        content.font(Self.font(family: family, scale: scale))
+    }
+
+    /// The chart text font. Axis labels don't inherit `.font` from the
+    /// chart, so axis marks apply this directly (`.font(ChartFont.font…)`).
+    static func font(family: String, scale: CGFloat) -> Font {
         let size = (NSFont.smallSystemFontSize * scale).rounded()
-        if family.isEmpty {
-            content.font(.system(size: size))
-        } else {
-            content.font(.custom(family, size: size))
-        }
+        return family.isEmpty ? .system(size: size) : .custom(family, size: size)
     }
 }
 

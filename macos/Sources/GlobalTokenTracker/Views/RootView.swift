@@ -422,7 +422,7 @@ struct Card<Content: View>: View {
         VStack(alignment: .leading, spacing: 12) {
             if let title {
                 HStack {
-                    Text(title).scaledFont(.headline)
+                    Text(title).scaledFont(.headline).lineLimit(1)
                         .contentTransition(.numericText())
                     Spacer()
                     trailing

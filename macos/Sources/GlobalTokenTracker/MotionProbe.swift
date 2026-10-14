@@ -259,19 +259,32 @@ enum ToolbarProbe {
             if let page = env["GTT_TOOLBAR_PAGE"].flatMap(Page.init(rawValue:)) {
                 model.page = page
                 try? await Task.sleep(for: .seconds(2))
-                // Switch the theme colour through a list ("-" = system) first,
-                // the way the Settings picker writes it.
-                for hex in (env["GTT_TOOLBAR_ACCENTS"] ?? "").split(separator: ",") {
-                    UserDefaults.standard.set(hex == "-" ? "" : String(hex), forKey: Prefs.accentKey)
-                    try? await Task.sleep(for: .milliseconds(600))
-                    // Which split view hosts the window now (a new one = the
-                    // whole window was rebuilt), and the toolbar's items.
+                // Apply settings in order, the way the Settings page does
+                // ("key=value;…"; "-" removes the key; numbers stay numbers),
+                // logging the split view that hosts the window after each one
+                // (a new one = the whole window was rebuilt).
+                if env["GTT_TOOLBAR_SETS"] != nil {
+                    log("before key=\(window.isKeyWindow) active=\(NSApp.isActive)")
+                }
+                for pair in (env["GTT_TOOLBAR_SETS"] ?? "").split(separator: ";") {
+                    let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+                    guard kv.count == 2 else { continue }
+                    let d = UserDefaults.standard
+                    switch kv[1] {
+                    case "-": d.removeObject(forKey: kv[0])
+                    case "true", "false": d.set(kv[1] == "true", forKey: kv[0])
+                    default:
+                        if let n = Double(kv[1]) { d.set(n, forKey: kv[0]) } else { d.set(kv[1], forKey: kv[0]) }
+                    }
+                    Prefs.applyTheme()
+                    Prefs.applyDockVisibility(refocus: true)
+                    try? await Task.sleep(for: .milliseconds(700))
                     @MainActor func split(_ v: NSView) -> NSView? {
                         v is NSSplitView ? v : v.subviews.lazy.compactMap(split).first
                     }
                     let sv = window.contentView.flatMap(split)
-                    log("accent \(hex) split=\(sv.map { String(describing: Unmanaged.passUnretained($0).toOpaque()) } ?? "nil") "
-                        + "items=\(window.toolbar?.items.map(\.itemIdentifier.rawValue).joined(separator: "|") ?? "-")")
+                    log("set \(pair) split=\(sv.map { String(describing: Unmanaged.passUnretained($0).toOpaque()) } ?? "nil") "
+                        + "visible=\(window.isVisible) key=\(window.isKeyWindow) active=\(NSApp.isActive)")
                 }
                 if let y = env["GTT_TOOLBAR_SCROLL"].flatMap(Double.init), let root = window.contentView {
                     // Every page stays mounted: scroll each page's scroller.

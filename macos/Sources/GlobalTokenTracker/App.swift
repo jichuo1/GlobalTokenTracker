@@ -174,9 +174,21 @@ enum Prefs {
         UserDefaults.standard.object(forKey: showInDockKey) as? Bool ?? true
     }
 
+    /// `refocus`: the user flipped the switch with the window open. Changing
+    /// the activation policy deactivates the app (and turning the Dock icon
+    /// back on doesn't reactivate it), which left the Settings window
+    /// unfocused with keystrokes going to the app behind — bring it back.
     @MainActor
-    static func applyDockVisibility() {
+    static func applyDockVisibility(refocus: Bool = false) {
         NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
+        guard refocus, let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) else { return }
+        // After the policy change settles; `activate()` alone is cooperative
+        // and refused once the system has moved focus to another app.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSRunningApplication.current.activate(from: NSWorkspace.shared.frontmostApplication ?? .current)
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     /// Login item via SMAppService (macOS 13+): no helper app, user-visible in

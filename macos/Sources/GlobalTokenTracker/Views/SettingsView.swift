@@ -49,7 +49,7 @@ struct GeneralSettings: View {
                     Text(loginError).scaledFont(.caption).foregroundStyle(.red)
                 }
                 Toggle("Show in Dock", isOn: $showInDock)
-                    .onChange(of: showInDock) { _, _ in Prefs.applyDockVisibility() }
+                    .onChange(of: showInDock) { _, _ in Prefs.applyDockVisibility(refocus: true) }
                 Toggle("Show today's cost in the menu bar", isOn: $menuBarShowsCost)
                 Picker("When closing the window", selection: $closeAction) {
                     Text("Ask every time").tag("")

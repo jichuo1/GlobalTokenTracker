@@ -249,6 +249,8 @@ private struct TrendCard: View, Equatable {
     /// Windows: trend_line — trailing 7-bucket moving average overlay.
     @AppStorage("trendLine") private var showAverage = false
     @ViewState private var hovered: String?
+    @AppStorage(Prefs.chartFontKey) private var chartFamily = ""
+    @Environment(\.textScale) private var textScale
 
     /// Card title per range, as on Windows ("Today · hourly", "All · daily (last 60)").
     private var title: LocalizedStringKey {
@@ -272,6 +274,7 @@ private struct TrendCard: View, Equatable {
             HStack(spacing: 10) {
                 Toggle("7-pt Average", isOn: $showAverage)
                     .toggleStyle(.checkbox)
+                    .fixedSize()
                     .disabled(metric != .tokens)
                     .help("Moving average over 7 days (7 hours for hourly ranges)")
                 Picker("Metric", selection: $metric) {
@@ -303,19 +306,25 @@ private struct TrendCard: View, Equatable {
                         }
                     }
                 }
-                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 8)) { _ in AxisValueLabel() } }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 8)) { _ in AxisValueLabel().font(axisFont) }
+                }
                 .chartYAxis {
                     AxisMarks { v in
                         AxisGridLine()
-                        AxisValueLabel { Text(metric.format(v.as(Double.self) ?? 0)) }
+                        AxisValueLabel { Text(metric.format(v.as(Double.self) ?? 0)) }.font(axisFont)
                     }
                 }
                 .chartXSelection(value: $hovered)
                 .chartFont()
+                // The top axis label is centred on the top grid line, half
+                // above the plot: room for it inside the rasterised area
+                // (drawingGroup clips to its bounds).
+                .padding(.top, 8)
                 // Rasterise the chart in one Metal pass: page turns and the
                 // cascade then move a texture instead of re-drawing paths.
                 .drawingGroup()
-                .frame(height: 220)
+                .frame(height: 228)
                 .overlay(alignment: .topLeading) {
                     if let key = hovered, let i = indexOf[key] {
                         TrendTooltip(bucket: buckets[i], title: key,
@@ -326,6 +335,8 @@ private struct TrendCard: View, Equatable {
             }
         }
     }
+
+    private var axisFont: Font { ChartFont.font(family: chartFamily, scale: textScale) }
 
     private func value(_ b: TrendBucket) -> Double {
         switch metric {
