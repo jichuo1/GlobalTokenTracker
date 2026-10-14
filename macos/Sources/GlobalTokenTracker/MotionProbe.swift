@@ -25,6 +25,8 @@ enum ProbeFlags {
     static let lateSettle = env["GTT_PROBE_LATE_SETTLE"] != nil
     /// The resting page at exactly 0° (no 3D transform) — for A/B.
     static let flatRest = env["GTT_PROBE_FLAT_REST"] != nil
+    /// The title bar pinned to one density, no ViewThatFits (A/B).
+    static let fixedDensity = env["GTT_PROBE_FIXED_DENSITY"] != nil
 }
 
 @MainActor
@@ -258,6 +260,7 @@ enum ToolbarProbe {
             // Still shot of one page's title bar instead of the run below.
             if let page = env["GTT_TOOLBAR_PAGE"].flatMap(Page.init(rawValue:)) {
                 model.page = page
+                if let range = env["GTT_TOOLBAR_RANGE"] { model.selectPreset(range) }
                 try? await Task.sleep(for: .seconds(2))
                 // Apply settings in order, the way the Settings page does
                 // ("key=value;…"; "-" removes the key; numbers stay numbers),

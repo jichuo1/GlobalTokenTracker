@@ -251,6 +251,7 @@ private struct TrendCard: View, Equatable {
     @ViewState private var hovered: String?
     @AppStorage(Prefs.chartFontKey) private var chartFamily = ""
     @Environment(\.textScale) private var textScale
+    @ViewState private var plotWidth: CGFloat = 600
 
     /// Card title per range, as on Windows ("Today · hourly", "All · daily (last 60)").
     private var title: LocalizedStringKey {
@@ -270,6 +271,7 @@ private struct TrendCard: View, Equatable {
         // hover all reuse it) instead of re-parsing dates per mark/hover.
         let labels = buckets.map { label($0.date) }
         let indexOf = Dictionary(labels.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        let ticks = tickLabels(labels)
         Card(title: title, trailing: AnyView(
             HStack(spacing: 10) {
                 Toggle("7-pt Average", isOn: $showAverage)
@@ -307,7 +309,9 @@ private struct TrendCard: View, Equatable {
                     }
                 }
                 .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 8)) { _ in AxisValueLabel().font(axisFont) }
+                    // A category axis labels every bar; 60 daily buckets ran
+                    // into one smear. Only the labels that fit are shown.
+                    AxisMarks(values: ticks) { _ in AxisValueLabel(collisionResolution: .disabled).font(axisFont) }
                 }
                 .chartYAxis {
                     AxisMarks { v in
@@ -325,6 +329,7 @@ private struct TrendCard: View, Equatable {
                 // cascade then move a texture instead of re-drawing paths.
                 .drawingGroup()
                 .frame(height: 228)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { plotWidth = $0 }
                 .overlay(alignment: .topLeading) {
                     if let key = hovered, let i = indexOf[key] {
                         TrendTooltip(bucket: buckets[i], title: key,
@@ -337,6 +342,20 @@ private struct TrendCard: View, Equatable {
     }
 
     private var axisFont: Font { ChartFont.font(family: chartFamily, scale: textScale) }
+
+    /// Every k-th bucket label, counted back from the newest so the latest
+    /// day/hour is always labelled; k is the smallest step whose labels fit
+    /// side by side at the current width and text size.
+    private func tickLabels(_ labels: [String]) -> [String] {
+        guard let longest = labels.map(\.count).max(), !labels.isEmpty else { return [] }
+        let fontSize = NSFont.smallSystemFontSize * textScale
+        // ~0.62 em per glyph (CJK glyphs are wider: count them double) plus a gap.
+        let wide = labels.contains { $0.unicodeScalars.contains { $0.value > 0x2E80 } }
+        let labelWidth = CGFloat(longest) * fontSize * (wide ? 0.9 : 0.62) + fontSize * 1.5
+        let fit = max(2, Int((plotWidth - 50) / labelWidth))
+        let step = max(1, Int((Double(labels.count) / Double(fit)).rounded(.up)))
+        return labels.indices.reversed().filter { (labels.count - 1 - $0) % step == 0 }.reversed().map { labels[$0] }
+    }
 
     private func value(_ b: TrendBucket) -> Double {
         switch metric {

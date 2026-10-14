@@ -110,8 +110,14 @@ struct ChromeBar: View {
     let width: CGFloat
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            ForEach(ChromeDensity.allCases, id: \.self) { row($0) }
+        Group {
+            if ProbeFlags.fixedDensity {
+                row(.full)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    ForEach(ChromeDensity.allCases, id: \.self) { row($0) }
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Inset from the sidebar edge and the window's rounded corner.
