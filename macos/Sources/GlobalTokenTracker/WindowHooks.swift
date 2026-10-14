@@ -94,12 +94,13 @@ extension View {
 private struct AppTint: ViewModifier {
     @AppStorage(Prefs.accentKey) private var accent = ""
 
+    /// One modifier chain either way (nil = system accent). An if/else here
+    /// gave the two cases different view identities: switching between
+    /// "system" and a colour rebuilt the whole window — a new split view and
+    /// toolbar — which could leave the sidebar under the traffic lights.
     func body(content: Content) -> some View {
-        if accent.isEmpty {
-            content
-        } else {
-            content.tint(Color(hex: accent)).accentColor(Color(hex: accent))
-        }
+        let color = accent.isEmpty ? nil : Color(hex: accent)
+        content.tint(color).accentColor(color)
     }
 }
 

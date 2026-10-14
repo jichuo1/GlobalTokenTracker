@@ -259,6 +259,20 @@ enum ToolbarProbe {
             if let page = env["GTT_TOOLBAR_PAGE"].flatMap(Page.init(rawValue:)) {
                 model.page = page
                 try? await Task.sleep(for: .seconds(2))
+                // Switch the theme colour through a list ("-" = system) first,
+                // the way the Settings picker writes it.
+                for hex in (env["GTT_TOOLBAR_ACCENTS"] ?? "").split(separator: ",") {
+                    UserDefaults.standard.set(hex == "-" ? "" : String(hex), forKey: Prefs.accentKey)
+                    try? await Task.sleep(for: .milliseconds(600))
+                    // Which split view hosts the window now (a new one = the
+                    // whole window was rebuilt), and the toolbar's items.
+                    @MainActor func split(_ v: NSView) -> NSView? {
+                        v is NSSplitView ? v : v.subviews.lazy.compactMap(split).first
+                    }
+                    let sv = window.contentView.flatMap(split)
+                    log("accent \(hex) split=\(sv.map { String(describing: Unmanaged.passUnretained($0).toOpaque()) } ?? "nil") "
+                        + "items=\(window.toolbar?.items.map(\.itemIdentifier.rawValue).joined(separator: "|") ?? "-")")
+                }
                 if let y = env["GTT_TOOLBAR_SCROLL"].flatMap(Double.init), let root = window.contentView {
                     // Every page stays mounted: scroll each page's scroller.
                     @MainActor func visit(_ v: NSView) {
