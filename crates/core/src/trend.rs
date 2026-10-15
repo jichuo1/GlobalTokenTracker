@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn empty_series_is_empty() {
-        assert!(moving_average(&[]).is_empty());
+        assert_eq!(moving_average(&[]), Vec::<f64>::new());
         assert!(!is_hourly(&[]));
     }
 

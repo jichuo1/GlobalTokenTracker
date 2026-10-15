@@ -488,7 +488,7 @@ mod tests {
         let out = Dsh.parse_jsonl(&item(&file), 0, &data, None).unwrap();
         assert_eq!(out.events.len(), 1);
         assert_eq!(out.events[0].dedup_key, "dsh:session-eee:2");
-        assert!(!out.notes.is_empty());
+        assert_ne!(out.notes, Vec::<String>::new());
         assert_eq!(out.consumed, data.len() as u64);
     }
 

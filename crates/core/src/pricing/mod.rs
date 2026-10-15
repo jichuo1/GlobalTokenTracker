@@ -1062,7 +1062,7 @@ mod tests {
         }
         // Words are ANDed.
         assert_eq!(names("gpt mini", false), ["gpt-5-mini"]);
-        assert!(names("gpt zzz", false).is_empty());
+        assert_eq!(names("gpt zzz", false), Vec::<String>::new());
         // Ids that start with the query come before ids that merely contain it.
         assert_eq!(names("mini", false), ["mini-lm", "gpt-5-mini"]);
         // Nothing typed = everything, alphabetical.
@@ -1070,7 +1070,7 @@ mod tests {
         assert_eq!(names("   ", false).len(), rows.len());
         // The dispute filter composes with the search.
         assert_eq!(names("", true), ["gpt-5"]);
-        assert!(names("opus", true).is_empty());
+        assert_eq!(names("opus", true), Vec::<String>::new());
     }
 
     /// Two agreeing sources per model, so the vote is unambiguous.

@@ -1517,3 +1517,18 @@
 - **本机安装**：旧 UI/CLI/setup、设置及 SQLite 一致性账本已备份；完整安装器 --quiet 覆盖既有用户安装目录，退出码 0。安装后 UI SHA-256 `a6f88d11321f31948ffd9ef2f0b4aad3f328362f27712dc974728868f151cb6f`，CLI SHA-256 `00b484c2d2f29fea7b4a811e3d98eda6d05257fa1b8b14515609a9955edbb71a`，两者均与此次 Release/内嵌载荷完全一致，已安装 setup 与完整包一致。
 - **保留与实际运行**：安装期间 ui.json SHA-256 不变，账本 quick_check=ok、保留 80225 行使用事件；安装后 CLI --version 与 HKCU DisplayVersion 均为 0.6.0。新版 UI 已启动，Computer Use 在真实已安装窗口核对热力图四档及对应图例，滚动至完整卡片展示。版本号沿用 0.6.0，未创建或移动正式发布 tag。
 - **本机证据**：备份、安装器/载荷/已安装文件哈希 JSON 及 installed-ui.png 保留在 ignored `target/e2e/heat-deploy/`，不提交真实账本、配置、截图或诊断文件。
+
+
+## S130 修复 Rust 1.99.0 Clippy 空集合断言导致的双平台 CI 失败（2026-10-15）
+
+- **范围与根因**：核对提交 `6957d054d7065ec65213c373d622f608b4473eab` 的 GitHub Actions Run [38725442317](https://github.com/jichuo1/GlobalTokenTracker/actions/runs/38725442317)。Windows Job `116390002984` 与 macOS Job `116390002776` 均在 Clippy 失败，日志工具链为 `rustc 1.99.0 (b940084d7 2026-09-28)`。工作区启用 `clippy::pedantic`，CI 的 `-D warnings` 将 `clippy::assert_is_empty` 提升为错误；Windows 报 core 测试 20 处、CLI 集成测试 1 处、UI 测试 1 处，macOS 报对应 portable crates 的 21 处。本轮开始时本机默认工具链为 Rust 1.98.1，与 CI stable 版本不同。该次远端 Windows 的 rustfmt、单元测试、Release 构建与安装包校验已成功，失败点不是新增的格式门禁或打包复用。
+- **修改与取舍**：仅在 7 个测试源码文件中，将 22 处 `assert!(value.is_empty())` / `assert!(!value.is_empty())` 改为与显式元素类型空 Vec 的 `assert_eq!` / `assert_ne!`，保留原来的空/非空条件；现有元素类型已支持比较与调试输出，失败时可直接看到实际值。保留 `-D warnings` 和 workspace lint 配置，工作流、生产逻辑、依赖及锁文件无改动。没有新增生产依赖。
+- **实测证据**：安装与远端同版本的 `1.99.0-x86_64-pc-windows-msvc` 后，`cargo +1.99.0 fmt --all -- --check` 通过；`cargo +1.99.0 clippy --workspace --all-targets --locked -- -D warnings` 通过（42.14s）；`cargo +1.99.0 test --workspace --locked` 通过（CLI integration 15、core 243、FFI 1、setup 15、UI 33，合计 307 passed、0 failed、4 项原有 ignored）。所有修改均为现有测试断言的等价修正，没有删除、忽略或放宽用例。
+- **保护与边界**：修改前对原有未提交 REVIEW 和未跟踪文档、integrations 文件建立本地字节/哈希快照，共 85 个文件；追加前逐项核对相同。本节与 S131 按字节追加，保留原有 REVIEW 全部内容。修复验证完成时尚未提交、推送或重跑远端工作流；后续用户明确授权提交推送，仅将本次 7 个测试文件与 S130/S131 纳入提交，原有未提交内容继续保留。Windows 本地门禁通过不能替代修复后 macOS 原生构建、打包或 UI 验收。
+
+## S131 同步本地默认 Rust stable 开发环境（2026-10-15）
+
+- **范围与授权**：按用户补充要求同步升级本机相关环境。先核对 `rustup show home` 为 `C:/Users/Administrator/.rustup`，`where.exe rustc` / `cargo` / `rustup` 均指向 `C:/Users/Administrator/.cargo/bin`，再执行 `rustup update stable --no-self-update`。保留默认通道 stable 和原有 x86_64-pc-windows-msvc 目标，Rust、Cargo、Clippy、rustfmt、rust-std、rust-docs 随通道一起更新；不扩展到与本次故障无关的系统软件。
+- **实际版本**：默认 `rustc 1.98.1` 升级为 `rustc 1.99.0 (b940084d7 2026-09-28)`；默认 Cargo 为 `1.99.0 (5f94df478 2026-08-27)`，Clippy 为 `0.1.99 (b940084d7e 2026-09-28)`，rustfmt 为 `1.10.0-stable (b940084d7e 2026-09-28)`。`rustup show active-toolchain` 读回 `stable-x86_64-pc-windows-msvc (default)`；`rustup check` 读回 stable 1.99.0 与 rustup 1.29.1 均 up to date。
+- **默认命令验证**：环境升级后，直接执行不带版本前缀的 `cargo fmt --all -- --check` 与 `cargo clippy --workspace --all-targets --locked -- -D warnings` 均通过（后者 7.67s），确认日常入口使用与此次 CI 相同版本的工具链。前述全量测试使用显式 1.99.0 工具链，编译器提交哈希与升级后的默认 stable 相同。
+- **后续维护边界**：当前 CI 使用滚动 stable；以后 CI 升级时，本机仍需执行 `rustup update stable` / `rustup check` 并重跑格式、Clippy 与测试门禁。此次按要求同步环境，没有添加定时任务，也没有永久冻结项目或其他仓库的 Rust 版本。

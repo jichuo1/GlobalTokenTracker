@@ -56,7 +56,7 @@ impl Fixture {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(out.stderr.is_empty());
+        assert_eq!(out.stderr, Vec::<u8>::new());
         serde_json::from_slice(&out.stdout).unwrap()
     }
 }

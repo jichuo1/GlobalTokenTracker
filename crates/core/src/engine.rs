@@ -520,7 +520,7 @@ mod coordinator_tests {
         let first = e
             .scan_items(&Coordinator, std::slice::from_ref(&item))
             .unwrap();
-        assert!(first.errors.is_empty());
+        assert_eq!(first.errors, Vec::<String>::new());
         assert_eq!(first.events_ingested, 1);
         assert_eq!(
             e.store
@@ -606,7 +606,7 @@ mod coordinator_tests {
             })
             .unwrap();
         let report = e.scan_items(&Coordinator, &[item]).unwrap();
-        assert!(report.errors.is_empty());
+        assert_eq!(report.errors, Vec::<String>::new());
         assert_eq!(report.events_ingested, 0);
         assert_eq!(report.events_skipped, 3);
         assert_eq!(
@@ -632,7 +632,7 @@ mod coordinator_tests {
             })
             .unwrap();
         let report = e.scan_items(&Coordinator, &[item]).unwrap();
-        assert!(report.errors.is_empty());
+        assert_eq!(report.errors, Vec::<String>::new());
         let totals = e.store.totals(None, None, None, None).unwrap();
         assert_eq!(
             (totals.events, totals.input_tokens, totals.output_tokens),
@@ -648,7 +648,7 @@ mod coordinator_tests {
         let failed = e
             .scan_items(&Coordinator, std::slice::from_ref(&item))
             .unwrap();
-        assert!(!failed.errors.is_empty());
+        assert_ne!(failed.errors, Vec::<String>::new());
         assert_eq!(e.store.load_cursor(&item.key).unwrap().offset, 0);
         e.store
             .conn()
@@ -677,7 +677,7 @@ mod coordinator_tests {
         let report = e
             .scan_items(&Coordinator, std::slice::from_ref(&item))
             .unwrap();
-        assert!(!report.errors.is_empty());
+        assert_ne!(report.errors, Vec::<String>::new());
         assert_eq!(e.store.load_cursor(&item.key).unwrap().offset, 0);
         assert_eq!(e.store.totals(None, None, None, None).unwrap().events, 0);
     }

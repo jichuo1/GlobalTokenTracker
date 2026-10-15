@@ -448,7 +448,7 @@ fn fingerprints_track_updates_deletes_and_drive_incremental_pulls() {
         s.days.iter().map(|d| d.day.as_str()).collect::<Vec<_>>(),
         ["2024-10-06"]
     );
-    assert!(s.removed.is_empty());
+    assert_eq!(s.removed, Vec::<String>::new());
 }
 
 #[test]
@@ -816,7 +816,7 @@ fn pairing_happy_path_pins_and_authorizes() {
             .unwrap()
             .unwrap();
         assert_eq!(status, 200, "{s}");
-        assert!(!s["days"].as_array().unwrap().is_empty());
+        assert_ne!(s["days"].as_array().unwrap(), &Vec::<Value>::new());
     }
     let seen = TrustStore::open(&state.peer_dir)
         .unwrap()
@@ -952,9 +952,15 @@ fn one_way_pairing_leaves_the_server_unpaired() {
         .unwrap()
         .unwrap();
     assert!(!paired.mutual);
-    assert!(super::devices::list(&server_f.store).unwrap().is_empty());
+    assert_eq!(
+        super::devices::list(&server_f.store).unwrap(),
+        Vec::<super::devices::PeerDevice>::new()
+    );
     let viewers = TrustStore::open(&peer_dir(&viewer.path)).unwrap();
-    assert!(viewers.viewers().unwrap().is_empty());
+    assert_eq!(
+        viewers.viewers().unwrap(),
+        Vec::<super::trust::Viewer>::new()
+    );
 }
 
 #[test]
@@ -986,7 +992,10 @@ fn sweep_hosts_cover_private_slash_24_only() {
     assert_eq!(hosts.len(), 253, "254 hosts minus our own");
     assert!(hosts.iter().all(|h| h.octets()[..3] == [192, 168, 1]));
     assert!(!hosts.contains(&Ipv4Addr::new(192, 168, 1, 20)));
-    assert!(super::discovery::sweep_hosts(&[Ipv4Addr::new(169, 254, 3, 4)]).is_empty());
+    assert_eq!(
+        super::discovery::sweep_hosts(&[Ipv4Addr::new(169, 254, 3, 4)]),
+        Vec::<Ipv4Addr>::new()
+    );
 }
 
 #[test]
@@ -1047,12 +1056,12 @@ fn wrong_code_fails_backs_off_and_is_never_retried() {
         pairing::pair(&viewer.store, &addr.to_string(), &wrong, "Laptop").unwrap(),
         Err("pairing_failed")
     );
-    assert!(
+    assert_eq!(
         TrustStore::open(&state.peer_dir)
             .unwrap()
             .viewers()
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        Vec::<super::trust::Viewer>::new()
     );
     // The viewer refuses to reuse a code that failed.
     assert_eq!(
@@ -1183,14 +1192,17 @@ fn an_interceptor_certificate_can_neither_pair_nor_pull() {
         pairing::pair(&viewer.store, &mitm.to_string(), &code, "Laptop").unwrap(),
         Err("pairing_failed")
     );
-    assert!(
+    assert_eq!(
         TrustStore::open(&state.peer_dir)
             .unwrap()
             .viewers()
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        Vec::<super::trust::Viewer>::new()
     );
-    assert!(super::devices::list(&viewer.store).unwrap().is_empty());
+    assert_eq!(
+        super::devices::list(&viewer.store).unwrap(),
+        Vec::<super::devices::PeerDevice>::new()
+    );
 
     // A device that does not know the code cannot pair either.
     let (fake_addr, fake) = start(&attacker_f, true);
@@ -1505,7 +1517,7 @@ fn advertisement_is_discoverable_and_withdrawn() {
         .find(|f| f.device_id == t.device_id)
         .expect("advertised");
     assert_eq!((me.name.as_str(), me.port), ("mdns-it", 47399));
-    assert!(!me.addresses.is_empty());
+    assert_ne!(me.addresses, Vec::<String>::new());
     ad.withdraw();
 }
 
@@ -2192,7 +2204,7 @@ fn overlapping_sources_are_flagged_not_deduplicated() {
     fill(&viewer.store);
     let (_state, id) = pair_and_sync(&server_f, &viewer);
     let warnings = super::merged::overlaps(&viewer.store).unwrap();
-    assert!(!warnings.is_empty());
+    assert_ne!(warnings, Vec::<super::merged::OverlapWarning>::new());
     for w in &warnings {
         assert_eq!(w.code, "possible_shared_source");
         assert!(w.days >= super::merged::OVERLAP_MIN_DAYS);
@@ -2212,7 +2224,10 @@ fn overlapping_sources_are_flagged_not_deduplicated() {
     let other = fixture();
     fill_viewer(&other.store);
     pair_and_sync(&server_f, &other);
-    assert!(super::merged::overlaps(&other.store).unwrap().is_empty());
+    assert_eq!(
+        super::merged::overlaps(&other.store).unwrap(),
+        Vec::<super::merged::OverlapWarning>::new()
+    );
 }
 
 #[test]
