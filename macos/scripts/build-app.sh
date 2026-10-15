@@ -35,12 +35,17 @@ rust_triple() { [[ $1 == arm64 ]] && echo aarch64-apple-darwin || echo x86_64-ap
 
 echo "==> Rust engine (${ARCHS[*]})"
 LIBS=()
+TARGET_FLAGS=()
+INSTALLED_TARGETS="$(rustup target list --installed 2>/dev/null || true)"
 for arch in "${ARCHS[@]}"; do
   t="$(rust_triple "$arch")"
-  rustup target add "$t" >/dev/null 2>&1 || true
-  cargo build --manifest-path "$ROOT/Cargo.toml" --release -p globaltokentracker-ffi --target "$t"
+  if ! grep -qx "$t" <<<"$INSTALLED_TARGETS"; then
+    rustup target add "$t" >/dev/null 2>&1 || true
+  fi
+  TARGET_FLAGS+=(--target "$t")
   LIBS+=("$ROOT/target/$t/release/libgtt_ffi.a")
 done
+cargo build --manifest-path "$ROOT/Cargo.toml" --release --locked -p globaltokentracker-ffi "${TARGET_FLAGS[@]}"
 mkdir -p "$ROOT/target/universal-release"
 lipo -create "${LIBS[@]}" -output "$ROOT/target/universal-release/libgtt_ffi.a"
 

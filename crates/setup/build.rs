@@ -7,6 +7,9 @@ const EMPTY_ZIP: &[u8] = &[
 ];
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../assets/icon.ico");
+    println!("cargo:rerun-if-env-changed=GTT_EMBED_PAYLOAD");
     // Embed the app icon as resource #1 — installer window/titlebar and the
     // installed exe pick it up via LoadIconW(MAKEINTRESOURCE(1)).
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
@@ -17,8 +20,6 @@ fn main() {
     }
     let src = Path::new("payload/payload.zip");
     let out = Path::new(&env::var("OUT_DIR").unwrap()).join("payload.zip");
-    // No rerun-if-changed on purpose: default = re-run when any file in the
-    // crate changes, so payload.zip appearing/disappearing is always picked up.
     if src.exists() {
         fs::copy(src, &out).unwrap();
     } else {

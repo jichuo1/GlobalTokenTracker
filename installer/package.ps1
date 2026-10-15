@@ -23,9 +23,9 @@ $payloadDir = Join-Path $root 'crates\setup\payload'
 $payloadZip = Join-Path $payloadDir 'payload.zip'
 
 if (-not $SkipBuild) {
-    Write-Host '==> cargo build --release -p globaltokentracker-ui -p globaltokentracker-cli' -ForegroundColor Cyan
+    Write-Host '==> cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli' -ForegroundColor Cyan
     Push-Location $root
-    cargo build --release -p globaltokentracker-ui -p globaltokentracker-cli
+    cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
     Pop-Location
 }
@@ -48,15 +48,18 @@ Compress-Archive -Path (Join-Path $target 'globaltokentracker-ui.exe'),
                        (Join-Path $target 'globaltokentracker-cli.exe') `
                  -DestinationPath $payloadZip -CompressionLevel Optimal
 
-Write-Host '==> cargo build --release -p globaltokentracker-setup' -ForegroundColor Cyan
+Write-Host '==> cargo build --release --locked -p globaltokentracker-setup' -ForegroundColor Cyan
 Push-Location $root
-# Cargo's build-script freshness can miss a newly-created payload.zip —
-# touching build.rs forces it to re-run and re-embed the real payload.
-(Get-Item (Join-Path $root 'crates\setup\build.rs')).LastWriteTime = Get-Date
-cargo build --release -p globaltokentracker-setup
-$rc = $LASTEXITCODE
-Pop-Location
-Remove-Item $payloadZip -Force   # never keep the payload around
+# Drive setup's build.rs freshness by the exact payload digest without dirtying tracked source mtimes.
+$env:GTT_EMBED_PAYLOAD = (Get-FileHash $payloadZip -Algorithm SHA256).Hash.ToLower()
+try {
+    cargo build --release --locked -p globaltokentracker-setup
+    $rc = $LASTEXITCODE
+} finally {
+    Remove-Item Env:GTT_EMBED_PAYLOAD -ErrorAction SilentlyContinue
+    Pop-Location
+    Remove-Item $payloadZip -Force -ErrorAction SilentlyContinue   # never keep the payload around
+}
 if ($rc -ne 0) { throw 'setup build failed' }
 
 $ver = (Select-String -Path (Join-Path $root 'Cargo.toml') `
