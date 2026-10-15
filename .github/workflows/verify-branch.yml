@@ -21,6 +21,7 @@ env:
   # Windows runners default stdout to cp1252; printing Chinese warnings would
   # raise UnicodeEncodeError in the Python helpers.
   PYTHONUTF8: "1"
+  GTT_RELEASE_TAG: ""
 
 jobs:
   windows:
@@ -58,48 +59,50 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy,rustfmt
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
       # Named gates that do not short-circuit each other: one run reports
       # every failure.
-      - name: Build workspace (debug)
-        id: build
+      - name: Rustfmt (check formatting)
+        id: fmt
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --workspace --all-targets
-
-      - name: Unit tests
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --workspace
+          cargo fmt --all -- --check
 
       - name: Clippy (deny warnings)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        id: clippy
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Unit tests
+        id: unit_tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace --locked
 
       - name: Release build
         id: release
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --workspace
+          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup
 
       - name: Validate installer packaging
         id: package
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         shell: pwsh
         run: |
-          installer\package.ps1
+          installer\package.ps1 -SkipBuild
           $exe = Get-Item "dist\GlobalTokenTracker-Setup-${{ steps.identity.outputs.version_name }}-win-x64.exe"
           if ($exe.Length -lt 1MB) { throw "installer suspiciously small: $($exe.Length)" }
           "installer_size=$($exe.Length)" >> "$env:GITHUB_STEP_SUMMARY"
@@ -163,9 +166,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi
           cargo clippy -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi \
-            --all-targets -- -D warnings
+            --all-targets --locked -- -D warnings
+          cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi --locked
 
       # Ad-hoc signed: no signing identity or notarization secrets here.
       - name: Build universal app and disk image

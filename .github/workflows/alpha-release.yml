@@ -29,6 +29,8 @@ concurrency:
 env:
   # Windows runner 的标准输出默认 cp1252，打印中文警告会 UnicodeEncodeError 并让发布步骤失败。
   PYTHONUTF8: "1"
+  # 统一在顶层注入 GTT_RELEASE_TAG，避免不同 step 之间因 unset 与 "" 指纹差异触发 core 重编。
+  GTT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
 
 jobs:
   verify:
@@ -133,55 +135,64 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy,rustfmt
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
-      # 门禁拆成带名字的步骤：构建、测试、clippy、安装包产出互不短路，
-      # 一次拿到全部失败结果。
-      - name: Build workspace (debug)
-        id: build
+      # 门禁拆成带名字的步骤：格式、clippy、单元测试、Release 构建、安装包产出互不短路，
+      # 一次拿到全部失败结果；去掉无消费方的 debug 全量二进制链接，Release 只编一次。
+      - name: Rustfmt (check formatting)
+        id: fmt
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --workspace --all-targets
-
-      - name: Unit tests
-        id: unit_tests
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --workspace
+          cargo fmt --all -- --check
 
       - name: Clippy (deny warnings)
         id: clippy
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Unit tests
+        id: unit_tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace --locked
 
       - name: Release build
         id: release
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --workspace
+          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup
 
       - name: Validate installer packaging
         id: package
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         shell: pwsh
-        env:
-          GTT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
         run: |
-          installer\package.ps1
+          installer\package.ps1 -SkipBuild
           $exe = Get-Item "dist\GlobalTokenTracker-Setup-${{ steps.identity.outputs.version_name }}-win-x64.exe"
           if ($exe.Length -lt 1MB) { throw "installer suspiciously small: $($exe.Length)" }
           "installer_size=$($exe.Length)" >> "$env:GITHUB_STEP_SUMMARY"
+
+      - name: Stage verified release payload binaries for publish
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_alpha == true }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: verified-release-payload-${{ github.sha }}
+          path: |
+            target/release/globaltokentracker-ui.exe
+            target/release/globaltokentracker-cli.exe
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Upload test reports
         if: ${{ failure() }}
@@ -252,9 +263,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi
           cargo clippy -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi \
-            --all-targets -- -D warnings
+            --all-targets --locked -- -D warnings
+          cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi --locked
 
       - name: Import Developer ID certificate
         if: ${{ env.HAS_MAC_CERT == 'true' }}
@@ -367,6 +378,12 @@ jobs:
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Restore verified release payload binaries
+        uses: actions/download-artifact@v6
+        with:
+          name: verified-release-payload-${{ github.sha }}
+          path: target/release
+
       - name: Build installer package
         shell: pwsh
         env:
@@ -376,7 +393,7 @@ jobs:
           GTT_SIGN_PFX: ${{ secrets.GTT_SIGN_PFX }}
           GTT_SIGN_PFX_PASS: ${{ secrets.GTT_SIGN_PFX_PASS }}
         run: |
-          installer\package.ps1
+          installer\package.ps1 -SkipBuild
 
       - name: Download verified macOS disk image
         uses: actions/download-artifact@v6
