@@ -307,20 +307,24 @@ fn export(engine: &Engine, span: &str, out: Option<&std::path::Path>) -> Result<
             buf.push(',');
             csv_cell(&mut buf, cell);
         }
-        buf.push_str(&format!(
-            ",{},{},{},{},{},{},{},{},{},",
-            r.input_tokens,
-            r.output_tokens,
-            r.reasoning_tokens,
-            r.cache_read_tokens,
-            r.cache_write_tokens,
-            r.credits.map(|v| format!("{v:.4}")).unwrap_or_default(),
-            r.cost_usd.map(|v| format!("{v:.6}")).unwrap_or_default(),
-            r.cost_source.as_deref().unwrap_or(""),
-            r.duration_ms.map(|v| v.to_string()).unwrap_or_default()
-        ));
-        csv_cell(&mut buf, r.raw_ref.as_deref().unwrap_or(""));
-        buf.push_str(&format!(",{}\n", r.unclassified_tokens));
+        {
+            use std::fmt::Write;
+            let _ = write!(
+                buf,
+                ",{},{},{},{},{},{},{},{},{},",
+                r.input_tokens,
+                r.output_tokens,
+                r.reasoning_tokens,
+                r.cache_read_tokens,
+                r.cache_write_tokens,
+                r.credits.map(|v| format!("{v:.4}")).unwrap_or_default(),
+                r.cost_usd.map(|v| format!("{v:.6}")).unwrap_or_default(),
+                r.cost_source.as_deref().unwrap_or(""),
+                r.duration_ms.map(|v| v.to_string()).unwrap_or_default()
+            );
+            csv_cell(&mut buf, r.raw_ref.as_deref().unwrap_or(""));
+            let _ = writeln!(buf, ",{}", r.unclassified_tokens);
+        }
     }
     match out {
         Some(p) => {
@@ -568,7 +572,7 @@ fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
             rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         // Per-file watermarks: last cum.input + cum.output per rollout path.
-        let mut ours: std::collections::HashMap<String, i64> = Default::default();
+        let mut ours: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for (path, blob) in engine.store.adapter_states("codex")? {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&blob) {
                 let cum = &v["cum"];
@@ -592,10 +596,7 @@ fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
                 joined += 1;
             }
         }
-        println!(
-            "\ncodex watermark: joined {} threads — ours={} state_5={}",
-            joined, j_ours, j_theirs
-        );
+        println!("\ncodex watermark: joined {joined} threads — ours={j_ours} state_5={j_theirs}");
         println!(
             "Δ = {:.2}%  (gate <0.5%)",
             pct(j_ours as f64, j_theirs as f64)

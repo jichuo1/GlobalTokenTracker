@@ -242,7 +242,7 @@ impl SourceAdapter for ZCode {
                 provenance: Provenance::LocalSqlite,
                 duration_ms: dur,
                 ttft_ms: ttft,
-                status: status.or(turn).map(|s| s.to_string()),
+                status: status.or(turn),
                 error: err_ty,
                 raw_ref: Some(format!(
                     "{}#model_usage:{lrid}:{attempt}",

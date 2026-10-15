@@ -128,7 +128,7 @@ fn heat_palette(accent: ColorF, divider: ColorF, light: bool) -> [ColorF; 5] {
     let min = accent.r.min(accent.g).min(accent.b);
     let max = accent.r.max(accent.g).max(accent.b);
     let chroma = max - min;
-    let lightness = (max + min) * 0.5;
+    let lightness = f32::midpoint(max, min);
     let saturation = if chroma > 0.0 {
         chroma / (1.0 - (2.0 * lightness - 1.0).abs())
     } else {
@@ -188,6 +188,7 @@ pub fn is_light(window_theme: &str) -> bool {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn system_apps_light() -> bool {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
     let key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
@@ -204,8 +205,8 @@ fn system_apps_light() -> bool {
             name.as_ptr(),
             RRF_RT_REG_DWORD,
             std::ptr::null_mut(),
-            (&mut data as *mut u32).cast(),
-            &mut size,
+            (&raw mut data).cast(),
+            &raw mut size,
         )
     };
     status == 0 && data == 1

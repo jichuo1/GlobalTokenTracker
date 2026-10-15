@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Launch-at-login via the per-user Run key — no admin, no Task Scheduler.
 //! The value points at the *running* exe (`current_exe`), so an installed
 //! copy registers its install dir while a dev build registers target\…;
@@ -33,7 +34,7 @@ fn enabled_in(subkey: &str) -> bool {
             RRF_RT_REG_SZ,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            &raw mut size,
         )
     };
     status == 0 && size > 0
@@ -64,7 +65,7 @@ fn set_in(subkey: &str, on: bool) -> bool {
             0,
             KEY_SET_VALUE,
             std::ptr::null(),
-            &mut hkey,
+            &raw mut hkey,
             std::ptr::null_mut(),
         )
     };
@@ -80,7 +81,7 @@ fn set_in(subkey: &str, on: bool) -> bool {
                     name.as_ptr(),
                     0,
                     REG_SZ,
-                    wide.as_ptr() as *const u8,
+                    wide.as_ptr().cast::<u8>(),
                     (wide.len() * 2) as u32,
                 );
             }

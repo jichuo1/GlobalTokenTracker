@@ -50,7 +50,7 @@ impl SourceAdapter for Cursor {
         vec![
             db_path()
                 .parent()
-                .map(|p| p.to_path_buf())
+                .map(std::path::Path::to_path_buf)
                 .unwrap_or_default(),
         ]
     }

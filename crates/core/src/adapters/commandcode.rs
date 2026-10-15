@@ -186,7 +186,7 @@ impl SourceAdapter for CommandCode {
             // Header may have resolved after early events were emitted.
             for ev in &mut out.events {
                 if ev.project.is_none() || ev.project == slug {
-                    ev.project = state.cwd.clone();
+                    ev.project.clone_from(&state.cwd);
                 }
             }
         }

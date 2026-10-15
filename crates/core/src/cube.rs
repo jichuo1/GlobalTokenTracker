@@ -1309,7 +1309,13 @@ mod tests {
     fn cube_matches_sql_across_ranges_and_filters() {
         let store = ledger();
         let cube = Cube::build(&store).unwrap();
-        let some = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let some = |v: &[&str]| {
+            Some(
+                v.iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        };
         let app_filters = [
             None,
             some(&["claude"]),

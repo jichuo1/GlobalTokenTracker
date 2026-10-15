@@ -295,7 +295,7 @@ fn serve(
                 *advert.lock().map_err(|_| anyhow::anyhow!("poisoned"))? = Some(ad);
             }
             Err(e) => {
-                eprintln!("peer: mDNS advertisement unavailable ({e:#}); add this device by IP")
+                eprintln!("peer: mDNS advertisement unavailable ({e:#}); add this device by IP");
             }
         }
     }

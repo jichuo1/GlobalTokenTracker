@@ -1,7 +1,10 @@
 [package]
 name = "globaltokentracker-ffi"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
+
+[lints]
+workspace = true
 
 # C ABI over the core engine for native shells (the SwiftUI macOS app).
 [lib]

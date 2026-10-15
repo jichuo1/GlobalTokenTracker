@@ -227,8 +227,11 @@ pub fn rank_lan(ips: &[std::net::Ipv4Addr]) -> Vec<std::net::Ipv4Addr> {
         [10, ..] => 1,
         _ => 2,
     };
-    let mut out: Vec<std::net::Ipv4Addr> =
-        ips.iter().copied().filter(|ip| ip.is_private()).collect();
+    let mut out: Vec<std::net::Ipv4Addr> = ips
+        .iter()
+        .copied()
+        .filter(std::net::Ipv4Addr::is_private)
+        .collect();
     out.sort_by_key(|ip| (rank(ip), *ip));
     out.dedup();
     out

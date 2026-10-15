@@ -1876,7 +1876,7 @@ pub fn overview_page(
         ));
     }
 
-    for id in order.iter() {
+    for id in &order {
         let id_static: &'static str = match registry.iter().find(|r| **r == id) {
             Some(r) => r,
             None => continue,
@@ -4210,7 +4210,7 @@ mod tests {
         // Pixel widths scale with the font; the star column stays a star.
         let (wide, _) = plan_layout::<8>(DETAIL_PLANS[1], 2.0);
         assert!(matches!(wide[0], GridLength::Pixel(w) if (w - 168.0).abs() < 1e-9));
-        assert!(wide[2] == GridLength::STAR);
+        assert_eq!(wide[2], GridLength::STAR);
     }
 
     #[test]

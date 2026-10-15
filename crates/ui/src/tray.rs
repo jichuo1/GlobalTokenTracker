@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! System tray: left click or "显示" focuses the window, "隐藏到托盘" hides
 //! it (Win32 SW_HIDE — reactor 0.100.0 `WindowRef` has no hide verb), "退出"
 //! closes. Tooltip carries today's totals. `TrayIcon` is `!Send` and lives
@@ -73,7 +74,7 @@ pub fn main_hwnd() -> windows_sys::Win32::Foundation::HWND {
         unsafe {
             let ctx = &mut *(lp as *mut Ctx);
             let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, &mut pid);
+            GetWindowThreadProcessId(hwnd, &raw mut pid);
             if pid != ctx.pid {
                 return 1;
             }
@@ -96,7 +97,7 @@ pub fn main_hwnd() -> windows_sys::Win32::Foundation::HWND {
             pid: GetCurrentProcessId(),
             found: std::ptr::null_mut(),
         };
-        EnumWindows(Some(cb), &mut ctx as *mut Ctx as isize);
+        EnumWindows(Some(cb), &raw mut ctx as isize);
         ctx.found
     }
 }
@@ -147,7 +148,7 @@ pub fn focus_existing_window() -> bool {
         unsafe {
             let ctx = &mut *(lp as *mut Ctx);
             let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, &mut pid);
+            GetWindowThreadProcessId(hwnd, &raw mut pid);
             if pid == ctx.my_pid {
                 return 1;
             }
@@ -170,7 +171,7 @@ pub fn focus_existing_window() -> bool {
             my_pid: GetCurrentProcessId(),
             found: std::ptr::null_mut(),
         };
-        EnumWindows(Some(cb), &mut ctx as *mut Ctx as isize);
+        EnumWindows(Some(cb), &raw mut ctx as isize);
         if !ctx.found.is_null() {
             AllowSetForegroundWindow(u32::MAX);
             ShowWindow(ctx.found, SW_RESTORE);
@@ -233,24 +234,19 @@ pub fn try_hide_main_window() -> bool {
 /// shell after every call.
 pub fn next_action() -> TrayAction {
     crossbeam_channel::select! {
-        recv(TrayIconEvent::receiver()) -> ev => match ev {
-            Ok(TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Down,
-                ..
-            })
-            | Ok(TrayIconEvent::DoubleClick {
-                button: MouseButton::Left, ..
-            }) => TrayAction::Focus,
-            _ => TrayAction::None,
-        },
-        recv(MenuEvent::receiver()) -> ev => match ev {
-            Ok(e) if e.id.0 == MENU_QUIT => TrayAction::Quit,
-            Ok(e) if e.id.0 == MENU_SHOW => TrayAction::Focus,
-            Ok(e) if e.id.0 == MENU_HIDE => TrayAction::Hide,
-            _ => TrayAction::None,
-        },
-    }
+            recv(TrayIconEvent::receiver()) -> ev => match ev {
+                Ok(TrayIconEvent::Click {
+    button: MouseButton::Left, button_state: MouseButtonState::Down, .. } |
+    TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }) => TrayAction::Focus,
+                _ => TrayAction::None,
+            },
+            recv(MenuEvent::receiver()) -> ev => match ev {
+                Ok(e) if e.id.0 == MENU_QUIT => TrayAction::Quit,
+                Ok(e) if e.id.0 == MENU_SHOW => TrayAction::Focus,
+                Ok(e) if e.id.0 == MENU_HIDE => TrayAction::Hide,
+                _ => TrayAction::None,
+            },
+        }
 }
 
 /// Programmatic 32×32 glyph: rounded accent-blue square with three bars —

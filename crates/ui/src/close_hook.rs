@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Title-bar close interception: `SetWindowSubclass` on the main HWND swallows
 //! `WM_CLOSE` and re-routes it as `Msg::CloseRequested`, so the shell can ask
 //! "quit vs hide-to-tray" instead of dying. `AppWindow.Closing` (the WinUI3
@@ -42,7 +43,7 @@ thread_local! {
 /// just cache the sender and retry on the next frame.
 pub fn ensure_installed(sender: &LocalSender<Msg>) {
     SENDER.with(|s| *s.borrow_mut() = Some(sender.clone()));
-    if INSTALLED.with(|i| i.get()) {
+    if INSTALLED.with(std::cell::Cell::get) {
         return;
     }
     #[cfg(windows)]

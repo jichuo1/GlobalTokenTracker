@@ -101,7 +101,7 @@ fn discover_in(roots: &[PathBuf]) -> Vec<SourceItem> {
                     // plaintext twin of the same generation.
                     if ver > *g || (ver == *g && p.extension().is_some_and(|e| e == "zstd")) {
                         *g = ver;
-                        *old = p.clone();
+                        old.clone_from(&p);
                     }
                 })
                 .or_insert((ver, p));
@@ -123,7 +123,7 @@ fn discover_in(roots: &[PathBuf]) -> Vec<SourceItem> {
 /// decoded cleanly instead of failing the file.
 fn decode(path: &Path) -> Result<(Vec<u8>, bool)> {
     let raw = std::fs::read(path)?;
-    if !path.extension().is_some_and(|e| e == "zstd") {
+    if path.extension().is_none_or(|e| e != "zstd") {
         return Ok((raw, false));
     }
     let mut dec = zstd::stream::read::Decoder::new(raw.as_slice())?;

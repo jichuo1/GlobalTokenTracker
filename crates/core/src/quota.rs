@@ -276,7 +276,7 @@ fn poll_cursor() -> Result<Vec<QuotaSnapshot>> {
     let resets = v["billingCycleEnd"]
         .as_str()
         .and_then(|s| s.parse::<jiff::Timestamp>().ok())
-        .map(|t| t.as_millisecond());
+        .map(jiff::Timestamp::as_millisecond);
     let plan = &v["planUsage"];
     let mut out = Vec::new();
     if let Some(pct) = lenient_f64(&plan["totalPercentUsed"]) {

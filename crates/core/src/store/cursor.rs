@@ -55,7 +55,7 @@ pub fn tail_fingerprint(path: &Path, offset: u64) -> Result<Option<String>> {
     let mut h = Sha256::new();
     h.update(&buf);
     let digest = h.finalize();
-    Ok(Some(digest.iter().map(|b| format!("{b:02x}")).collect()))
+    Ok(Some(crate::peer::keys::hex(&digest)))
 }
 
 impl super::Store {

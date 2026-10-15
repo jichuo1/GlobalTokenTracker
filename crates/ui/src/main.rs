@@ -498,6 +498,7 @@ fn diag_console() {
         ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, GetStdHandle, STD_ERROR_HANDLE,
         STD_OUTPUT_HANDLE, SetStdHandle,
     };
+    #[allow(unsafe_code)]
     unsafe {
         if !GetStdHandle(STD_ERROR_HANDLE).is_null() {
             return; // already have a console (dev build / console launch)
@@ -535,7 +536,7 @@ pub(crate) fn window_icon_path() -> &'static str {
     P.get_or_init(|| {
         let dir = db_path()
             .parent()
-            .map(|d| d.to_path_buf())
+            .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let p = dir.join("icon.ico");
         if !p.exists() {
@@ -586,7 +587,7 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         let report = engine.scan_once();
         (engine.store, report, t.elapsed().as_millis())
     } else {
-        (store, Ok(Default::default()), 0)
+        (store, Ok(globaltokentracker_core::ScanReport::default()), 0)
     };
     // A failed scan can't prove "nothing changed" — rebuild views anyway.
     let changed = report
@@ -1025,7 +1026,7 @@ impl Component for Shell {
                                     .unwrap_or(1200);
                                 let alt = parts.next().unwrap_or("总览").to_string();
                                 for k in 0..8u64 {
-                                    let to = if k % 2 == 0 { &label } else { &alt }.to_string();
+                                    let to = if k % 2 == 0 { &label } else { &alt }.clone();
                                     context.spawn_background(move |_| {
                                         power::worker("gtt-navtest");
                                         std::thread::sleep(std::time::Duration::from_millis(
@@ -1238,7 +1239,7 @@ impl Component for Shell {
                 let mut set: std::collections::BTreeSet<String> = self
                     .app_filter
                     .clone()
-                    .unwrap_or_else(|| all.to_vec())
+                    .unwrap_or_else(|| all.clone())
                     .into_iter()
                     .collect();
                 if on {
@@ -1275,7 +1276,7 @@ impl Component for Shell {
                 let mut set: std::collections::BTreeSet<String> = self
                     .model_filter
                     .clone()
-                    .unwrap_or_else(|| all.to_vec())
+                    .unwrap_or_else(|| all.clone())
                     .into_iter()
                     .collect();
                 if on {
@@ -1858,13 +1859,13 @@ impl Component for Shell {
                 self.open_menu = None;
                 let prev = self.page;
                 self.page = match tag.as_deref() {
-                    Some("明细") | Some("Details") | Some("detail") => Page::Detail,
-                    Some("配额") | Some("Quota") | Some("quota") => Page::Quota,
-                    Some("设备") | Some("Devices") | Some("devices") => Page::Devices,
-                    Some("数据源") | Some("Sources") | Some("sources") => Page::Sources,
-                    Some("价格") | Some("Prices") | Some("prices") => Page::Prices,
-                    Some("设置") | Some("Settings") | Some("settings") => Page::Settings,
-                    Some("总览") | Some("Overview") | Some("overview") => Page::Overview,
+                    Some("明细" | "Details" | "detail") => Page::Detail,
+                    Some("配额" | "Quota" | "quota") => Page::Quota,
+                    Some("设备" | "Devices" | "devices") => Page::Devices,
+                    Some("数据源" | "Sources" | "sources") => Page::Sources,
+                    Some("价格" | "Prices" | "prices") => Page::Prices,
+                    Some("设置" | "Settings" | "settings") => Page::Settings,
+                    Some("总览" | "Overview" | "overview") => Page::Overview,
                     // None or an unrecognized label → keep the current page;
                     // a cleared selector must not teleport the user.
                     _ => prev,
@@ -3001,6 +3002,7 @@ struct SingleInstanceGuard {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -3012,6 +3014,7 @@ impl Drop for SingleInstanceGuard {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn ensure_single_instance() -> Option<SingleInstanceGuard> {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;

@@ -620,10 +620,7 @@ pub fn fingerprint(groups: &[Group]) -> String {
             h.update(n.to_le_bytes());
         }
     }
-    h.finalize()[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::peer::keys::hex(&h.finalize()[..8])
 }
 
 fn quotas(tx: &Connection, identity: &Identity) -> rusqlite::Result<Result<Quotas, &'static str>> {
@@ -847,10 +844,7 @@ fn new_device_id() -> String {
                 .to_le_bytes(),
         );
     }
-    h.finalize()[..16]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::peer::keys::hex(&h.finalize()[..16])
 }
 
 /// A display name: trimmed, no control characters, at most 64 characters.

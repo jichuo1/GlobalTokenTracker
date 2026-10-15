@@ -91,7 +91,10 @@ fn shared_consensus(store: &Store, rules: &Rules) -> Result<std::sync::Arc<Conse
     )?;
     let fingerprint: CacheKey = (table, rules.fingerprint());
     if !path.is_empty()
-        && let Some((p, f, c)) = CONSENSUS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && let Some((p, f, c)) = CONSENSUS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
         && *p == path
         && *f == fingerprint
     {
@@ -108,7 +111,10 @@ fn shared_consensus(store: &Store, rules: &Rules) -> Result<std::sync::Arc<Conse
     }
     let c = std::sync::Arc::new(Consensus { map, by_canon });
     if !path.is_empty() {
-        *CONSENSUS.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, fingerprint, c.clone()));
+        *CONSENSUS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((path, fingerprint, c.clone()));
     }
     Ok(c)
 }
@@ -618,7 +624,8 @@ pub fn normalize_key(raw: &str) -> String {
     let tail = raw.rsplit_once('/').map(|(_, t)| t).unwrap_or(raw);
     let no_tag = tail.split(':').next().unwrap_or(tail);
     let s = no_tag.replace('@', "-").to_lowercase();
-    s.strip_suffix("[1m]").map_or(s.clone(), |s| s.to_string())
+    s.strip_suffix("[1m]")
+        .map_or(s.clone(), std::string::ToString::to_string)
 }
 
 /// The keys a raw id is looked up under before any peeling: its normalized
@@ -880,14 +887,14 @@ mod tests {
         let book = PriceBook::load(&s).unwrap();
         match book.resolve("m-x", None, None) {
             Resolution::Priced(_, _, p) => assert_eq!(p.input, 5.0), // dev over seed+litellm
-            _ => panic!("m-x should be priced"),
+            Resolution::Unpriced => panic!("m-x should be priced"),
         }
         match book.resolve("m-y", None, None) {
             Resolution::Priced(_, via, p) => {
                 assert_eq!(via, "override");
                 assert_eq!(p.input, 9.0);
             }
-            _ => panic!("m-y should hit override"),
+            Resolution::Unpriced => panic!("m-y should hit override"),
         }
     }
 

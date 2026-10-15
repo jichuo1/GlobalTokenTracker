@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Installed-font enumeration via DirectWrite — the same engine that renders
 //! chart text, so every family name listed is guaranteed to resolve in
 //! `TextFormat`. Enumerated once per process; a font installed while the app
@@ -27,7 +28,7 @@ fn enumerate() -> Vec<String> {
         };
         let mut collection = None;
         if factory
-            .GetSystemFontCollection(&mut collection, true)
+            .GetSystemFontCollection(&raw mut collection, true)
             .is_err()
         {
             return out;
@@ -72,10 +73,10 @@ fn localized_name(names: &IDWriteLocalizedStrings, locale: &[u16]) -> Option<Str
         let mut index = 0u32;
         let mut exists = BOOL(0);
         if !locale.is_empty() {
-            let _ = names.FindLocaleName(PCWSTR(locale.as_ptr()), &mut index, &mut exists);
+            let _ = names.FindLocaleName(PCWSTR(locale.as_ptr()), &raw mut index, &raw mut exists);
         }
         if !exists.as_bool() {
-            let _ = names.FindLocaleName(w!("en-us"), &mut index, &mut exists);
+            let _ = names.FindLocaleName(w!("en-us"), &raw mut index, &raw mut exists);
         }
         if !exists.as_bool() {
             index = 0;

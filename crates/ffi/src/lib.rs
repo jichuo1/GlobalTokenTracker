@@ -170,7 +170,7 @@ fn load(req: LoadReq) -> Result<Value, String> {
         let report = engine.scan_once();
         (engine.store, report, t.elapsed().as_millis())
     } else {
-        (store, Ok(Default::default()), 0)
+        (store, Ok(globaltokentracker_core::ScanReport::default()), 0)
     };
     let changed = report
         .as_ref()

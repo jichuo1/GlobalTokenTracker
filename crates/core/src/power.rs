@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! CPU scheduling hints for hybrid (P/E-core) hosts — Windows 11 EcoQoS.
 //!
 //! Three levels, mapped onto real work in the app:
@@ -75,7 +76,7 @@ pub fn efficiency_thread() {
             let ok = SetThreadInformation(
                 GetCurrentThread(),
                 ThreadPowerThrottling,
-                &state as *const _ as *const _,
+                (&raw const state).cast(),
                 size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
             );
             if ok == 0 {
@@ -143,7 +144,7 @@ pub fn efficiency_process(on: bool) {
             let ok = SetProcessInformation(
                 GetCurrentProcess(),
                 ProcessPowerThrottling,
-                &state as *const _ as *const _,
+                (&raw const state).cast(),
                 size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
             );
             if ok == 0 {
@@ -155,7 +156,7 @@ pub fn efficiency_process(on: bool) {
             let ok = SetProcessInformation(
                 GetCurrentProcess(),
                 ProcessMemoryPriority,
-                &mem as *const _ as *const _,
+                (&raw const mem).cast(),
                 size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
             );
             if ok == 0 {
@@ -220,7 +221,7 @@ mod tests {
                 SetThreadInformation(
                     GetCurrentThread(),
                     ThreadPowerThrottling,
-                    &st as *const _ as *const _,
+                    (&raw const st).cast(),
                     size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
                 ),
                 0
@@ -234,7 +235,7 @@ mod tests {
                 SetProcessInformation(
                     GetCurrentProcess(),
                     ProcessPowerThrottling,
-                    &pst as *const _ as *const _,
+                    (&raw const pst).cast(),
                     size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
                 ),
                 0
@@ -266,7 +267,7 @@ mod tests {
         name_thread("gtt-probe");
         unsafe {
             let mut out: windows_sys::core::PWSTR = std::ptr::null_mut();
-            let hr = GetThreadDescription(GetCurrentThread(), &mut out);
+            let hr = GetThreadDescription(GetCurrentThread(), &raw mut out);
             assert!(hr >= 0, "GetThreadDescription failed {hr:#x}");
             let s = {
                 let mut len = 0;
@@ -292,7 +293,11 @@ mod mac_tests {
             unsafe {
                 let (mut qos, mut rel) = (0u32, 0i32);
                 assert_eq!(
-                    darwin::pthread_get_qos_class_np(darwin::pthread_self(), &mut qos, &mut rel),
+                    darwin::pthread_get_qos_class_np(
+                        darwin::pthread_self(),
+                        &raw mut qos,
+                        &raw mut rel
+                    ),
                     0
                 );
                 assert_eq!(qos, darwin::QOS_CLASS_UTILITY);

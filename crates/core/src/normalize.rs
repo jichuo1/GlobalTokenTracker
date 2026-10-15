@@ -54,13 +54,13 @@ pub fn ts_ms(v: &Value) -> Option<i64> {
     let s = text(v)?;
     jiff::Timestamp::from_str(&s)
         .ok()
-        .map(|t| t.as_millisecond())
+        .map(jiff::Timestamp::as_millisecond)
         .or_else(|| {
             // "2026-09-01T10:00:00" without zone — treat as UTC (tool logs are UTC).
             format!("{s}Z")
                 .parse::<jiff::Timestamp>()
                 .ok()
-                .map(|t| t.as_millisecond())
+                .map(jiff::Timestamp::as_millisecond)
         })
 }
 

@@ -128,10 +128,7 @@ pub(crate) fn label(value: &str) -> Option<String> {
 }
 
 pub(crate) fn opaque(value: &str) -> String {
-    Sha256::digest(value.as_bytes())[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::peer::keys::hex(&Sha256::digest(value.as_bytes())[..8])
 }
 
 pub(crate) fn finite(value: Option<f64>) -> Option<f64> {
@@ -504,7 +501,7 @@ impl RefreshLease {
         // conforming refresh is still alive, even if a crashed owner's JSON
         // lease has not expired. Reclaim it without a two-minute dead period.
         if let Some(raw) = state(&tx, COOLDOWN_KEY)?
-            && raw.parse::<i64>().ok().is_some_and(|last| {
+            && raw.parse::<i64>().is_ok_and(|last| {
                 last <= now && now.saturating_sub(last) < i64::from(cooldown_secs) * 1000
             })
         {

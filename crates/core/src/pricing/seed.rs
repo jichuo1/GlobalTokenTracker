@@ -31,7 +31,7 @@ pub fn ensure_seeded(store: &Store) -> Result<()> {
         )?;
         for (model_id, v) in &map {
             let a = v.as_array();
-            let get = |i: usize| a.and_then(|a| a.get(i)).and_then(|x| x.as_f64());
+            let get = |i: usize| a.and_then(|a| a.get(i)).and_then(serde_json::Value::as_f64);
             st.execute(params![
                 model_id,
                 get(0).unwrap_or(0.0),

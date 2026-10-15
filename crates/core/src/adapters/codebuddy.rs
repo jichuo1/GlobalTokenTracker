@@ -53,7 +53,10 @@ const QUIET: std::time::Duration = std::time::Duration::from_secs(2);
 /// Forget which conversations were last seen unchanged (manual refresh: trust
 /// nothing, re-read everything against the cursors).
 pub fn forget_scan_memo() {
-    dir_memo().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    dir_memo()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 }
 
 pub struct CodeBuddyIde {
@@ -203,7 +206,7 @@ impl SourceAdapter for CodeBuddyIde {
         vec![
             data_root()
                 .parent()
-                .map(|p| p.to_path_buf())
+                .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(data_root),
         ]
     }
@@ -240,7 +243,7 @@ impl SourceAdapter for CodeBuddyIde {
         if let Some(t) = stamp
             && dir_memo()
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&item.key)
                 == Some(&t)
         {
@@ -254,7 +257,7 @@ impl SourceAdapter for CodeBuddyIde {
         {
             dir_memo()
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(item.key.clone(), t);
         }
         Ok(out)
@@ -275,7 +278,10 @@ impl CodeBuddyIde {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         let project = {
-            let mut g = self.cwds.lock().unwrap_or_else(|e| e.into_inner());
+            let mut g = self
+                .cwds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             g.get_or_insert_with(session_dirs)
                 .get(&conv)
                 .and_then(|cwd| {
