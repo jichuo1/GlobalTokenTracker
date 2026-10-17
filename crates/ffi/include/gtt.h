@@ -42,6 +42,11 @@ char *gtt_sources(void);
 char *gtt_prices(const char *req_json);
 /* -1 = read, 0 / 1 = set → {enabled, invalid, error?, path} */
 char *gtt_external_interface(int set);
+/* Display currency for money figures → {display, usd_to, source?,
+ * fetched_at_ms?, stale}. gtt_set_display_currency takes an ISO code
+ * ("CNY"); NULL or "" restores the ledger default (USD). */
+char *gtt_fx_status(void);
+char *gtt_set_display_currency(const char *code);
 /* Download + SHA-256-verify the update for "stable" | "alpha" → {version, path} */
 char *gtt_download_update(const char *channel);
 char *gtt_refresh_prices(void);

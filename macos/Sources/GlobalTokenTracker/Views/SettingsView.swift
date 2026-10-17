@@ -30,6 +30,32 @@ struct GeneralSettings: View {
     @ViewState private var launchAtLogin = Prefs.launchAtLogin
     @ViewState private var loginError: String?
     @ViewState private var languageChanged = false
+    @State private var displayCurrency = "USD"
+    @State private var fx: FxStatus?
+
+    private struct CurrencyOption: Identifiable {
+        let code: String
+        let symbol: String
+        var id: String { code }
+    }
+
+    private static let currencyOptions: [CurrencyOption] = [
+        .init(code: "USD", symbol: "$"), .init(code: "CNY", symbol: "¥"),
+        .init(code: "EUR", symbol: "€"), .init(code: "JPY", symbol: "¥"),
+        .init(code: "GBP", symbol: "£"), .init(code: "KRW", symbol: "₩"),
+        .init(code: "HKD", symbol: "HK$"), .init(code: "TWD", symbol: "NT$"),
+        .init(code: "CAD", symbol: "CA$"), .init(code: "AUD", symbol: "A$"),
+        .init(code: "SGD", symbol: "S$"), .init(code: "INR", symbol: "₹"),
+    ]
+
+    private var fxNote: String {
+        guard let fx, let src = fx.source else {
+            return String(localized: "No rate fetched yet; showing USD.")
+        }
+        let rate = fx.usdTo.formatted(.number.precision(.fractionLength(0...4)))
+        let stale = fx.stale ? " · " + String(localized: "cache stale") : ""
+        return "\(src) · 1 USD = \(rate) \(fx.display)\(stale)"
+    }
 
     var body: some View {
         @Bindable var model = model
@@ -78,6 +104,34 @@ struct GeneralSettings: View {
                         Spacer()
                         Button("Relaunch Now") { Prefs.relaunch() }
                     }
+                }
+            }
+
+            Section {
+                Picker("Display currency", selection: $displayCurrency) {
+                    ForEach(Self.currencyOptions) { opt in
+                        Text("\(opt.code) \(opt.symbol)").tag(opt.code)
+                    }
+                }
+                .onChange(of: displayCurrency) { _, code in
+                    Task {
+                        if let st = try? await Core.setDisplayCurrency(code) {
+                            fx = st
+                        }
+                    }
+                }
+                Text(fxNote)
+                    .scaledFont(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Currency")
+            } footer: {
+                Text("Amounts convert at the cached rate for display; the ledger always stays USD.")
+            }
+            .task {
+                if let st = try? await Core.fxStatus() {
+                    displayCurrency = st.display
+                    fx = st
                 }
             }
 

@@ -5,11 +5,34 @@ import Foundation
 import SwiftUI
 
 enum Fmt {
-    /// core's `fmt::usd`: 0 decimals ≥ $100, 2 ≥ $1, else up to 4; trailing zeros trimmed.
+    /// Display currency converted from the ledger USD at core's cached rate
+    /// (`fx`), applied on every load. The ledger itself never leaves USD.
+    private static let fxLock = NSLock()
+    private static var fxCode = "USD"
+    private static var fxUsdTo = 1.0
+
+    static func setDisplay(code: String, usdTo: Double) {
+        fxLock.lock()
+        fxCode = code
+        fxUsdTo = usdTo > 0 ? usdTo : 1.0
+        fxLock.unlock()
+    }
+
+    private static func display() -> (code: String, rate: Double) {
+        fxLock.lock()
+        defer { fxLock.unlock() }
+        return (fxCode, fxUsdTo)
+    }
+
+    /// core's `fmt::usd` under the configured display currency: 0 decimals
+    /// ≥ 100, 2 ≥ 1, else up to 4; trailing zeros trimmed.
     static func usd(_ v: Double) -> String {
-        let maxDigits = v >= 100 ? 0 : (v >= 1 ? 2 : 4)
-        return v.formatted(
-            .currency(code: "USD").precision(.fractionLength(0...maxDigits))
+        let (code, rate) = display()
+        let plain = code == "USD" || rate == 1.0
+        let value = plain ? v : v * rate
+        let maxDigits = value >= 100 ? 0 : (value >= 1 ? 2 : 4)
+        return value.formatted(
+            .currency(code: plain ? "USD" : code).precision(.fractionLength(0...maxDigits))
         )
     }
 
@@ -61,9 +84,14 @@ enum Fmt {
         )
     }
 
-    /// Per-million price, trimmed ("$3", "$0.075").
+    /// Per-million price, trimmed ("$3", "$0.075") — display currency too.
     static func perMillion(_ v: Double) -> String {
-        v.formatted(.currency(code: "USD").precision(.fractionLength(0...4)))
+        let (code, rate) = display()
+        let plain = code == "USD" || rate == 1.0
+        let value = plain ? v : v * rate
+        return value.formatted(
+            .currency(code: plain ? "USD" : code).precision(.fractionLength(0...4))
+        )
     }
 
     private static let dayParser: DateFormatter = {

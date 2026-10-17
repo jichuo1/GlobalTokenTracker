@@ -386,6 +386,17 @@ struct LoadResult: Decodable, Sendable {
     var trend: TrendSeries?
     /// vm.quotas ordered most-pressing first (core::viewmodel::rank_quotas).
     var quotasRanked: [QuotaRow]?
+    /// Display-currency status; absent on `fresh:false` short-circuits.
+    var fx: FxStatus?
+}
+
+/// core `fx::FxStatus` — presentation currency + cached-rate provenance.
+struct FxStatus: Decodable, Sendable, Equatable {
+    var display: String
+    var usdTo: Double
+    var source: String?
+    var fetchedAtMs: Int64?
+    var stale: Bool
 }
 
 struct DetailPage: Decodable, Sendable {

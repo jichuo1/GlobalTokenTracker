@@ -62,6 +62,9 @@ enum Core {
         guard env.ok, let value = env.data else {
             throw CoreError.engine(env.error ?? "unknown engine error")
         }
+        if let r = value as? LoadResult, let fx = r.fx {
+            Fmt.setDisplay(code: fx.display, usdTo: fx.usdTo)
+        }
         return value
     }
 
@@ -96,6 +99,16 @@ enum Core {
     nonisolated static func externalInterface(set: Bool?) async throws -> ExternalInterfaceState {
         let arg: Int32 = set.map { $0 ? 1 : 0 } ?? -1
         return try await detached(priority: .utility) { try call { gtt_external_interface(arg) } }
+    }
+
+    nonisolated static func fxStatus() async throws -> FxStatus {
+        try await detached(priority: .utility) { try call { gtt_fx_status() } }
+    }
+
+    nonisolated static func setDisplayCurrency(_ code: String) async throws -> FxStatus {
+        try await detached(priority: .utility) {
+            try call { code.withCString { gtt_set_display_currency($0) } }
+        }
     }
 
     nonisolated static func downloadUpdate(channel: String) async throws -> DownloadedUpdate {

@@ -214,6 +214,8 @@ fn load(req: LoadReq) -> Result<Value, String> {
     let (bars, avg) = trend::drawn(&vm.daily);
     let trend = json!({ "buckets": bars, "avg": avg });
     let quotas_ranked = rank_quotas(&vm.quotas, globaltokentracker_core::store::now_ms());
+    let fx = serde_json::to_value(globaltokentracker_core::fx::status(&store))
+        .map_err(|e| e.to_string())?;
     Ok(json!({
         "fresh": true,
         "scan_ms": scan_ms,
@@ -221,6 +223,7 @@ fn load(req: LoadReq) -> Result<Value, String> {
         "scan": scan,
         "trend": trend,
         "quotas_ranked": quotas_ranked,
+        "fx": fx,
         "vm": vm,
         // Event rows are always this device's; peers share aggregates only.
         "detail": { "rows": rows, "total": cube.event_count(apps, models), "page_size": DETAIL_PAGE_SIZE,
@@ -730,6 +733,37 @@ pub unsafe extern "C" fn gtt_prices(req_json: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn gtt_external_interface(set: i32) -> *mut c_char {
     guarded(|| external(if set < 0 { None } else { Some(set != 0) }))
+}
+
+/// Display-currency status: `{"display","usd_to","source","fetched_at_ms","stale"}`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gtt_fx_status() -> *mut c_char {
+    guarded(|| {
+        serde_json::to_value(globaltokentracker_core::fx::status(&open()?))
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Set the display currency for money figures (ISO code, e.g. "CNY") and
+/// return the refreshed status. NULL or empty restores the ledger default.
+///
+/// # Safety
+/// `code` is NULL or a valid NUL-terminated UTF-8 string that outlives the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_set_display_currency(code: *const c_char) -> *mut c_char {
+    guarded(|| {
+        let code = if code.is_null() {
+            ""
+        } else {
+            unsafe { CStr::from_ptr(code) }
+                .to_str()
+                .map_err(|e| e.to_string())?
+        };
+        let store = open()?;
+        globaltokentracker_core::fx::set_display_currency(&store, code)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(globaltokentracker_core::fx::status(&store)).map_err(|e| e.to_string())
+    })
 }
 
 /// Download + verify the update for `channel`; returns the local file path.

@@ -622,6 +622,7 @@ impl Store {
         models: Option<&[String]>,
         devices: Option<&[String]>,
     ) -> Result<OverviewVm> {
+        crate::fx::apply(self);
         let mut vm = if let Some(p) = cube.overview_parts_for(range, apps, models, devices) {
             let quotas = self.latest_quotas()?;
             OverviewVm {
@@ -733,6 +734,7 @@ impl Store {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Result<OverviewVm> {
+        crate::fx::apply(self);
         let t0 = day_start_ms(0);
         let start = range.start_ms();
         let end = range.end_ms();
@@ -795,6 +797,7 @@ impl Store {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Result<DetailVm> {
+        crate::fx::apply(self);
         let (device_id, device_name) = crate::peer::local_device(self)?;
         Ok(DetailVm {
             rows: self.events_page(page_size, page * page_size, apps, models)?,
@@ -909,15 +912,88 @@ pub mod fmt {
         if t.is_empty() { "0".into() } else { t.into() }
     }
 
+    /// Process-wide display currency for money figures. The ledger stays
+    /// USD end to end; the viewmodel build refreshes this slot from the
+    /// store's cached rate (`fx::apply`) so formatting itself never does I/O.
+    static DISPLAY: std::sync::OnceLock<std::sync::RwLock<MoneyDisplay>> =
+        std::sync::OnceLock::new();
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct MoneyDisplay {
+        pub code: String,
+        pub usd_to: f64,
+    }
+
+    fn display_slot() -> &'static std::sync::RwLock<MoneyDisplay> {
+        DISPLAY.get_or_init(|| {
+            std::sync::RwLock::new(MoneyDisplay {
+                code: "USD".into(),
+                usd_to: 1.0,
+            })
+        })
+    }
+
+    pub fn set_display(code: &str, usd_to: f64) {
+        let mut d = display_slot()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        d.code = code.to_string();
+        d.usd_to = if usd_to.is_finite() && usd_to > 0.0 {
+            usd_to
+        } else {
+            1.0
+        };
+    }
+
+    pub fn display() -> MoneyDisplay {
+        display_slot()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Ledger USD rendered in the configured display currency.
     pub fn usd(v: f64) -> String {
-        let prec = if v >= 100.0 {
+        render(v, &display())
+    }
+
+    pub(crate) fn render(v: f64, d: &MoneyDisplay) -> String {
+        if d.code == "USD" || d.usd_to == 1.0 {
+            return money(v, "USD");
+        }
+        money(v * d.usd_to, &d.code)
+    }
+
+    fn money(v: f64, code: &str) -> String {
+        let zero_dec = matches!(code, "JPY" | "KRW" | "VND" | "CLP");
+        let prec = if zero_dec || v >= 100.0 {
             0
         } else if v >= 1.0 {
             2
         } else {
             4
         };
-        format!("${}", trim_f(v, prec))
+        format!("{}{}", prefix(code), trim_f(v, prec))
+    }
+
+    pub(crate) fn prefix(code: &str) -> String {
+        match code {
+            "USD" => "$",
+            "CNY" | "JPY" => "¥",
+            "EUR" => "€",
+            "GBP" => "£",
+            "KRW" => "₩",
+            "HKD" => "HK$",
+            "TWD" => "NT$",
+            "CAD" => "CA$",
+            "AUD" => "A$",
+            "SGD" => "S$",
+            "INR" => "₹",
+            "RUB" => "₽",
+            "CHF" => "CHF ",
+            other => return format!("{other} "),
+        }
+        .to_string()
     }
 
     /// Compact count for scan-first reading — 万/亿 at >=10_000 with one
@@ -1225,6 +1301,35 @@ mod tests {
         assert_eq!(fmt::usd(45.2), "$45.2");
         assert_eq!(fmt::usd(45.25), "$45.25");
         assert_eq!(fmt::usd(180.0), "$180");
+    }
+
+    // `render` is pure (the global display slot is never written in tests —
+    // parallel tests read it via `usd`), so conversion gets exercised here.
+    #[test]
+    fn render_converts_ledger_usd_into_display_currency() {
+        let cny = fmt::MoneyDisplay {
+            code: "CNY".into(),
+            usd_to: 7.1,
+        };
+        assert_eq!(fmt::render(10.0, &cny), "¥71");
+        assert_eq!(fmt::render(0.5, &cny), "¥3.55");
+        assert_eq!(fmt::render(0.0, &cny), "¥0");
+        let jpy = fmt::MoneyDisplay {
+            code: "JPY".into(),
+            usd_to: 155.0,
+        };
+        assert_eq!(fmt::render(1.0, &jpy), "¥155"); // zero-decimal currency
+        let identity = fmt::MoneyDisplay {
+            code: "CNY".into(),
+            usd_to: 1.0,
+        };
+        assert_eq!(fmt::render(45.2, &identity), "$45.2"); // unknown rate → ledger USD
+    }
+
+    #[test]
+    fn money_prefix_falls_back_to_iso_code() {
+        assert_eq!(fmt::prefix("HKD"), "HK$");
+        assert_eq!(fmt::prefix("BRL"), "BRL ");
     }
 
     #[test]
