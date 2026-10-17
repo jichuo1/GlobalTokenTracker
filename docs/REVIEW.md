@@ -1777,3 +1777,9 @@
 - **修复**：明细行保持单行单 tooltip——新 `row_tip` 将 `event_speed_tip`（总/输入/输出/预填/解码/估算标注）并入 `raw_ref` 溯源 tooltip 第二行；速度单元格回到纯 `dtext`。速度 Top 榜的 `usage_row().tooltip()` 无祖先 tooltip，不受此约束，保留。
 - **验证命令与实测**：`cargo check -p globaltokentracker-ui` 通过；`cargo clippy -p globaltokentracker-ui --all-targets` 0 告警；`cargo fmt --all -- --check` 通过；`cargo test -p globaltokentracker-ui`（pages plan 断言等 33 项）通过；重打包 `--quiet` 重装后明细页可正常打开、速度列与行 tooltip 正常（实机验证）。
 - **经验**：windows-reactor 的 `ViewKind::Tooltip`/`Flyout`/`ContentDialog` 是树级附着节点，`wrap_tooltip` 对"target 子树内含同族附件"直接判 `StructureUnsupported`；今后给行级 tooltip 内部的子元素挂 tooltip 一律改为合并进父级 tooltip 文本，或在树外另起挂载点。
+
+## S136 速度 Top 榜按模型内联展示速率分项（2026-10-17）
+
+- **需求与口径**：用户指出单请求 tooltip 中的五档速率（总/输入/输出/预填/解码）需要按**每个模型**聚合并直接展示，而不只藏在 hover 文本。聚合机制 S134 已就位（`ShareRow` 的 8 个分子/分母列、Σtokens/Σms 加权均值），本轮是纯展示层完善：WinUI/macOS 速度卡 Top 榜每行扩为两行——首行保留"模型名 | 进度条 | ≈输出速率 · N 次调用"，次行小字内联该模型的"总 · 输入 · 预填 · 解码"分项（输出即首行头条不重复）；tooltip 保留完整分项+估算/计时注记。未上报 ttft/解码的行自动缺省对应分段，无分项时次行不渲染。无 Rust 核心改动、无 SQL/聚合逻辑改动（机制复用）。
+- **i18n/本地化**：复用既有键 `总 {}`/`输入 {}`/`预填 {}`/`解码 {}` 与 macOS `Total %@`/`In %@`/`Prefill %@`/`Gen %@`，零新增键。
+- **验证命令与实测**：`cargo check -p globaltokentracker-ui` 通过；`cargo clippy -p globaltokentracker-ui --all-targets` 0 告警；`cargo fmt --all -- --check` 通过；`cargo test -p globaltokentracker-ui` 33 项全过。macOS Swift 改动（`SpeedCard` 次行）同 S134 边界：Windows 环境无 Swift 工具链，待 macOS/CI 复核；行为与 WinUI 完全同构。

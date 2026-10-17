@@ -484,6 +484,17 @@ private struct SpeedCard: View, Equatable {
         return parts.joined(separator: " · ")
     }
 
+    /// Per-model fine rates for the row's second line — total/input plus
+    /// prefill and decode when reported (output is the headline figure).
+    private func subline(_ m: ShareRow) -> String? {
+        var parts: [String] = []
+        if let v = m.totalTps { parts.append(String(localized: "Total \(Fmt.speed(v))")) }
+        if let v = m.inputTps { parts.append(String(localized: "In \(Fmt.speed(v))")) }
+        if let v = m.prefillTps { parts.append(String(localized: "Prefill \(Fmt.speed(v))")) }
+        if let v = m.decodeTps { parts.append(String(localized: "Gen \(Fmt.speed(v))")) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private func tip(_ m: ShareRow) -> String {
         var parts: [String] = []
         if let v = m.totalTps { parts.append(String(localized: "Total \(Fmt.speed(v))")) }
@@ -520,6 +531,13 @@ private struct SpeedCard: View, Equatable {
                                 }
                                 .scaledFont(.callout)
                                 ProgressView(value: tps, total: maxTps).tint(.accentColor)
+                                if let sub = subline(m) {
+                                    Text(sub)
+                                        .scaledFont(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                        .lineLimit(2)
+                                }
                             }
                             .help(tip(m))
                         }

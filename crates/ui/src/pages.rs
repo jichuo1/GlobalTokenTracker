@@ -1170,20 +1170,31 @@ fn overview_widget(
                 // Any timestamp-estimated slice marks the figure ≈ (the
                 // tooltip says how much) — same rule as the macOS card.
                 let est = if r.speed_est_ms > 0 { "≈" } else { "" };
-                top_rows.push(
-                    usage_row(
-                        theme,
-                        r.name.clone(),
-                        if max > 0.0 { tps / max * 100.0 } else { 0.0 },
-                        tf!(
-                            "{}{} · {} 次调用",
-                            est,
-                            fmt::speed(tps),
-                            fmt::tokens_exact(r.events)
-                        ),
-                    )
-                    .tooltip(speed_tip(r)),
-                );
+                let mut lines = vec![usage_row(
+                    theme,
+                    r.name.clone(),
+                    if max > 0.0 { tps / max * 100.0 } else { 0.0 },
+                    tf!(
+                        "{}{} · {} 次调用",
+                        est,
+                        fmt::speed(tps),
+                        fmt::tokens_exact(r.events)
+                    ),
+                )];
+                // Per-model fine rates inline: total/input/prefill/decode
+                // under the output headline; the tooltip adds the estimate
+                // and timing notes.
+                if let Some(sub) = speed_subline(r) {
+                    lines.push(
+                        TextBlock::new()
+                            .text(sub)
+                            .font_size(theme.label_size)
+                            .foreground(theme.subtle)
+                            .text_wrapping(TextWrapping::Wrap)
+                            .into(),
+                    );
+                }
+                top_rows.push(vstack(2.0, lines).tooltip(speed_tip(r)));
             }
             if top_rows.is_empty() {
                 top_rows.push(
@@ -2339,6 +2350,30 @@ fn truncate(s: &str, n: usize) -> String {
         format!("{}…", s.chars().take(n - 1).collect::<String>())
     } else {
         s.to_string()
+    }
+}
+
+/// One model's fine rates for the Top list's second line — total/input plus
+/// prefill and decode when reported (output is the row's headline figure).
+/// `None` when nothing beyond the headline is measurable.
+fn speed_subline(r: &globaltokentracker_core::store::ShareRow) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = r.total_tps() {
+        parts.push(tf!("总 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.input_tps() {
+        parts.push(tf!("输入 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.prefill_tps() {
+        parts.push(tf!("预填 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.decode_tps() {
+        parts.push(tf!("解码 {}", fmt::speed(v)));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
     }
 }
 
