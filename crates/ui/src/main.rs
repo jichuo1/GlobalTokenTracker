@@ -69,6 +69,9 @@ pub struct Snapshot {
     /// False for the startup snapshot, which is built from the ledger as it
     /// already is — the first frame doesn't wait for a scan; one follows.
     pub scanned: bool,
+    /// Display-currency status captured with this snapshot — the settings
+    /// page renders it; `fmt` already converts money under the same rate.
+    pub fx: globaltokentracker_core::fx::FxStatus,
 }
 
 /// `Arc` rows: the virtualized table's row closure owns a cheap handle
@@ -366,6 +369,8 @@ pub enum Msg {
     SetFontSize(f64),
     /// Settings: UI language — "zh" | "en".
     SetLang(&'static str),
+    /// Settings: display currency for money figures (ISO code; "" = USD).
+    SetDisplayCurrency(String),
     /// Settings: Run-key launch-at-login toggle; arg is the switch's new state.
     SetAutostart(bool),
     SetExternalInterface(bool),
@@ -639,6 +644,7 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         .events_page(DETAIL_PAGE_SIZE, 0, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
     let total = cube.event_count(apps.as_deref(), models.as_deref());
+    let fx = globaltokentracker_core::fx::status(&store);
     Ok(LoadOutcome::Fresh(Box::new(Snapshot {
         vm,
         cube,
@@ -651,6 +657,7 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         price_due,
         scan_ms,
         scanned: scan,
+        fx,
     })))
 }
 
@@ -1372,6 +1379,21 @@ impl Component for Shell {
                 self.config.save();
                 i18n::set_lang(i18n::Lang::from_config(v));
             }
+            Msg::SetDisplayCurrency(code) => match Store::open(&db_path()) {
+                Ok(store) => {
+                    if globaltokentracker_core::fx::set_display_currency(&store, &code).is_ok() {
+                        let st = globaltokentracker_core::fx::status(&store);
+                        globaltokentracker_core::viewmodel::fmt::set_display(
+                            &st.display,
+                            st.usd_to,
+                        );
+                        if let Some(s) = &mut self.snap {
+                            s.fx = st;
+                        }
+                    }
+                }
+                Err(e) => diag!("[fx] ledger open failed: {e}"),
+            },
             Msg::SetAutostart(on) => {
                 // Registry write may fail (policy/AV) — mirror the real
                 // outcome so the toggle reflects the truth, not the intent.
@@ -2474,6 +2496,7 @@ impl Shell {
                     external_interface_enabled: self.external_interface_enabled,
                     external_interface_error: self.external_interface_error.as_deref(),
                     share: &self.share,
+                    fx: self.snap.as_ref().map(|s| s.fx.clone()).unwrap_or_default(),
                 },
                 theme,
                 context,

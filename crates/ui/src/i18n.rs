@@ -264,6 +264,13 @@ pub fn en(zh: &str) -> &str {
         "未计价提示" => "Unpriced notice",
         "部件" => "Widget",
         // ---- settings page
+        "显示货币" => "Display currency",
+        "金额按缓存汇率换算展示，账本始终以 USD 记录" => {
+            "Amounts convert at the cached rate; the ledger always stays USD"
+        }
+        "汇率来源" => "Rate source",
+        "缓存已过期" => "cache stale",
+        "未获取到汇率，按 USD 显示" => "No rate fetched yet; showing USD",
         "外观" => "Appearance",
         "主题模式" => "Theme",
         "跟随系统" => "System",

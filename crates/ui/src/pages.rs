@@ -2072,11 +2072,23 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool, width: f64) -> View {
         .clone()
         .or_else(|| r.pricing_model.clone())
         .unwrap_or_else(|| "—".into());
-    let mut cost = r
-        .cost_usd
-        .map(fmt::usd)
-        .or_else(|| r.credits.map(|c| format!("{}cr", fmt::trim_f(c, 1))))
-        .unwrap_or_else(|| "—".into());
+    let credits_text = r
+        .credits
+        .filter(|c| *c > 0.0)
+        .map(|c| format!("{}cr", fmt::trim_f(c, 1)));
+    // On unpriced rows the stored $0 carries no information; credit-billed
+    // tools (Qoder) report their real billing in credits, so show that first.
+    let mut cost = if r.cost_source.as_deref() == Some("unpriced") {
+        credits_text
+            .clone()
+            .or_else(|| r.cost_usd.map(fmt::usd))
+            .unwrap_or_else(|| "—".into())
+    } else {
+        r.cost_usd
+            .map(fmt::usd)
+            .or_else(|| credits_text.clone())
+            .unwrap_or_else(|| "—".into())
+    };
     match r.cost_source.as_deref() {
         Some("estimated") => cost.push_str(" ≈"),
         Some("provider_reported") => cost.push_str(" ↺"),
@@ -3318,6 +3330,20 @@ const ACCENT_OPTIONS: &[(&str, &str)] = &[
     ("#d84d5b", "红色"),
 ];
 const LANG_OPTIONS: &[(&str, &str)] = &[("zh", "中文"), ("en", "English")];
+const CURRENCY_OPTIONS: &[(&str, &str)] = &[
+    ("USD", "USD $"),
+    ("CNY", "CNY ¥"),
+    ("EUR", "EUR €"),
+    ("JPY", "JPY ¥"),
+    ("GBP", "GBP £"),
+    ("KRW", "KRW ₩"),
+    ("HKD", "HKD HK$"),
+    ("TWD", "TWD NT$"),
+    ("CAD", "CAD CA$"),
+    ("AUD", "AUD A$"),
+    ("SGD", "SGD S$"),
+    ("INR", "INR ₹"),
+];
 const CLOSE_OPTIONS: &[(&str, &str)] = &[
     ("", "每次询问"),
     ("quit", "彻底退出"),
@@ -3900,6 +3926,7 @@ pub struct SettingsArgs<'a> {
     pub external_interface_enabled: bool,
     pub external_interface_error: Option<&'a str>,
     pub share: &'a crate::devices::ShareState,
+    pub fx: globaltokentracker_core::fx::FxStatus,
 }
 
 pub fn settings_page(
@@ -3914,7 +3941,9 @@ pub fn settings_page(
         external_interface_enabled,
         external_interface_error,
         share,
+        ..
     } = *args;
+    let fx = &args.fx;
     let share_rows = share_rows(config, share, theme, ctx);
     let version_row = setting_row(
         theme,
@@ -3994,6 +4023,38 @@ pub fn settings_page(
             Msg::SetLang,
         ),
     );
+    let currency_row = setting_row(
+        theme,
+        "显示货币",
+        Some("金额按缓存汇率换算展示，账本始终以 USD 记录"),
+        setting_dropdown(CURRENCY_OPTIONS, &fx.display, ctx, |v| {
+            Msg::SetDisplayCurrency(v.to_string())
+        }),
+    );
+    let fx_note = match &fx.source {
+        Some(src) => format!(
+            "{} · 1 USD = {} {}{}",
+            src,
+            globaltokentracker_core::viewmodel::fmt::trim_f(fx.usd_to, 4),
+            fx.display,
+            if fx.stale {
+                format!(" · {}", tr("缓存已过期"))
+            } else {
+                String::new()
+            }
+        ),
+        None => tr("未获取到汇率，按 USD 显示").to_string(),
+    };
+    let fx_row = setting_row(
+        theme,
+        "汇率来源",
+        None,
+        TextBlock::new()
+            .text(fx_note)
+            .font_size(theme.body_size)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+    );
     let autostart_row = setting_row(
         theme,
         "开机自启动",
@@ -4045,7 +4106,10 @@ pub fn settings_page(
         w::section_header(theme, Symbol::Setting, tr("通用")),
         w::card(
             theme,
-            vstack(theme.gap, vec![lang_row, autostart_row, close_row]),
+            vstack(
+                theme.gap,
+                vec![lang_row, currency_row, fx_row, autostart_row, close_row],
+            ),
         ),
         w::section_header(theme, Symbol::Setting, tr("外部协同")),
         w::card(theme, vstack(theme.gap, interface_rows)),
