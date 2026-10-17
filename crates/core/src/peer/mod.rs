@@ -174,6 +174,33 @@ pub struct Group {
     pub cost_usd: f64,
     pub active_ms: u64,
     pub duration_ms: u64,
+    /// Input tokens on events carrying usable timing (speed numerator).
+    /// `serde(default)`: step-1 peers export no timing split — zeros, not
+    /// a guess.
+    #[serde(default)]
+    pub speed_in: u64,
+    /// Output tokens on events carrying usable timing.
+    #[serde(default)]
+    pub speed_out: u64,
+    /// Timed milliseconds — measured `duration_ms`, else the bounded
+    /// `ts_end - ts_start` span (`speed_exprs` documents the rule).
+    #[serde(default)]
+    pub speed_ms: u64,
+    /// The timestamp-estimated slice of `speed_ms`.
+    #[serde(default)]
+    pub speed_est_ms: u64,
+    /// Input tokens on events reporting `ttft_ms` (prefill numerator).
+    #[serde(default)]
+    pub prefill_in: u64,
+    /// Sum of `ttft_ms` on those events.
+    #[serde(default)]
+    pub ttft_ms: u64,
+    /// Output tokens on events with both timing and `ttft_ms`.
+    #[serde(default)]
+    pub decode_out: u64,
+    /// `timed_ms - ttft_ms` summed on those events.
+    #[serde(default)]
+    pub decode_ms: u64,
 }
 
 impl Group {
@@ -513,6 +540,7 @@ fn scan_days(
     from_ms: Option<i64>,
     warnings: &mut Vec<&'static str>,
 ) -> rusqlite::Result<BTreeMap<String, DaySummary>> {
+    let speed = crate::store::speed_exprs();
     let mut st = tx.prepare(&format!(
         "SELECT ts_start / {BUCKET_MS} AS h, app, {MODEL_EXPR} AS m, COUNT(*),
                 COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
@@ -520,7 +548,7 @@ fn scan_days(
                 COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                 COALESCE(SUM(unclassified_tokens),0), COALESCE(SUM(credits),0),
                 COALESCE(SUM(cost_usd),0), COALESCE(SUM(active_ms),0),
-                COALESCE(SUM(duration_ms),0)
+                COALESCE(SUM(duration_ms),0), {speed}
          FROM usage_events WHERE ?1 IS NULL OR ts_start IS NULL OR ts_start >= ?1
          GROUP BY h, app, m"
     ))?;
@@ -563,6 +591,14 @@ fn scan_days(
             cost_usd: finite(r.get(11)?).unwrap_or(0.0),
             active_ms: count(r, 12)?,
             duration_ms: count(r, 13)?,
+            speed_in: count(r, 14)?,
+            speed_out: count(r, 15)?,
+            speed_ms: count(r, 16)?,
+            speed_est_ms: count(r, 17)?,
+            prefill_in: count(r, 18)?,
+            ttft_ms: count(r, 19)?,
+            decode_out: count(r, 20)?,
+            decode_ms: count(r, 21)?,
         };
         days.entry(key.clone())
             .or_insert_with(|| DaySummary {
@@ -616,6 +652,14 @@ pub fn fingerprint(groups: &[Group]) -> String {
             g.cost_usd.to_bits(),
             g.active_ms,
             g.duration_ms,
+            g.speed_in,
+            g.speed_out,
+            g.speed_ms,
+            g.speed_est_ms,
+            g.prefill_in,
+            g.ttft_ms,
+            g.decode_out,
+            g.decode_ms,
         ] {
             h.update(n.to_le_bytes());
         }

@@ -80,6 +80,10 @@ fn ev(
         credits: out.is_multiple_of(3).then_some(out as f64 / 10.0),
         active_ms: Some(out as i64),
         duration_ms: (!out.is_multiple_of(4)).then_some(out as i64 * 11),
+        // Bounded span for the timestamp-estimated slice; ttft on most rows
+        // so prefill/decode sums are exercised end to end.
+        ts_end: ts.map(|t| t + out as i64 * 13),
+        ttft_ms: (!out.is_multiple_of(5)).then_some(out as i64 * 2 + 1),
         session_id: Some(format!("secret-session-{key}")),
         project: Some("/Users/someone/secret-project".into()),
         raw_ref: Some("/Users/someone/.claude/secret.jsonl:42".into()),
@@ -231,10 +235,26 @@ fn fold(
                 events: 0,
                 tokens: 0,
                 cost_usd: 0.0,
+                speed_in: 0,
+                speed_out: 0,
+                speed_ms: 0,
+                speed_est_ms: 0,
+                prefill_in: 0,
+                ttft_ms: 0,
+                decode_out: 0,
+                decode_ms: 0,
             });
             m.events += g.events;
             m.tokens += g.headline_tokens();
             m.cost_usd += g.cost_usd;
+            m.speed_in += g.speed_in;
+            m.speed_out += g.speed_out;
+            m.speed_ms += g.speed_ms;
+            m.speed_est_ms += g.speed_est_ms;
+            m.prefill_in += g.prefill_in;
+            m.ttft_ms += g.ttft_ms;
+            m.decode_out += g.decode_out;
+            m.decode_ms += g.decode_ms;
         }
     }
     (span, apps, models)
@@ -279,7 +299,23 @@ fn rebucketed_summary_equals_cube_overview() {
             .collect();
         let peer_apps: BTreeMap<_, _> = apps.values().map(|a| (a.app.clone(), key(a))).collect();
         assert_eq!(cube_apps, peer_apps, "{range:?} by_app");
-        let key = |m: &ShareRow| (m.events, m.tokens, (m.cost_usd * 1e6).round() as u64);
+        let key = |m: &ShareRow| {
+            (
+                m.events,
+                m.tokens,
+                (m.cost_usd * 1e6).round() as u64,
+                (
+                    m.speed_in,
+                    m.speed_out,
+                    m.speed_ms,
+                    m.speed_est_ms,
+                    m.prefill_in,
+                    m.ttft_ms,
+                    m.decode_out,
+                    m.decode_ms,
+                ),
+            )
+        };
         let cube_models: BTreeMap<_, _> = parts
             .by_model
             .iter()

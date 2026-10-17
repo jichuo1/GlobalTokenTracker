@@ -10,7 +10,7 @@ use std::path::Path;
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
     AppSummary, ArchiveReport, DailyRow, EventRow, MODEL_EXPR, PriceQuote, PriceRow, QuotaRow,
-    ShareRow, SourceHealth, Totals, filter_price_indices, filter_prices,
+    ShareRow, SourceHealth, Totals, filter_price_indices, filter_prices, speed_exprs,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -244,6 +244,29 @@ impl Store {
             if has == 0 {
                 self.conn
                     .execute_batch(&format!("ALTER TABLE prices ADD COLUMN {col} REAL"))?;
+            }
+        }
+        // Per-model rate aggregates on `peer_groups` (timing numerators and
+        // denominators kept as separate sums) — idempotent for existing DBs.
+        for col in [
+            "speed_in",
+            "speed_out",
+            "speed_ms",
+            "speed_est_ms",
+            "prefill_in",
+            "ttft_ms",
+            "decode_out",
+            "decode_ms",
+        ] {
+            let has: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('peer_groups') WHERE name=?1",
+                [col],
+                |r| r.get(0),
+            )?;
+            if has == 0 {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE peer_groups ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+                ))?;
             }
         }
         // OpenCode used to book output WITHOUT reasoning (its `tokens.reasoning`
@@ -1199,6 +1222,117 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.as_deref(), Some("gpt-x"));
+    }
+
+    /// The eight rate sums: measured durations are exact, bounded timestamp
+    /// spans are estimated, over-long/missing spans time out of the sums but
+    /// still count as events — and the derived rates are ratios of sums.
+    #[test]
+    fn speed_fields_aggregate_as_ratio_of_sums() {
+        let s = Store::open_memory().unwrap();
+        let put = |key: &str,
+                   ts: i64,
+                   dur: Option<i64>,
+                   end: Option<i64>,
+                   ttft: Option<i64>,
+                   inp: u64,
+                   out: u64| {
+            let mut e = ev_ts(key, ts);
+            e.model = Some("opus".into());
+            e.duration_ms = dur;
+            e.ts_end = end;
+            e.ttft_ms = ttft;
+            e.input_tokens = inp;
+            e.output_tokens = out;
+            s.upsert_event(&e).unwrap();
+        };
+        // Exact: measured duration, ttft < duration → prefill + decode.
+        put("e1", BOUNDARY_MS, Some(2000), None, Some(500), 100, 40);
+        // Estimated: no duration, bounded span; also prefill + decode.
+        put(
+            "e2",
+            BOUNDARY_MS + 10,
+            None,
+            Some(BOUNDARY_MS + 10 + 4000),
+            Some(800),
+            200,
+            80,
+        );
+        // Untimed: the idle gap is longer than MAX_DERIVED_DURATION_MS —
+        // counted as an event but excluded from every speed sum.
+        put(
+            "e3",
+            BOUNDARY_MS + 20,
+            None,
+            Some(BOUNDARY_MS + 20 + 40 * 60_000),
+            None,
+            300,
+            120,
+        );
+        // Exact without ttft: timed only.
+        put("e4", BOUNDARY_MS + 30, Some(1000), None, None, 50, 10);
+        // Inconsistent ttft > duration: timed + prefill, no decode.
+        put("e5", BOUNDARY_MS + 40, Some(1000), None, Some(2000), 30, 15);
+        // No timing at all: tokens count, rates don't.
+        put("e6", BOUNDARY_MS + 50, None, None, None, 70, 35);
+
+        let rows = s.by_model(None, None, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        let m = &rows[0];
+        assert_eq!(m.events, 6);
+        assert_eq!((m.speed_in, m.speed_out, m.speed_ms), (380, 145, 8000));
+        assert_eq!(m.speed_est_ms, 4000);
+        assert_eq!((m.prefill_in, m.ttft_ms), (330, 3300));
+        assert_eq!((m.decode_out, m.decode_ms), (120, 4700));
+        // Ratios of sums, not averages of per-event rates.
+        assert!((m.output_tps().unwrap() - 18.125).abs() < 1e-9);
+        assert!((m.input_tps().unwrap() - 47.5).abs() < 1e-9);
+        assert!((m.total_tps().unwrap() - 65.625).abs() < 1e-9);
+        assert!((m.prefill_tps().unwrap() - 100.0).abs() < 1e-9);
+        assert!((m.decode_tps().unwrap() - 120.0 / 4.7).abs() < 1e-9);
+        assert!((m.speed_est_ratio() - 0.5).abs() < 1e-9);
+
+        // Same aggregates through the event-level helpers — rows keyed by
+        // their (unique) token counts since dedup keys aren't selected.
+        let page = s.events_page(10, 0, None, None).unwrap();
+        let by_key: std::collections::BTreeMap<_, _> = page
+            .iter()
+            .map(|r| (r.input_tokens + r.output_tokens, r))
+            .collect();
+        let e2 = by_key[&280];
+        assert_eq!(e2.effective_ms(), Some((4000, true)));
+        assert_eq!(e2.output_tps().unwrap().0, 20.0);
+        assert!((e2.decode_tps().unwrap().0 - 25.0).abs() < 1e-9);
+        assert_eq!(e2.prefill_tps().unwrap(), 250.0);
+        let e3 = by_key[&420];
+        assert_eq!(e3.effective_ms(), None);
+        assert_eq!(e3.output_tps(), None);
+        let e6 = by_key[&105];
+        assert_eq!(e6.effective_ms(), None);
+        assert_eq!(e6.output_tps(), None);
+        let e5 = by_key[&45];
+        assert_eq!(e5.effective_ms(), Some((1000, false)));
+        assert_eq!(e5.decode_tps(), None); // ttft > duration → no decode
+        assert_eq!(e5.prefill_tps().unwrap(), 15.0);
+    }
+
+    /// `speed_exprs` and `EventRow` agree on what counts as timing: this is
+    /// the invariant the cube/peer paths inherit.
+    #[test]
+    fn speed_exprs_bound_matches_event_row_effective_ms() {
+        let s = Store::open_memory().unwrap();
+        let mut e = ev_ts("neg", BOUNDARY_MS);
+        e.model = Some("opus".into());
+        e.ts_end = Some(BOUNDARY_MS - 5); // negative span → untimed
+        s.upsert_event(&e).unwrap();
+        let mut z = ev_ts("zero", BOUNDARY_MS + 10);
+        z.model = Some("opus".into());
+        z.ts_end = Some(BOUNDARY_MS + 10); // zero span → untimed
+        s.upsert_event(&z).unwrap();
+        let m = &s.by_model(None, None, None, None).unwrap()[0];
+        assert_eq!((m.speed_ms, m.speed_est_ms), (0, 0));
+        let page = s.events_page(10, 0, None, None).unwrap();
+        assert!(page.iter().all(|r| r.effective_ms().is_none()));
     }
 
     fn quota_snap(app: &str, kind: &str, pct: Option<f64>, at: i64) -> crate::model::QuotaSnapshot {

@@ -446,8 +446,9 @@ fn apply(
         let mut insert = tx.prepare(
             "INSERT OR REPLACE INTO peer_groups(device_id,utc_hour,app,model,events,input_tokens,
                 output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,unclassified_tokens,
-                credits,cost_usd,active_ms,duration_ms)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                credits,cost_usd,active_ms,duration_ms,speed_in,speed_out,speed_ms,speed_est_ms,
+                prefill_in,ttft_ms,decode_out,decode_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
         )?;
         for day in &pulled.days {
             let Some((lo, hi)) = hour_span(&day.day) else {
@@ -475,7 +476,15 @@ fn apply(
                     g.credits,
                     g.cost_usd,
                     n(g.active_ms),
-                    n(g.duration_ms)
+                    n(g.duration_ms),
+                    n(g.speed_in),
+                    n(g.speed_out),
+                    n(g.speed_ms),
+                    n(g.speed_est_ms),
+                    n(g.prefill_in),
+                    n(g.ttft_ms),
+                    n(g.decode_out),
+                    n(g.decode_ms)
                 ])?;
             }
             tx.execute(

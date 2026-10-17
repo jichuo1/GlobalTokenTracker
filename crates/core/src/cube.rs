@@ -52,6 +52,23 @@ struct Group {
     cost: f64,
     active_ms: u64,
     duration_ms: u64,
+    /// Input tokens on events carrying usable timing.
+    speed_in: u64,
+    /// Output tokens on events carrying usable timing (speed numerator).
+    speed_out: u64,
+    /// Timed milliseconds — measured `duration_ms`, else the bounded
+    /// `ts_end - ts_start` span (speed denominator).
+    speed_ms: u64,
+    /// The timestamp-estimated slice of `speed_ms`.
+    speed_est_ms: u64,
+    /// Input tokens on events reporting `ttft_ms` (prefill numerator).
+    prefill_in: u64,
+    /// Sum of `ttft_ms` on those events.
+    ttft_ms: u64,
+    /// Output tokens on events with both timing and `ttft_ms`.
+    decode_out: u64,
+    /// `timed_ms - ttft_ms` summed on those events.
+    decode_ms: u64,
 }
 
 impl Group {
@@ -137,6 +154,14 @@ struct Raw {
     cost: f64,
     active_ms: u64,
     duration_ms: u64,
+    speed_in: u64,
+    speed_out: u64,
+    speed_ms: u64,
+    speed_est_ms: u64,
+    prefill_in: u64,
+    ttft_ms: u64,
+    decode_out: u64,
+    decode_ms: u64,
 }
 
 impl Cube {
@@ -212,7 +237,8 @@ impl Cube {
             "SELECT g.device_id, g.utc_hour, g.app, g.model, g.events, g.input_tokens,
                     g.output_tokens, g.reasoning_tokens, g.cache_read_tokens,
                     g.cache_write_tokens, g.unclassified_tokens, g.credits, g.cost_usd,
-                    g.active_ms, g.duration_ms
+                    g.active_ms, g.duration_ms, g.speed_in, g.speed_out, g.speed_ms,
+                    g.speed_est_ms, g.prefill_in, g.ttft_ms, g.decode_out, g.decode_ms
              FROM peer_groups g JOIN peers p ON p.device_id = g.device_id
              WHERE p.enabled = 1 ORDER BY g.device_id",
         )?;
@@ -235,6 +261,14 @@ impl Cube {
                     n(r, 10)?,
                     n(r, 13)?,
                     n(r, 14)?,
+                    n(r, 15)?,
+                    n(r, 16)?,
+                    n(r, 17)?,
+                    n(r, 18)?,
+                    n(r, 19)?,
+                    n(r, 20)?,
+                    n(r, 21)?,
+                    n(r, 22)?,
                 ],
                 r.get::<_, f64>(11)?,
                 r.get::<_, f64>(12)?,
@@ -261,6 +295,15 @@ impl Cube {
                 cost,
                 active_ms: c[7],
                 duration_ms: c[8],
+                // Old peers export no timing split — zeros, not a guess.
+                speed_in: c[9],
+                speed_out: c[10],
+                speed_ms: c[11],
+                speed_est_ms: c[12],
+                prefill_in: c[13],
+                ttft_ms: c[14],
+                decode_out: c[15],
+                decode_ms: c[16],
             };
             let key = (group.day, group.app, group.model, device);
             match days.get_mut(&key) {
@@ -315,6 +358,14 @@ impl Cube {
                 cost: r.cost,
                 active_ms: r.active_ms,
                 duration_ms: r.duration_ms,
+                speed_in: r.speed_in,
+                speed_out: r.speed_out,
+                speed_ms: r.speed_ms,
+                speed_est_ms: r.speed_est_ms,
+                prefill_in: r.prefill_in,
+                ttft_ms: r.ttft_ms,
+                decode_out: r.decode_out,
+                decode_ms: r.decode_ms,
             });
         }
     }
@@ -561,10 +612,26 @@ impl Cube {
                 events: 0,
                 tokens: 0,
                 cost_usd: 0.0,
+                speed_in: 0,
+                speed_out: 0,
+                speed_ms: 0,
+                speed_est_ms: 0,
+                prefill_in: 0,
+                ttft_ms: 0,
+                decode_out: 0,
+                decode_ms: 0,
             });
             m.events += g.events;
             m.tokens += g.headline();
             m.cost_usd += g.cost;
+            m.speed_in += g.speed_in;
+            m.speed_out += g.speed_out;
+            m.speed_ms += g.speed_ms;
+            m.speed_est_ms += g.speed_est_ms;
+            m.prefill_in += g.prefill_in;
+            m.ttft_ms += g.ttft_ms;
+            m.decode_out += g.decode_out;
+            m.decode_ms += g.decode_ms;
         }
         let mut by_app: Vec<AppSummary> = by_app.into_values().collect();
         by_app.sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.app.cmp(&b.app)));
@@ -890,6 +957,14 @@ fn merge_group(into: &mut Group, g: &Group) {
     into.cost += g.cost;
     into.active_ms += g.active_ms;
     into.duration_ms += g.duration_ms;
+    into.speed_in += g.speed_in;
+    into.speed_out += g.speed_out;
+    into.speed_ms += g.speed_ms;
+    into.speed_est_ms += g.speed_est_ms;
+    into.prefill_in += g.prefill_in;
+    into.ttft_ms += g.ttft_ms;
+    into.decode_out += g.decode_out;
+    into.decode_ms += g.decode_ms;
 }
 
 fn add_app(by_app: &mut BTreeMap<u16, AppSummary>, names: &[String], g: &Group) {
@@ -922,10 +997,26 @@ fn add_model(by_model: &mut BTreeMap<u16, ShareRow>, names: &[String], g: &Group
         events: 0,
         tokens: 0,
         cost_usd: 0.0,
+        speed_in: 0,
+        speed_out: 0,
+        speed_ms: 0,
+        speed_est_ms: 0,
+        prefill_in: 0,
+        ttft_ms: 0,
+        decode_out: 0,
+        decode_ms: 0,
     });
     m.events += g.events;
     m.tokens += g.headline();
     m.cost_usd += g.cost;
+    m.speed_in += g.speed_in;
+    m.speed_out += g.speed_out;
+    m.speed_ms += g.speed_ms;
+    m.speed_est_ms += g.speed_est_ms;
+    m.prefill_in += g.prefill_in;
+    m.ttft_ms += g.ttft_ms;
+    m.decode_out += g.decode_out;
+    m.decode_ms += g.decode_ms;
 }
 
 fn add(t: &mut Totals, g: &Group) {
@@ -1044,13 +1135,14 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
             (format!("WHERE {}", conds.join(" OR ")), params)
         }
     };
+    let speed = crate::store::speed_exprs();
     let mut st = store.conn().prepare(&format!(
         "SELECT (ts_start + {off_ms}) / {DAY_MS} AS d, app, {MODEL_EXPR} AS m, COUNT(*),
                 COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                 COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                 COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                 COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(active_ms),0),
-                COALESCE(SUM(duration_ms),0), COALESCE(SUM(unclassified_tokens),0)
+                COALESCE(SUM(duration_ms),0), COALESCE(SUM(unclassified_tokens),0), {speed}
          FROM usage_events {filter} GROUP BY d, app, m"
     ))?;
     let rows = st.query_map(rusqlite::params_from_iter(params.iter()), |r| {
@@ -1069,6 +1161,14 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
             active_ms: r.get::<_, i64>(11)? as u64,
             duration_ms: r.get::<_, i64>(12)? as u64,
             unclassified: r.get::<_, i64>(13)? as u64,
+            speed_in: r.get::<_, i64>(14)? as u64,
+            speed_out: r.get::<_, i64>(15)? as u64,
+            speed_ms: r.get::<_, i64>(16)? as u64,
+            speed_est_ms: r.get::<_, i64>(17)? as u64,
+            prefill_in: r.get::<_, i64>(18)? as u64,
+            ttft_ms: r.get::<_, i64>(19)? as u64,
+            decode_out: r.get::<_, i64>(20)? as u64,
+            decode_ms: r.get::<_, i64>(21)? as u64,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)

@@ -856,6 +856,14 @@ fn merge_parts(vm: &mut OverviewVm, p: crate::cube::OverviewParts) {
                 x.events += m.events;
                 x.tokens += m.tokens;
                 x.cost_usd += m.cost_usd;
+                x.speed_in += m.speed_in;
+                x.speed_out += m.speed_out;
+                x.speed_ms += m.speed_ms;
+                x.speed_est_ms += m.speed_est_ms;
+                x.prefill_in += m.prefill_in;
+                x.ttft_ms += m.ttft_ms;
+                x.decode_out += m.decode_out;
+                x.decode_ms += m.decode_ms;
             }
             None => vm.by_model.push(m),
         }
@@ -1081,6 +1089,12 @@ pub mod fmt {
         } else {
             format!("{ms}ms")
         }
+    }
+
+    /// Throughput in tokens/s — "45.2 tok/s". One decimal keeps 0.4 and
+    /// 4,000 distinguishable without growing the column.
+    pub fn speed(tps: f64) -> String {
+        format!("{} tok/s", trim_f(tps, 1))
     }
 }
 

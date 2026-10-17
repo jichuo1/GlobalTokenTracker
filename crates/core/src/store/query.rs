@@ -32,8 +32,12 @@ pub struct AppSummary {
     pub cost_usd: f64,
 }
 
-/// One share-dimension entry for the cost pie — name + the two metrics the
-/// legend shows.
+/// One share-dimension entry — name plus every metric the share/speed views
+/// need. `speed_*`/`prefill_*`/`decode_*` keep numerator and denominator as
+/// separate sums so aggregates stay honest: a model's rate is always
+/// `Σtokens / Σms` — a weighted mean, never an average of per-event ratios —
+/// and `speed_est_ms` marks how much of the timed span came from timestamps
+/// instead of a measured `duration_ms`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ShareRow {
     pub name: String,
@@ -41,6 +45,63 @@ pub struct ShareRow {
     /// input+output+cache_read — same headline convention as `bucket_models`.
     pub tokens: u64,
     pub cost_usd: f64,
+    /// Input tokens on events carrying usable timing.
+    pub speed_in: u64,
+    /// Output tokens on events carrying usable timing.
+    pub speed_out: u64,
+    /// Timed milliseconds (measured `duration_ms`, else the bounded
+    /// `ts_end - ts_start` span — `speed_exprs` documents the rule).
+    pub speed_ms: u64,
+    /// The timestamp-estimated slice of `speed_ms`.
+    pub speed_est_ms: u64,
+    /// Input tokens on events reporting `ttft_ms` (prefill numerator).
+    pub prefill_in: u64,
+    /// Sum of `ttft_ms` on those events (prefill denominator).
+    pub ttft_ms: u64,
+    /// Output tokens on events with both timing and `ttft_ms` — the
+    /// generation-only slice.
+    pub decode_out: u64,
+    /// `timed_ms - ttft_ms` summed on those events.
+    pub decode_ms: u64,
+}
+
+impl ShareRow {
+    /// Mean output throughput in tokens/s — the headline "speed" figure;
+    /// `None` when no event timed.
+    pub fn output_tps(&self) -> Option<f64> {
+        (self.speed_ms > 0).then(|| self.speed_out as f64 / self.speed_ms as f64 * 1000.0)
+    }
+
+    /// Mean input throughput (call-level prompt rate) in tokens/s.
+    pub fn input_tps(&self) -> Option<f64> {
+        (self.speed_ms > 0).then(|| self.speed_in as f64 / self.speed_ms as f64 * 1000.0)
+    }
+
+    /// Mean total throughput — (input + output) / timed span.
+    pub fn total_tps(&self) -> Option<f64> {
+        (self.speed_ms > 0)
+            .then(|| (self.speed_in + self.speed_out) as f64 / self.speed_ms as f64 * 1000.0)
+    }
+
+    /// Prefill rate — input tokens per TTFT second, over events reporting
+    /// `ttft_ms`. `None` when no event carries it.
+    pub fn prefill_tps(&self) -> Option<f64> {
+        (self.ttft_ms > 0).then(|| self.prefill_in as f64 / self.ttft_ms as f64 * 1000.0)
+    }
+
+    /// Generation-only rate — output tokens per (timed − TTFT) second.
+    pub fn decode_tps(&self) -> Option<f64> {
+        (self.decode_ms > 0).then(|| self.decode_out as f64 / self.decode_ms as f64 * 1000.0)
+    }
+
+    /// Share of the timed span that was timestamp-estimated (0.0–1.0).
+    pub fn speed_est_ratio(&self) -> f64 {
+        if self.speed_ms == 0 {
+            0.0
+        } else {
+            self.speed_est_ms as f64 / self.speed_ms as f64
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -198,6 +259,8 @@ pub struct EventRow {
     pub project: Option<String>,
     pub session_id: Option<String>,
     pub ts_start: Option<i64>,
+    pub ts_end: Option<i64>,
+    pub ttft_ms: Option<i64>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
@@ -209,6 +272,57 @@ pub struct EventRow {
     pub cost_source: Option<String>,
     pub duration_ms: Option<i64>,
     pub raw_ref: Option<String>,
+}
+
+impl EventRow {
+    /// Usable call duration: `duration_ms` when measured, else the bounded
+    /// `ts_end - ts_start` span (same cap as `normalize::derived_duration`).
+    /// The flag marks the timestamp-estimated case.
+    pub fn effective_ms(&self) -> Option<(u64, bool)> {
+        if let Some(d) = self.duration_ms.filter(|d| *d > 0) {
+            return Some((d as u64, false));
+        }
+        let span = self.ts_end? - self.ts_start?;
+        (span > 0 && span <= crate::normalize::MAX_DERIVED_DURATION_MS)
+            .then_some((span as u64, true))
+    }
+
+    /// Output throughput in tokens/s + the estimated flag; `None` without
+    /// usable timing (missing duration is not a zero-speed event).
+    pub fn output_tps(&self) -> Option<(f64, bool)> {
+        let (ms, est) = self.effective_ms()?;
+        Some((self.output_tokens as f64 / ms as f64 * 1000.0, est))
+    }
+
+    /// Input throughput (call-level prompt rate) + the estimated flag.
+    pub fn input_tps(&self) -> Option<(f64, bool)> {
+        let (ms, est) = self.effective_ms()?;
+        Some((self.input_tokens as f64 / ms as f64 * 1000.0, est))
+    }
+
+    /// (input + output) / timed span + the estimated flag.
+    pub fn total_tps(&self) -> Option<(f64, bool)> {
+        let (ms, est) = self.effective_ms()?;
+        Some((
+            (self.input_tokens + self.output_tokens) as f64 / ms as f64 * 1000.0,
+            est,
+        ))
+    }
+
+    /// Generation-only rate: output tokens per (timed − TTFT) second;
+    /// needs both the call timing and a reported `ttft_ms`.
+    pub fn decode_tps(&self) -> Option<(f64, bool)> {
+        let (ms, est) = self.effective_ms()?;
+        let ttft = u64::try_from(self.ttft_ms?).ok()?;
+        (ms > ttft && ttft > 0)
+            .then(|| (self.output_tokens as f64 / (ms - ttft) as f64 * 1000.0, est))
+    }
+
+    /// Prefill rate: input tokens per TTFT second.
+    pub fn prefill_tps(&self) -> Option<f64> {
+        let ttft = u64::try_from(self.ttft_ms?).ok()?;
+        (ttft > 0).then_some(self.input_tokens as f64 / ttft as f64 * 1000.0)
+    }
 }
 
 /// One row of the trend tooltip query: bucket ("YYYY-MM-DD"/"HH:00") × model.
@@ -369,10 +483,11 @@ impl super::Store {
         models: Option<&[String]>,
     ) -> Result<Vec<ShareRow>> {
         let (w, p) = scope_where(from_ms, to_ms, apps, models);
+        let speed = speed_exprs();
         let mut st = self.conn().prepare(&format!(
             "SELECT {MODEL_EXPR}, COUNT(*),
                     COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens),0),
-                    COALESCE(SUM(cost_usd),0)
+                    COALESCE(SUM(cost_usd),0), {speed}
              FROM usage_events {w} GROUP BY 1 ORDER BY cost_usd DESC"
         ))?;
         let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
@@ -381,6 +496,14 @@ impl super::Store {
                 events: r.get::<_, i64>(1)? as u64,
                 tokens: r.get::<_, i64>(2)? as u64,
                 cost_usd: r.get(3)?,
+                speed_in: r.get::<_, i64>(4)? as u64,
+                speed_out: r.get::<_, i64>(5)? as u64,
+                speed_ms: r.get::<_, i64>(6)? as u64,
+                speed_est_ms: r.get::<_, i64>(7)? as u64,
+                prefill_in: r.get::<_, i64>(8)? as u64,
+                ttft_ms: r.get::<_, i64>(9)? as u64,
+                decode_out: r.get::<_, i64>(10)? as u64,
+                decode_ms: r.get::<_, i64>(11)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -722,7 +845,7 @@ impl super::Store {
         p.push(limit.into());
         p.push(offset.into());
         let mut st = self.conn().prepare(&format!(
-            "SELECT app, model, pricing_model, project, session_id, ts_start,
+            "SELECT app, model, pricing_model, project, session_id, ts_start, ts_end, ttft_ms,
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
                     credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens
@@ -736,17 +859,19 @@ impl super::Store {
                 project: r.get(3)?,
                 session_id: r.get(4)?,
                 ts_start: r.get(5)?,
-                input_tokens: r.get::<_, i64>(6)? as u64,
-                output_tokens: r.get::<_, i64>(7)? as u64,
-                reasoning_tokens: r.get::<_, i64>(8)? as u64,
-                cache_read_tokens: r.get::<_, i64>(9)? as u64,
-                cache_write_tokens: r.get::<_, i64>(10)? as u64,
-                credits: r.get(11)?,
-                cost_usd: r.get(12)?,
-                cost_source: r.get(13)?,
-                duration_ms: r.get(14)?,
-                raw_ref: r.get(15)?,
-                unclassified_tokens: r.get::<_, i64>(16)? as u64,
+                ts_end: r.get(6)?,
+                ttft_ms: r.get(7)?,
+                input_tokens: r.get::<_, i64>(8)? as u64,
+                output_tokens: r.get::<_, i64>(9)? as u64,
+                reasoning_tokens: r.get::<_, i64>(10)? as u64,
+                cache_read_tokens: r.get::<_, i64>(11)? as u64,
+                cache_write_tokens: r.get::<_, i64>(12)? as u64,
+                credits: r.get(13)?,
+                cost_usd: r.get(14)?,
+                cost_source: r.get(15)?,
+                duration_ms: r.get(16)?,
+                raw_ref: r.get(17)?,
+                unclassified_tokens: r.get::<_, i64>(18)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -900,7 +1025,7 @@ impl super::Store {
     pub fn export_rows(&self, from_ms: Option<i64>, to_ms: Option<i64>) -> Result<Vec<EventRow>> {
         let (w, p) = time_where(from_ms, to_ms);
         let mut st = self.conn().prepare(&format!(
-            "SELECT app, model, pricing_model, project, session_id, ts_start,
+            "SELECT app, model, pricing_model, project, session_id, ts_start, ts_end, ttft_ms,
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
                     credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens
@@ -914,17 +1039,19 @@ impl super::Store {
                 project: r.get(3)?,
                 session_id: r.get(4)?,
                 ts_start: r.get(5)?,
-                input_tokens: r.get::<_, i64>(6)? as u64,
-                output_tokens: r.get::<_, i64>(7)? as u64,
-                reasoning_tokens: r.get::<_, i64>(8)? as u64,
-                cache_read_tokens: r.get::<_, i64>(9)? as u64,
-                cache_write_tokens: r.get::<_, i64>(10)? as u64,
-                credits: r.get(11)?,
-                cost_usd: r.get(12)?,
-                cost_source: r.get(13)?,
-                duration_ms: r.get(14)?,
-                raw_ref: r.get(15)?,
-                unclassified_tokens: r.get::<_, i64>(16)? as u64,
+                ts_end: r.get(6)?,
+                ttft_ms: r.get(7)?,
+                input_tokens: r.get::<_, i64>(8)? as u64,
+                output_tokens: r.get::<_, i64>(9)? as u64,
+                reasoning_tokens: r.get::<_, i64>(10)? as u64,
+                cache_read_tokens: r.get::<_, i64>(11)? as u64,
+                cache_write_tokens: r.get::<_, i64>(12)? as u64,
+                credits: r.get(13)?,
+                cost_usd: r.get(14)?,
+                cost_source: r.get(15)?,
+                duration_ms: r.get(16)?,
+                raw_ref: r.get(17)?,
+                unclassified_tokens: r.get::<_, i64>(18)? as u64,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1047,6 +1174,40 @@ fn time_where(from_ms: Option<i64>, to_ms: Option<i64>) -> (String, Vec<rusqlite
 /// all agree on what "the model" is.
 pub const MODEL_EXPR: &str =
     "COALESCE(NULLIF(model,''), NULLIF(request_model,''), NULLIF(pricing_model,''), '?')";
+
+/// The eight rate aggregates — `speed_in`, `speed_out`, `speed_ms`,
+/// `speed_est_ms`, `prefill_in`, `ttft_ms`, `decode_out`, `decode_ms` —
+/// shared by `by_model`, the cube loader and peer exports. An event carries
+/// usable timing when `duration_ms > 0` (provider- or adapter-measured);
+/// when it is missing, the bounded `ts_end - ts_start` span stands in, same
+/// rule as `normalize::derived_duration` — idle gaps longer than
+/// `MAX_DERIVED_DURATION_MS` aren't call time. The estimated slice of the
+/// timed span is kept separately so shells can label it; prefill uses
+/// `ttft_ms`, decode the (timed − TTFT) remainder.
+pub fn speed_exprs() -> String {
+    let max = crate::normalize::MAX_DERIVED_DURATION_MS;
+    let timed =
+        format!("(duration_ms > 0 OR (ts_end - ts_start > 0 AND ts_end - ts_start <= {max}))");
+    let est = format!(
+        "((duration_ms IS NULL OR duration_ms <= 0) \
+         AND ts_end - ts_start > 0 AND ts_end - ts_start <= {max})"
+    );
+    let eff = format!(
+        "(CASE WHEN duration_ms > 0 THEN duration_ms \
+         WHEN ts_end - ts_start > 0 AND ts_end - ts_start <= {max} THEN ts_end - ts_start \
+         ELSE 0 END)"
+    );
+    format!(
+        "COALESCE(SUM(CASE WHEN {timed} THEN input_tokens ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN {timed} THEN output_tokens ELSE 0 END),0), \
+         COALESCE(SUM({eff}),0), \
+         COALESCE(SUM(CASE WHEN {est} THEN ts_end - ts_start ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN input_tokens ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 AND {eff} > ttft_ms THEN output_tokens ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 AND {eff} > ttft_ms THEN {eff} - ttft_ms ELSE 0 END),0)"
+    )
+}
 
 /// Time range + app-set + model-set filter in one WHERE. `apps`/`models`
 /// `None` → no clause; `Some(list)` → `IN (?,?,…)` bound as params;

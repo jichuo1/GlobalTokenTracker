@@ -179,6 +179,15 @@ CREATE TABLE IF NOT EXISTS peer_groups (
   cost_usd REAL NOT NULL DEFAULT 0,
   active_ms INTEGER NOT NULL DEFAULT 0,
   duration_ms INTEGER NOT NULL DEFAULT 0,
+  -- 速率分子/分母分列（Σtokens/Σms 的加权均值）；零 = 该组无可计时长。
+  speed_in INTEGER NOT NULL DEFAULT 0,
+  speed_out INTEGER NOT NULL DEFAULT 0,
+  speed_ms INTEGER NOT NULL DEFAULT 0,
+  speed_est_ms INTEGER NOT NULL DEFAULT 0,
+  prefill_in INTEGER NOT NULL DEFAULT 0,
+  ttft_ms INTEGER NOT NULL DEFAULT 0,
+  decode_out INTEGER NOT NULL DEFAULT 0,
+  decode_ms INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (device_id, utc_hour, app, model)
 ) WITHOUT ROWID;
 
