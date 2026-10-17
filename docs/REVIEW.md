@@ -1474,6 +1474,48 @@
     - `ledger vacuumed and compacted`（主库碎片页面彻底回收紧凑）；
   - **前台 UI 运行验证**：UI 进程 PID 45804 在 `WinSta0\Default` 桌面平稳运行，内存仅 173MB，响应敏捷，界面交互正常。
 
+## S101 GTT 模型协同调度的只读桥接与异步 MCP
+
+- **范围**：新增 `integrations/model-router/` 与 `docs/MODEL_ROUTER.md`。Python 标准库实现用户级共享服务、stdio MCP 代理、来源目录、可解释路由、异步扇出与交叉检查；未修改 Rust core/UI/扫描器、账本结构或生产依赖。
+- **GTT 契约**：SQLite `mode=ro` + `query_only=ON`，导出来源健康、有限历史聚合和新鲜额度白名单；不导出 raw_json、提示词、账号原值。未知/过期余额不冒充 0 或无限；session_ctx 不当额度。
+- **取舍**：同用户多个 Codex MCP 客户端共享一套容量、作业和健康状态。localhost 随机端口与私有令牌，客户端禁用代理。重启标记未完成工作 interrupted，不自动重放计费请求。
+- **验证**：独立已安装的官方 MCP Python SDK 对两个 stdio 客户端进行 initialize/tools/list/tools/call，10 个工具与共享作业回读通过；关闭一个客户端后服务仍可用。SDK 是验收依赖，不是生产依赖。
+
+## S102 外部来源、模型指标和真实故障切换
+
+- **范围**：ZCode API-key provider/model/effort 目录与 `workspace/generateText`，Antigravity 独立 CLI JSON 流，注册式 command_json 桥接协议。模型列表和 entitlement 均不算生成证据。
+- **指标**：AA 公共页面种子保存精确别名、版本、来源、时间、harness/effort；Step、Ling、Flash High/Medium 分开登记。不同 Terminal-Bench 版本不混用，无数据的模型标为未知/启发式先验。可选 AA_API_KEY 官方刷新；不存在的 Terminal-Bench API 字段不猜测、不更新旧指标时间。
+- **实测**：无仓库数据的合成缓存代码评审触发国内 Step 认证失败，然后由 Ling/max 完成。另一次较大局部评审在高思考档耗尽 3072 总输出预算，不把截断算成功；模型总输出与给主线的短报告分开约束。
+- **边界**：GTT 识别其他软件的历史用量不代表该软件已有执行适配器。当前实测两种真实软件，第三种 command_json 用独立进程协议 fixture 验证；未伪称其他软件已接通。
+
+## S103 外部优先、Codex 子代理协调与 token 记账修复
+
+- **范围**：跨外部来源的容量转发、短排队宽限、明确 needs_codex/Luna 交接；调用方报告的 Codex 代理覆盖租约、workflow/work_key 去重、合计容量、尝试和 token 预算。
+- **实际复核**：外部评审返回不可用/截断后，使用原生协作工具以 `gpt-6-luna/high`、fork_turns=none 只读审阅局部调度代码。Codex 独立核对四项问题并修复：缺失 usage 估算入账、验证报告完整输入预算、Luna 交接用量入账、取消/完成交接原子终态。协作 API 未提供本次 Luna 精确用量，不虚构数字。
+- **额外门禁**：只有所有独立报告齐备才验证，避免交接后复用只看过一个报告的 verifier；重复反馈幂等且可修正；明确 no-fallback 不改执行源。用量按报告或明确估算累计，同类任务的实际延迟/token 移动平均参与后续预留。
+- **实测边界**：Luna 由调用方真实协作工具执行，服务不会再启动 Codex CLI/创建用户聊天，也不假装自身能观察其他线程的代理。
+
+## S104 Flash 有界检索、权限与本机安装验收
+
+- **问题与修复**：Flash 宽泛检索会反复翻页。新增 focus_urls/focus_terms/web_tool_budget，成功页面聚焦为最多约 6000 字符的派生摘录，保留 URL 与原行号。强模型评审保留思考预算，给 Codex 的报告保持简短。
+- **权限**：新建协调器专用 Antigravity 项目，仅增加网页和缓存读取；原有项目/全局设置不改。原生 PreToolUse/PostToolUse/PreInvocation 门禁限制来源、公网 URL 和本次抓取派生缓存，拒绝 shell、写文件、MCP、嵌套代理和其他本地文件。Agent frontmatter tools 列表在当前版本不足以单独证明边界，因此不据此声称只读。
+- **工作槽位**：稳定空 cwd 供原生前缀缓存使用，每次新会话，审计与导引状态重置；不续接其他任务。是否命中缓存看实际 usage，不承诺必然命中。
+- **真实链路**：两路 Flash Medium 并发报告 + ZCode Step 海外/xhigh 交叉检查完整回收。四次执行尝试，含一次认证失败；总报告用量 77,349 tokens，透明记录，不宣称简单任务只花几千 token。交叉检查明确指出其中一个报告页面正文证据薄弱、两份报告同源同模型，不能把一致当作正确性验收。
+- **本机安装**：用户目录安装 `gtt-coordinator` Skill，Codex CLI 注册全局 `gtt-router` stdio MCP；运行时在 `~/.globaltokentracker/router/`，独立 CLI SHA-512 已按官方 manifest 核对，不修改全局 PATH、不复制原软件凭证。
+- **验证**：`python -W error::ResourceWarning -m unittest discover -s integrations/model-router/tests -q`：48 项通过；compileall、Skill validator、安装文件一致性和 git diff --check 通过；官方 MCP SDK 双客户端复验通过（现场目录 20 条候选路线，候选不等于全部已实测生成成功）。未运行不相关的 Rust/WinUI 构建，也未推送远端。
+
+## S105 来源降权的时间衰减与有界恢复检查
+
+- **范围**：软件、提供商、模型路线分层近期惩罚，排名采用衰减后的权重，不再依赖累计失败次数永久压低可用性。约 30 分钟半衰期，正常成功加速恢复；认证失败只影响对应提供商，软件桥接反复失败再温和影响整个来源。
+- **恢复**：闲时小型固定 JSON 生成检查，默认首次 30 分钟，失败指数退避至 6 小时；每小时最多 2 次，独立 token 上限 24,000，不带项目材料、不使用模型目录代替生成。前台工作让检查取消，取消记调用/估算开销但不增加故障惩罚；已耗尽额度和禁用容量不绕过。
+- **证据**：隔离状态库中模拟 timeout 降权（不更改真实来源分数），真实 Ling/max 恢复标记生成成功，权重 0.84 → 1.0；连接恢复不重置既有代码质量反馈。该证据不是对实际网络中断/恢复的伪造宣称。
+- **验证**：新增降权、时间衰减、错误范围、指数退避、前台让路、小时预算、错误标记不恢复、取消不错误降权与禁用容量测试；目前 59 项通过。运行时启用恢复配置并随最终 MCP 双客户端复验确认。
+
+
+
+
+
+
 ## S106 原生协同观察接口 v1 与兼容桥接
 
 - **范围**：core/CLI 新增 coordination capabilities/snapshot/refresh，协议 v1、白名单投影、单事务读取、显式来源与网络额度作用域；沿用已有依赖、账本格式和普通 CLI/UI 行为。刷新先锁后打开，禁止自动备份恢复。
@@ -1489,6 +1531,42 @@
 - **验证**：cargo metadata --offline --locked 确认四个包均为 0.5.0，逐记录比较锁文件仅四处版本变化；26 项发布工具测试、9 项更新逻辑测试通过，CLI --locked 构建通过。CLI --version 与协调能力响应读回 0.5.0，protocol_version 仍为 1。
 - **构建身份**：Stable v0.5.0 与无 tag 的 Alpha 校验均得到 base/version_name=0.5.0，安装包名 GlobalTokenTracker-Setup-0.5.0-win-x64.exe；版本提升本身不创建 Release/tag。
 
+## S108 原生 agent 注册与 OpenCode 全模型目录
+
+- **范围**：独立私密协调器新增 OpenCode HTTP、Claude/CodeBuddy print、DSH headless 适配器与本机注册脚本；无新增生产库依赖，用户配置/凭证/运行记录只在本机。OpenCode 读取全部已连接 provider 的模型，不局限默认 model，角色不虚增并发。
+- **证据**：原生 CLI 与共享调度器验证了 OpenCode 跨 provider 明确选型及报告回收，另一个目录可见的免费路线认证失败并进入降权/熔断，不算成功。Claude 3 个原生模型 ID、WorkBuddy GLM-5.1 与 DSH 原生短验证完成。
+- **成本偏好**：用户指出 DSH 使用自有 API 成本高后，立即禁用其自动调度/恢复，保留验证与用量记录；默认注册对 DSH 只做发现，需显式 opt-in。当前 5 个外部来源、88 条目录候选路线，不是逐模型可用性证明。
+- **验证**：88 项协调器测试、原生独立进程协议 fixture、权限/模型/变体/取消/工具/截断/配置保护门禁通过；两个官方 MCP SDK 客户端与 Skill 复验。原有来源、全局总并发、其他任务及全局软件配置保留。
+
+## S109 Windows 后台辅助进程的显式隐藏启动
+
+- **范围**：私密协调器统一后台启动选项，覆盖 worker、目录发现、原生注册、GTT CLI 观察、超时清理和驻留服务；同步本机 integrations/model-router。新增标准库模块，无新生产依赖，Rust/UI/版本 0.5.0 未变。
+- **修复**：普通辅助进程使用 CREATE_NO_WINDOW + STARTF_USESHOWWINDOW/SW_HIDE；驻留服务采用 DETACHED_PROCESS + 显式隐藏初始窗口，移除会被忽略的 CREATE_NO_WINDOW/DETACHED_PROCESS 组合。第三方自行创建可见子进程不属于父进程参数能保证的范围。
+- **现场证据**：WinEvent 捕获过短暂 Windows Terminal 窗口事件，父链为系统服务宿主，用户确认没有主动打开终端，尚不能据此确认原始调用方。本机默认终端确为 Windows Terminal。目录刷新时抓到 agy、OpenCode、taskkill、GTT CLI 的控制台宿主进程，没有对应可见终端窗口事件；控制台宿主存在本身不证明黑窗口可见。修复后用户反馈暂未再闪现，末轮 120 秒观察也没有终端窗口事件，观察范围不足以保证永久不复现。
+- **验证**：92 项 Python 测试通过，含真实 Windows worker/驻留子进程 GetConsoleWindow=0；compileall、双官方 MCP 客户端（10 工具、88 候选路线、关闭一个客户端后服务存活）、部署 7 文件字节一致性通过。受控重启与目录刷新重复观察未捕获终端窗口事件。DSH 保持禁用，诊断未主动提交模型任务；已有后台恢复机制在期间完成一次 Ling 探测，实际报告用量 403 tokens，恢复记录由 8 增至 9。本机诊断日志留在私有运行目录，不进入仓库。
+
+## S110 不定期窗口复发与 ZCode Node 后代保护
+
+- **现场线索**：用户再次反馈终端样式窗口闪现。00:09:50 GTT 启动 ZCode app-server 做局部评审，00:09:52 又启动 mimosa MCP 和内置子服务；这些控制台宿主在取样时仍可回读。只能证明时间吻合的启动链，尚未取得该次可见窗口与具体调用方的直接对应。
+- **实现**：仅为 GTT 的 Windows ZCode Node worker 增加 --require 预加载，覆盖 child_process 的异步、同步、回调、Promise、fork/IPC 与 ESM API，Node 后代即使重置 execArgv 或提供精简环境仍带同一保护。仅记录可执行文件名、API、PID 和隐藏标志，无参数、环境、提示词或凭证。沿用现有 Node/Python，无新增生产依赖。
+- **取舍**：原生项目配置试验没有取得可验证的插件禁用结果，未采用为生产修复。Node 隐藏保护不保证控制第三方原生程序自行打开窗口。新增普通权限的一次性窗口记录器，立即保存终端/Electron 窗口事件和此前 20 秒启动快照，有界缓存与观察时限，不读取标题/命令行。
+- **验证**：94 项测试通过，真实 Windows Python 子进程无控制台，Node 多层调用、带空格的预加载路径、环境保留、Promise.child、错误 stderr、fork IPC 与 ESM 通过。Windows PowerShell 5 和当前 PowerShell 的记录器编译/两秒运行通过。一次真实 ZCode Ling/max 生成成功，报告 576 tokens，启动日志 12 次调用原本均已请求隐藏，因此不宣称该探针已经验证闪现根因。DSH 保持禁用。具体运行记录仅留在本机私有目录。
+
+## S111 Antigravity 自启动控制台继承与兼容启动桥接
+
+- **直接现场证据**：00:34:05.441 捕获 Windows Terminal 的 SHOW/visible=true。此前约 0.36 秒新建的控制台宿主父链为 GTT → agy → agy → agy；OpenConsole 在其后约 32ms 启动。ZCode 验证任务 00:34:10.730 才提交。已取得 Antigravity 目录刷新自启动链与可见终端事件的完整时间对应，不再把 ZCode 时间相近的启动当作根因。
+- **最终实现**：Antigravity 的目录发现和 worker 经独立启动桥接创建隐藏控制台，后代继承同一控制台，原有 stdin/stdout/stderr 原样透传。Windows Job 在恢复主线程前完成绑定；桥接正常退出、超时或被强制结束时清理本次 CLI 树。其他来源和系统默认终端不改。
+- **兼容与部署**：桥接命令可在旧驻留服务热加载，配置仅修改 Antigravity 的 command，原始配置保留本地备份。随后在确认无活动作业/子进程时完成源码重新加载。S110 的 Node 预加载方案未取得触发证据，已撤回其代码与临时测试；保留有界窗口记录器。没有新增生产依赖。
+- **验证**：95 项测试通过，包含三级进程隐藏控制台继承、原始 Unicode/stdin/stdout/stderr、退出码、路径参数、幂等包装、强制结束后的所属后代清理。真实 Antigravity 14 模型列表字节完全一致，真实 stream-json init 身份核对通过，未发送用户消息、未触发生成；两种修复入口均未捕获可见终端窗口。总候选目录仍为 88，DSH 保持禁用。记录器在私有目录运行到 01:55 自动停止。
+
+- **部署后观察续期**：最终源码加载与远端 SHA 核对后，将一次性隐藏记录器续期到 10/10/2026 02:45:38；原观察器按身份核对后停止，日志仍仅在私有运行目录。
+
+## S112 非交互 CLI 桌面与更新路径的后续收敛
+
+- 继承隐藏控制台的第一版仍在后续记录中出现 Windows Terminal SHOW，未把该方案当作最终验收。进一步在 GTT 专用 CLI 进程设置已核对当前二进制支持的 AGY_CLI_DISABLE_AUTO_UPDATE/AGY_CLI_NONINTERACTIVE_HEADLESS，并使用不切换为输入桌面的专用 worker 桌面。
+- 当前 96 项测试通过，新增后代桌面继承验证；测试中的显式新控制台也指定隐藏初始状态，避免诊断自身制造闪窗。真实独立 CLI 连续五次查询、真实驻留调度器连续五次强制目录刷新均为 14 模型/88 路线，没有可见终端事件；stream-json init 成功，未发送用户消息。
+- 最终提交 174d46a 已推私密远端并核对 SHA，部署文件一致；仅一次 ZCode 生成验收报告 576 tokens，DSH 禁用。新的普通权限只读观察器自动于 03:49:15 停止，现场元数据保留在私有目录，不宣称短期测试已经保证永久不复发。
+
 ## S113 协作调用计量回流与原生请求去重
 
 - 增加 gtt_coordinator 只读适配器，仅消费脱敏 usage_records v1；导入与水位提交同事务，失败可重试。OpenCode 共享原生消息键，可补全不足的记录；已有完整原生用量及会话聚合不会再计一笔。
@@ -1497,6 +1575,87 @@
 - Review 找到并修复 OpenCode 工具拒绝与模型不匹配路径丢失已返回用量；补上针对这些失败路径的断言。外部有界审查请求达到尝试上限后，按调度规则回退 Luna，主线独立核对。
 - 验证：Python 105 项通过；cargo test --workspace 为 237 项通过、3 项既有忽略；cargo clippy --workspace --all-targets 无告警；CLI/UI Release 构建通过。账本副本首次补入 19 条/150,056 tokens，重扫新增为 0；原生请求未重复入账，未分类 93,670 tokens 均未定价。
 - 没有新增生产依赖。真实数据库、运行配置、供应商标识、提示词、诊断日志均不进入提交；公开仓库仅提交消费端与通用契约，协调器实现保留在私密仓库。
+
+## S114 取消计量与本机自动入账验收
+
+- 后续 review 修复恢复检查的取消异常携带用量被忽略的问题，包括明确返回零的情况；补上请求开始时间与耗时，避免用完成时间归日。Python 106 项通过，变更已进入私密协调器仓库。
+- 本机正式账本补入 19 条历史用量，新增真实生成 544 tokens 自动入账一笔，累计 20 条/150,600 tokens；最终重扫新增 0 条。7 个调度器文件与源码一致，CLI/UI 与 Release 构建字节一致，DSH 仍禁用。
+- 双官方 MCP 客户端共享服务与 10 工具验证通过。公开 GTT 提交的远端构建、单测、Clippy 与安装包校验成功；本节仅为本地运行验收档案，不把真实配置和日志加入公开提交。
+
+## S115 ZCode 截断预算调查
+
+- 历史路由 35 次中 11 次为 length 截断，与超时/回收字符裁剪区分。核对本机 CLI 调用链及原生请求，maxOutputTokens 正确传入 max_tokens，Step 保持 adaptive/xhigh。
+- 同一短玩具任务、同路由、同思考档位对照：1024 上限耗满输出且正文为零；4096 上限正常结束，实际输出 1105。只统计正文/思考字符数，不把思考内容写进报告。两次共 2963 tokens，GTT 各入账一笔。
+- 增加截断诊断严格白名单，保留请求上限、可见字符及供应商上报的 token 数；108 项测试通过，只读 review 通过。没有自动降低思考档位、增加全局预算或修改供应商配置；旧失败缺失的拆分仍标未知。代码与通用调查报告仅进入私密协调器仓库。
+
+## S116 高难度输出上限与原生范围兼容
+
+- 普通单次人工上限改为 65536，逻辑任务默认32768/600秒；默认总预约按输入、并发和验证轮数扩展，仍封顶200000，显式小预算保留。
+- 实测发现ZCode会拒绝超过自身optionSpecs范围的请求；按安装实现的原生模型/API/站点/模板/精确规则顺序解析max，实际派发与预约一起收紧。当前一条Step线路原生32000，两条个人覆写100000。
+- 117项相关测试通过（另有正在开发研究组的7项契约测试也通过）；双官方MCP客户端确认65536 schema及计划，真实65536请求按原生32000运行成功，实际上报10493 tokens。外部文字摘要review越界猜测经源码/边界测试核对未成立。SkillCreator校验有效，已同步本机技能和驻留服务，DSH禁用。
+
+## S117 自适应研究组与审批控制
+
+- 增加3–8角色自适应研究组、多组并行、负责人规划/证据审核/续研及合格补位。组预算5000万，可在负责人提出必要性后由Codex显式批准到1亿；每轮取消GTT人工token配额，但保留原生上下文/输出与协议容量约束。
+- 失败模型暂避30分钟，任务不适合的低质量模型仅本组排除；增减席位需要Codex确认。共用source/provider/global预约与计量，并为普通主线预留一个槽。取消、重启、未知结果和调用方成员接力均有状态门禁。
+- 146项测试与SkillCreator校验通过。真实3角色一轮四份成功报告，软件可观测累计31265 tokens；负责人审出成员术语/返回合同问题，Codex独立行为验证后succeeded。补回原题到成员上下文、兼容空操作数组，复用已保存决策完成恢复，没有重复付费生成。
+- 双官方MCP客户端确认19工具，当前配置159候选路由；11个运行文件和技能已核对，DSH仍禁用。公开Rust统计格式不变，内部请求/报告仅在本机私有状态库，计量走原有脱敏表。
+
+
+## S118 最新完整安装器安装验收
+
+- 基于远端 main 3937eeb、版本 0.5.0，cargo build --release --locked 构建 CLI/UI，再通过 installer/package.ps1 -SkipBuild 重新嵌入最新 payload；Cargo.lock 与 setup/build.rs 内容哈希保持不变。
+- 完整安装器静默覆盖到既有用户目录，退出码 0；已安装 CLI/UI 分别与 Release 产物 SHA-256 一致，setup 与此次安装包一致。CLI --version、HKCU DisplayVersion 和 coordination capabilities 均确认 0.5.0，接口 status=ok 并包含 gtt_coordinator 消费源。
+- 原 UI 未运行，本次没有自动启动；仅安装程序文件，既有账本和协调器配置保留。本机安装验收记录留在私有诊断目录，不加入公开提交。
+
+
+## S119 调度恢复、本轮偏好与进程期限
+
+- 私有协调器增加独立、随机且可过期的来源/模型/路线偏好，作用域内动态并发目标，普通任务/研究组/实际 Codex lease 共用；不改变全局限制或预算/席位审批。修复同 scope 批量任务在首个预约前占满协调线程的竞态。
+- 认证/额度/模型不可用隔离需生成验证解除，新增有界手动复检；按任务输入规模估计期限，普通任务预留补位时间与预算，角色分别选质量/速度/可靠性，同类型明确用量才参与 token 效率校准。
+- Windows 原生 CLI 在恢复主线程前加入所属 Job，父进程退出也清理后代；无缓冲分块读避免关管道锁等待。输入统一期限监控，ZCode cancel 最多0.15秒尽力发送，先杀所属树再关 stdin。DSH 仅合成回归，实际仍禁用。
+- 172项全套回归通过，独立复核偏好12项和Windows进程5项；双官方MCP客户端确认21工具、共享偏好和状态，SkillCreator有效。真实海外 Step xhigh 有界设计评审约69秒、明确5614 tokens；两条国内恢复复检受每小时探针预算限制，尚未取得本次成功生成证据。
+- 运行镜像和本机Skill已同步，闲置时仅重启所属协调器；配置哈希保持，状态库先备份。配置、状态和诊断仅在本机私有目录，公开Rust源与版本不变，相关源码只推私密协调器仓库。
+
+## S120 活动期限、价格与研究协同升级
+
+- 私有Python调度器0.2.0增加25个MCP接口：真实活动的TTFT/idle/grace/hard分层、价格与明确零价倾向、准确版本队列、新模型实测倾向、作用域消息/事件/Luna建议、合组原子账本与累加席位。单组3–8、合组最多32，实际并发容量不扩大，预算最多100M且可明确缩减来源预算之和，旧消费不重计。
+- 223项完整回归通过；随后deadline展示一致性Coordination21+Groups21与activity plan分层窗口回归通过。双官方MCP SDK客户端确认25工具、共享偏好/状态、GTT CLI v1接口和160路线；生产Python仍仅标准库。
+- 真实Muse Spark1.3 Contributor约22秒完成首次报告；更新后10秒初次响应窗、120秒hard的有界任务19.036秒成功，观察到5次真实活动与思考/输出计数，报告3619明确tokens。免费Zen Muse复检auth_failed仍隔离；免费Step的旧期限任务未取得报告，不当成功证据。DSH无真实调用。
+- 独立Luna复核发现并修正大整数价格、作用域覆盖、新版本别名误增权、监工静默年龄、消息游标与预算/截止显示边界。未知价不当免费、模型名不当能力证明，current ZCode RPC final-only限制保留。
+- 本机闲置时备份SQLite并重载唯一所属daemon，17个运行文件和Skill同步；配置哈希及账本/健康计数保留。此处只同步未跟踪运行镜像与追加本地审阅，不加入或覆盖本仓库原有未提交文档/integrations；Rust源与应用0.5.0未改。私有源码main最终43e6cb7已推送并回读；本机证据在用户Temp私有目录，不提交凭据/状态/截图。
+
+## S121 外部协同总开关与必需 Luna 监工
+
+- 设置页新增「外部协同接口」，独立 external-interface.json 原子保存；同时阻止原生 capabilities/snapshot/refresh 与 Python MCP/API 调度、观察入口。全局开关与自定义账本双重检查；旧版文件缺失沿用开启，未知字段/版本、重复键、非布尔值、过大或读取异常按关闭处理，显示实际错误。保留统计、其他 UI 设置与来源凭证。
+- 所有模型调度要求调用方真实启动 Luna 并登记同 workflow 的 role=supervisor 短租约；监工参与共享容量而不覆盖实际工作。普通/组提交、续研、预约、重试与 adapter 前复验；未发出的调用零费用且不降权，已经发出的请求允许完成且只记一次。手动与后台恢复探测同受门禁，无监工不做后台生成。身份为 caller-reported，不宣称服务能认证或自行创建内部代理。
+- Luna 独立复核修正 legacy 数据目录判据、研究组门禁失败后的预算/席位/轮数回滚；普通 verifier 继承原 workflow。专项覆盖队列租约过期、最后派发竞态、重试/在途完成、后台探测、全接口关闭与自定义账本旁路。
+- cargo test -p globaltokentracker-core -p globaltokentracker-cli --locked：187 core + 15 CLI 通过，3项既有 ignored；cargo test -p globaltokentracker-ui --locked：28项通过；cargo build --release -p globaltokentracker-cli -p globaltokentracker-ui --locked 通过。Python unittest 全套244项通过，其中门禁19项；SkillCreator验证通过。
+- 本机 CLI/UI 已备份并替换为本次 Release 构建，SHA-256逐一匹配；Computer Use 实际窗口确认设置页「外部协同接口」存在且保持开启。协调器服务仍有其他 workflow 正在执行，本阶段不强杀或抢占；私有源码与Skill已准备，服务重载/跨客户端验收待其空闲后补记。
+- 本节只追加，不覆盖原有 REVIEW.md 279187字节前缀；未跟踪 MODEL_ROUTER.md/integrations 继续保留。未发布远端、未新增生产依赖、未更改模块/引擎或设备。
+
+## S122 空闲重载与最终接口验收
+
+- 追加动态门禁路径修正：每次调用按当前配置、原生 legacy 判据重新解析共享开关；配置热重载切换账本后仍检查新路径，不沿用旧路径。20项 controls 门禁回归 + 16项 observations 通过，随后完整 Python 245项通过（69.839秒）。
+- 经用户确认等待其他 workflow 请求完成，active=0 时备份状态库及8个私有运行文件、核对唯一所属daemon命令行后重载；旧PID10256、新PID36716。配置SHA-256不变，usage_records前后216条，健康记录数量一致；已有报告保留，不重放付费请求。
+- 新服务实际确认真实 /root/luna_scheduler_monitor、gpt-6-luna、role=supervisor 与本轮workflow匹配，身份等级明确 caller_reported_lease。官方MCP SDK双客户端验证25工具、新role/recheck-workflow schema、共享作业/偏好、160路线和GTT CLI v1 origin=ok；一个未登记监工workflow的真实MCP submit返回luna_supervisor_required且未派发。
+- 私有运行镜像8文件与源码逐字一致，本机Skill3文件同步且SkillCreator验证通过；公开Rust源码本地提交3948ec2，私有Python补丁274a5c2及路径修正提交 cb1402d719f1c8f722c9e5cf7db4d095a0ccf697。均未推送远端，原有未提交文档与其他会话工作保留。
+
+## S123 GTT 0.6.0 Stable 发布准备
+
+- 经用户明确授权推送本次GTT和调度器改动并发布完整安装包。workspace从0.5.0升至0.6.0，Cargo.lock只改4个自有crate版本；README补外部协同开关、真实Luna租约和调度器独立部署边界。原有未提交文档/integrations不进入公开提交。
+- Stable发布在创建Release前校验已有远端tag的peel commit等于本次GITHUB_SHA；缺失时先以精确源码创建tag并非强制推送，再gh release --verify-tag。旧tag不移动。3个真实隔离Git回归覆盖新tag、匹配annotated tag及错误旧tag拒绝，最终发布命令被mock，无真实外部副作用。
+- cargo check --workspace --all-targets、cargo test --workspace --locked（243通过、3既有ignored）、cargo clippy --workspace --all-targets --locked -- -D warnings通过；发布工具29项通过。validate_build确认v0.6.0及完整Setup资产名。
+- installer/package.ps1重新构建UI/CLI、压缩并嵌入setup：本地完整包11372032字节，SHA256=c72abf8f33a914e7effa391c69ab338c72f85d68536b8396c14e3099013a3d59；实际解出唯一完整payload，只含UI/CLI，分别与本次release构建哈希相同；CLI --version、UI文件版本均0.6.0。本地未配置签名，未宣称已签名。远端正式包还需CI与附件验收。
+- 私有调度器main cb1402d719f1c8f722c9e5cf7db4d095a0ccf697已推送并回读一致；未改配置、状态、凭证或引擎/模块源码。
+
+## S124 GTT 0.6.0 正式完整安装包发布验收
+
+- 本次公开GTT main与v0.6.0 tag均回读为e3b7bb08dca20b34a009b99b5fbc57791c72a16e，原v0.5.0仍指向04500a1；私有调度器main cb1402d已推送。Stable run38126359632 verify/publish均success，push触发的Alpha run38126344879也success。正式Release非draft/prerelease。
+- 完整资产GlobalTokenTracker-Setup-v0.6.0-win-x64.exe为11388416字节，远端下载SHA256=04429a1135915d7ff5448f1e51e04abd60577891c52088894b032babb69af277；BUILD_INFO source_commit、project_version、release_tag匹配，SHA256SUMS中的安装包和BUILD_INFO两项都重新计算一致。
+- 从实际下载的PE内解出唯一ZIP，恰有globaltokentracker-ui.exe与globaltokentracker-cli.exe；CLI实际--version、UI和安装器ProductVersion均0.6.0，排除空stub与旧版payload。远端构建内层哈希单独记录，不要求与本机编译字节一致。Authenticode为NotSigned且BUILD_INFO asset_signed=false，未冒充签名。
+- 更新说明从上一正式版v0.5.0覆盖3个提交，包含协同消费入账、外部接口总开关和发布标签校验；完整包只含GTT程序，配套Python调度器独立部署并已推送更新。
+- 正式附件与解包验收留在D:/Bilibili_Innocent_Lab/Temp/gtt-v060-published及相邻JSON，只用于本机验收，不提交任何凭证、账本或其他工作区的未提交文件。本次没有运行安装器覆盖用户现有安装。
 
 
 ## S125 活跃热力图色阶区分度
@@ -1519,6 +1678,56 @@
 - **本机证据**：备份、安装器/载荷/已安装文件哈希 JSON 及 installed-ui.png 保留在 ignored `target/e2e/heat-deploy/`，不提交真实账本、配置、截图或诊断文件。
 
 
+## S127 调度器截断与协议恢复运行验收
+
+- **授权与范围**：经用户明确授权同步已验证的私有调度器运行副本及 gtt-coordinator Skill，在确认普通/研究组执行任务为零且常驻无子进程后重启；未重新 bootstrap 或覆盖认证、账本与其他安装文件。
+- **源码与取舍**：已推送调度器修复提交 2a487ac7ca98e0cdcce2241f7fecbbcf21b7a04a；确定的完整 JSON 包装可兼容，部分/歧义证据仍拒绝。零正文 length 先处理输出余量，adaptive 补位仍受原总预算和次数约束，fixed 不超过显式上限；slot 反馈规范化与常驻协议版本检查已接入。
+- **验证命令**：`python -m unittest discover -s tests -q` 312 项通过；compileall、schema/解析一致性、Skill 元数据/引用、diff 检查和本机凭证值比对的 privacy_check 均通过。新增生产依赖为零。
+- **安装与实测**：替换的14文件已分别备份，36项运行/Skill文件与源码逐项匹配，私有配置SHA-256不变；实际安装入口health读回0.3.0/协议2。两个原始MCP stdio客户端检查25工具、新字段计划及共享真实任务，关闭客户端后常驻存活；研究组动态切片/并发参数的计划入口通过，不派发组任务。
+- **真实生成与边界**：一次有界 logic_check 的请求/有效输出上限均为65536，单次成功、报告完整JSON及complete=true，用量计账并释放全部预约，收尾执行任务为零。Luna监工真实登记、续租和finished收尾已核对。未把此结果宣称为全部路线、512k实际长输出或真实高负载多切片组验收。
+- **交付与保护**：通用验收记录已随 979d804abefce948329187b92fbd02c1f1508962 推送至私有调度器 origin/main 并回读一致。本节仅按字节追加；保留原有未提交 REVIEW 内容及未跟踪 integrations，不提交或推送父项目改动，个人运行明细留本机。
+
+
+## S128 调度器高负载、长输出与未知计量恢复验收（2026-10-13）
+
+- **授权与范围**：沿用用户对本集成运行代码/Skill同步、空闲重启及真实验收的明确授权。维护前普通/组执行及原生子进程为零；保留配置、认证、安装器脚本、安装基准种子和其他安装文件，不重新bootstrap。
+- **源码修复**：0c126fd修复长报告容量/原生输出/切片支撑等连接；08a7543避免长摘要重复挤占证据；22dba95修复首次响应等待、输出主导历史ETA、精确冗余绑定及零占位计量恢复。原生stop不等于完整JSON，成功片和缓存负责人报告保留。
+- **验证命令**：python -m unittest discover -s tests -q 全套335项通过，含25项耦合专项；compileall、Task/Group解析器-schema字段一致性、diff与带本机凭证值比对的privacy_check均通过；没有新增生产依赖。
+- **运行与安装**：实际安装入口health读回0.3.2/协议2/report_capacity_v1，34项运行Python/Skill文件逐项匹配源码，私有配置SHA-256保持。两个标准库原始MCP客户端读取25工具/新容量/同一组预算门禁，关闭后常驻存活；不称为官方SDK验收。
+- **真实生成边界**：4096条完整长报告逐条核验通过，超过旧32k输出与120000字符报告限制；低价已合格Mimo的源范围回归仅返回两个真实案例，字段一致，叙述的细粒度范围锚点仍有限。合法31500条近512k请求单次返回stop及308905字符不完整JSON，真实512k生成未通过，不补括号或冒充完整数据。
+- **耦合与对账**：原17成功报告及已付费缓存负责人未重放；组当前轮7成功/1分裂/10失败/9未知、8问题未闭合，未认定全案通过。8条旧opencode启动零占位超时记录恢复为带标识估算，原值和去重ID保留、记录键唯一，对账重复幂等。估算使调度总量达到原测试预算后进入group_budget_exhausted，未自动扩预算或重放未知结果，预约归零。
+- **交付与保护**：四个提交已普通推送至私有调度器origin/main，远端/本地/GitHub API均为be25a4c1818bd258b163eca2efeb9ae607ec5f4f，工作区干净；该SHA暂无Actions/check runs，不称为远端CI通过。本节只按字节追加，保留父项目已有未提交内容及未跟踪integrations，不提交或推送父项目。个人运行全文、作业ID、价格、用量明细及哈希清单留本机Temp验收目录。
+- **收尾**：真实Luna监工仅自己的owner设finished，本轮偏好scope已清除，无执行任务和原生子进程；未知结果、信息缺口及预算审批状态保留。
+
+
+## S129 全工作区 Lint 门禁贯通与双平台（Windows / macOS）编译流水线提速 ✅
+
+- **范围**：基于远端最新 `0.8.5`（`1efeae7`）基线，补齐 `crates/core`、`crates/cli`、`crates/ffi`、`crates/ui` 的 `[lints] workspace = true` 声明并清理全工作区 Clippy / `unsafe_code` 告警；优化 `crates/ui/build.rs`、`crates/setup/build.rs`、`installer/package.ps1`、`macos/scripts/build-app.sh` 以及 `.github/workflows/{alpha-release,stable-release,verify-branch}.yml`。
+- **瓶颈与门禁盲区定位（基于 GitHub Actions Run `38529971137` 与 `38126359632` 实测日志）**：
+  1. **工作区 Lint 门禁盲区**：根 `Cargo.toml` 定义了 `[workspace.lints.rust]`（`unsafe_code = "warn"`）与 `[workspace.lints.clippy]`（`pedantic = "warn"`），但 5 个子 crate 中仅 `crates/setup` 声明了 `[lints] workspace = true`，其余 4 个核心 crate（`core`、`cli`、`ffi`、`ui`）均漏配，导致工作区级 lint 规则在 90% 的代码上未生效。
+  2. **Windows `verify` 阶段 Release 双重全量 ThinLTO 编译（浪费 2m50s）**：`Release build` 步骤未注入 `GTT_RELEASE_TAG`，而随后的 `Validate installer packaging` 注入了 `GTT_RELEASE_TAG` 且调用不带 `-SkipBuild` 的 `installer\package.ps1`，导致 `option_env!("GTT_RELEASE_TAG")` 指纹变化触发全量重编；同时 Windows `Release build` 使用 `--workspace` 额外编译了仅 macOS 使用的 `globaltokentracker-ffi` `staticlib`。
+  3. **Windows `publish` 阶段第三次全量 ThinLTO 重编（浪费 2m58s）**：`Swatinem/rust-cache@v2` 默认清理工作区自身 crate，`publish` 阶段再次耗时近 3 分钟从头编译 `core`、`ui`、`cli`。
+  4. **macOS Universal Rust 引擎串行单核阻塞（耗时 47.57s + 53.33s = 101s）**：`macos/scripts/build-app.sh` 在循环中分两次串行调用 `cargo build --release -p globaltokentracker-ffi --target <t>`。因 `[profile.release]` 启用 `codegen-units = 1` + `lto = "thin"`，单 crate LLVM 后端优化阶段仅用单核，串行调用浪费了一半多核并发能力。
+  5. **未传 `--locked` 触发重复 `Updating crates.io index`（每次浪费 13s~18s）**与 **无消费方的 Debug 全量二进制链接（浪费 54s）**。
+  6. **`build.rs` 缺失 `rerun-if-changed` 与源码时间戳污染**：`crates/ui/build.rs` 和 `crates/setup/build.rs` 未输出 `cargo:rerun-if-changed`；`installer/package.ps1` 直接覆写 `crates/setup/build.rs` 的 `LastWriteTime` 破坏缓存。
+- **改动与取舍**：
+  1. **全工作区 5 个 crate 贯通 `[lints] workspace = true`**：
+     - `crates/{core,cli,ffi,ui}/Cargo.toml` 补齐 `[lints] workspace = true` 与 `edition.workspace = true`；
+     - 清理 5 个 crate 中的冗余闭包、`format_collect`（统一收敛至预分配容量的 `peer::keys::hex`）、`format_push_string`、`manual_midpoint`、裸指针转换等告警；在真正需要 OS/Win32 FFI 的模块/函数上显式标注 `allow(unsafe_code)`，保持业务模块对 `unsafe` 的零容忍拦截。
+  2. **构建脚本与 Windows 打包脚本增量友好化**：
+     - `crates/ui/build.rs` 与 `crates/setup/build.rs` 增加精确的 `cargo:rerun-if-changed`；`crates/setup/build.rs` 增加 `cargo:rerun-if-env-changed=GTT_EMBED_PAYLOAD`；
+     - `installer/package.ps1` 移除修改 `crates/setup/build.rs` 时间戳的操作，改由 `payload.zip` 的 SHA-256 注入 `GTT_EMBED_PAYLOAD` 驱动重编，并为 `cargo build` 加上 `--locked`。
+  3. **macOS 与 Windows 双端工作流提速**：
+     - `macos/scripts/build-app.sh` 将双架构 `--target aarch64-apple-darwin --target x86_64-apple-darwin` 合并为单次 `cargo build --release --locked` 并发构建，并仅在 target 未安装时调用 `rustup target add`；
+     - 三个工作流（`alpha-release.yml`、`stable-release.yml`、`verify-branch.yml`）顶层 `env` 统一注入 `GTT_RELEASE_TAG`，新增 `cargo fmt --all -- --check` 门禁，移除无消费方的 `Build workspace (debug)`，Windows `Release build` 仅构建 `-p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup`，打包步骤改调 `installer\package.ps1 -SkipBuild`，发布时通过短期 artifact 传递已校验的 `ui.exe`/`cli.exe` 交由受保护环境签名并打包。
+- **验证命令与实测结果**：
+  - `python -m unittest discover -s .github/release-templates -p "test_*.py"`：31 项全部通过（15.54s）；
+  - `cargo fmt --all -- --check`：0 差异通过；
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`：5 个 crate 全部 0 警告通过；
+  - `cargo test --workspace --locked`：307 项测试全部通过（15 integration + 243 core + 1 ffi + 15 setup + 33 ui，4 项既有 ignored）；
+  - `cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup`（1m36s）后执行 `.\installer\package.ps1 -SkipBuild`：耗时 **10.59s**（对比原 CI 2m50s），产出完整安装包 `GlobalTokenTracker-Setup-0.8.5-win-x64.exe`（12.32 MB），`mtime_unchanged=True`，随后复跑 `cargo clippy --workspace --all-targets --locked -- -D warnings` 仅需 **0.34s**。
+
+
 ## S130 修复 Rust 1.99.0 Clippy 空集合断言导致的双平台 CI 失败（2026-10-15）
 
 - **范围与根因**：核对提交 `6957d054d7065ec65213c373d622f608b4473eab` 的 GitHub Actions Run [38725442317](https://github.com/jichuo1/GlobalTokenTracker/actions/runs/38725442317)。Windows Job `116390002984` 与 macOS Job `116390002776` 均在 Clippy 失败，日志工具链为 `rustc 1.99.0 (b940084d7 2026-09-28)`。工作区启用 `clippy::pedantic`，CI 的 `-D warnings` 将 `clippy::assert_is_empty` 提升为错误；Windows 报 core 测试 20 处、CLI 集成测试 1 处、UI 测试 1 处，macOS 报对应 portable crates 的 21 处。本轮开始时本机默认工具链为 Rust 1.98.1，与 CI stable 版本不同。该次远端 Windows 的 rustfmt、单元测试、Release 构建与安装包校验已成功，失败点不是新增的格式门禁或打包复用。
@@ -1532,3 +1741,18 @@
 - **实际版本**：默认 `rustc 1.98.1` 升级为 `rustc 1.99.0 (b940084d7 2026-09-28)`；默认 Cargo 为 `1.99.0 (5f94df478 2026-08-27)`，Clippy 为 `0.1.99 (b940084d7e 2026-09-28)`，rustfmt 为 `1.10.0-stable (b940084d7e 2026-09-28)`。`rustup show active-toolchain` 读回 `stable-x86_64-pc-windows-msvc (default)`；`rustup check` 读回 stable 1.99.0 与 rustup 1.29.1 均 up to date。
 - **默认命令验证**：环境升级后，直接执行不带版本前缀的 `cargo fmt --all -- --check` 与 `cargo clippy --workspace --all-targets --locked -- -D warnings` 均通过（后者 7.67s），确认日常入口使用与此次 CI 相同版本的工具链。前述全量测试使用显式 1.99.0 工具链，编译器提交哈希与升级后的默认 stable 相同。
 - **后续维护边界**：当前 CI 使用滚动 stable；以后 CI 升级时，本机仍需执行 `rustup update stable` / `rustup check` 并重跑格式、Clippy 与测试门禁。此次按要求同步环境，没有添加定时任务，也没有永久冻结项目或其他仓库的 Rust 版本。
+
+## S132 Qoder 计费统计精细化：时长跨扫描、credits 展示、模型别名解析（2026-10-17）
+
+- **范围与根因**：事件表 Qoder 行长期显示 输入/输出/缓存 0、成本 `$0 unpriced`、时长 `—`、模型为内部代号。实测三者根因独立：① 时长——引擎按字节水位只投喂新增片段（`engine.rs` 扫描循环 + `store/cursor.rs` 的 `save_cursor`），`user` 行时间戳在早前的扫描段被消费，assistant 段内 `last_user_ts=None`；② 成本——Qoder 服务端在本地 transcript 将 `input_tokens/output_tokens/cache_*` 恒置 0、仅 `credits` 有值（本机全部 transcript 中 `input_tokens` 非零文件数为 0），零 token 事件按设计判 `Unpriced` 存 `cost_usd=0.0`，而 WinUI/macOS 成本格仅在 `cost_usd` 为 NULL 时才回退显示 credits，真实扣费点数被 `$0` 挡住；③ 模型——transcript 只存内部 key（`kmodel_latest` 等），显示名映射仅存在于 run 日志 `[QoderInferRequest details] model_config` 的 `key/display_name` 字段。
+- **修改与取舍**：仅改三处。`crates/core/src/adapters/qoder.rs`：`parse_jsonl` 从 `prior_state` 恢复 `last_user_ts`、扫描结束写入 `new_state`（`save_cursor` 对 `adapter_state` 是整列覆盖，故无新值时继承旧状态避免擦除）；新增 `display_name` 静态映射 6 条（run 日志实测：smodel→Sonus、ultimate→Ultimate、kmodel_latest→Kimi-K3、qmodel_38max→Qwen3.8-Max、cmodel→Cantus、qfmodel→Qwen3.8-Flash），`model` 写显示名、`request_model` 保留原 key，未知 key 原样透传不猜测。`crates/ui/src/pages.rs` 与 `macos/.../Views/TablePages.swift`（该文件注释声明与 WinUI `event_row` 同规则，故同步）：unpriced 且 credits>0 时成本格以 `{c}cr` 为主显示并保留 unpriced 徽章；非 unpriced 行维持 USD 优先、credits 回退的旧规则。不新增价格表条目、不以 credits 反推 token（无 vendor 费率卡，不虚构数字），时长口径维持既有 user→assistant 日志时间戳推算。
+- **实测证据**：新增单测 `user_timestamp_survives_across_segments`（跨段恢复时间戳推出 20s 时长并解析别名）、`unknown_model_key_passes_through`；两处既有测试的模型断言更新为解析名并补 `request_model` 断言。`cargo test -p globaltokentracker-core`：245 passed、0 failed、4 ignored；`cargo clippy -p globaltokentracker-core -p globaltokentracker-ui --all-targets` 无告警；`cargo check -p globaltokentracker-ui` 通过；`cargo fmt --check` 通过。
+- **边界与后续**：Swift 改动在 Windows 环境无法原生编译验收，需 CI macOS job 或本机 `swift build` 复核；历史已入库的 NULL 时长行不回填（光标不重扫），修复对新增量与冷启动全量导入生效；credits→USD 汇率换算为可选进阶项，本轮未做，维持 `model.rs` "美元与点数不混算" 原则。
+
+## S133 显示货币：多源汇率抓取、缓存回退与双端全局金额换算（2026-10-17）
+
+- **范围**：承接 S132 遗留的可选进阶项（credits→USD 的广义化：任意显示货币）。新增 `crates/core/src/fx.rs`：显示货币设置与汇率缓存读写（store state 键 `display_currency` / `fx_rates`）、三源有序回退抓取、后台刷新；`viewmodel::fmt` 增加进程级显示货币槽与换算渲染；ffi 增加 `gtt_fx_status` / `gtt_set_display_currency` 与 `gtt_load` 响应顶层 `fx` 对象；WinUI 设置页"通用"组新增货币下拉与汇率来源行；macOS `Fmt.usd` / `Fmt.perMillion` 换算、Settings 新增 Currency 组。
+- **数据源与回退**（均无密钥、ECB 系或 ECB 镜像、日更）：① Frankfurter `api.frankfurter.dev/v1/latest?base=`；② open.er-api.com `/v6/latest/`（要求 `result=="success"`）；③ ECB `eurofxref-daily.xml` 直连，线性扫描 `currency='…' rate='…'` 对（不引 XML 依赖，属性顺序由 feed 固定），再经 EUR 交叉换算成 base 计价并钉住 base=1、EUR=1/eur_base。`pick` 以闭包保持惰性：前源成功不发起后续请求；空 rate map 视同失败继续回退；全失败返回带上下文的末次错误。缓存 TTL 12h（ECB 约每日 16:00 CET 发布），过期缓存仍参与换算并由 `FxStatus.stale` 报告年龄——离线优先于无数据。
+- **修改与取舍**：账本端到端保持 USD，汇率只驱动展示（与 `model.rs` "美元与点数不混算" 一致，credits 仍独立列示不并入 USD）。换算上下文放在 core `fmt` 的 `OnceLock<RwLock<MoneyDisplay>>` 槽：`fx::apply` 在 `overview` / `overview_from_cube_for` / `detail` 三个 build 入口读缓存设槽并触发 `ensure_fresh`，fmt 自身零 I/O，双端 13+16 处 `fmt::usd` / `Fmt.usd` 调用点零改动。`ensure_fresh` 仅在水缺/过期且无在途任务时 spawn 后台线程，线程内自行 `Store::open(path)` 写缓存（`Store` 持裸 `Connection` 非 Send）；`:memory:` 库跳过（`try_open` 对 `:memory:` 也存 `Some(path)`，需显式过滤，否则测试会真发网络请求）。未知/非正费率一律回退 1.0，不猜测。符号表覆盖 13 种常用货币，其余以 ISO 码前缀透传；JPY/KRW/VND/CLP 零小数位。macOS 经 `Core.call` 解码后 `as? LoadResult` 单点设 `Fmt` 静态（NSLock 保护，load 在后台队列）；`fresh:false` 短路响应无 `fx` 键，故 Swift 侧字段为可选。
+- **实测证据**：fx 单测 12 项（三源 payload 解析、ECB 交叉换算 8.236/1.16=7.1、回退顺序/空 map/全失败、状态换算与 stale 标记、未知货币回退 1.0、`:memory:` 不 spawn 且复位在途标志）；fmt 纯函数单测 `render_converts_ledger_usd_into_display_currency`、`money_prefix_falls_back_to_iso_code`——并行测试不写全局槽，避免与既有 `usd_trims_trailing_zeros` 竞态。`cargo test --workspace`：323 passed、0 failed、4 ignored（core 259 含新增 14）；`cargo clippy --workspace --all-targets` 无告警；`cargo fmt --check` 通过；`cargo check -p globaltokentracker-ui` 通过。
+- **边界与后续**：macOS Swift 五文件（Format/Models/Core/SettingsView + gtt.h 声明）在 Windows 环境无 Swift 工具链，未编译验收，需 CI macOS job 或本机 `swift build` 复核；首帧无缓存时按 USD 显示并在设置页明示"未获取到汇率"，后台抓取成功后下一次刷新自动切换；汇率为日更缓存而非实时行情，设置页以来源+抓取时间+stale 标记保持透明；未做 credits→显示货币的二次换算（credits 非 USD 计价单位，维持 S132 口径）。

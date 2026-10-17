@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "aa_slug": "step-5", "aliases": ["step-5-preview"],
+      "intelligence": 44, "terminal_bench": 33,
+      "benchmark_version": "Terminal-Bench 4.0", "harness": "Artificial Analysis", "effort": "not specified on comparison page",
+      "output_tps": 80, "answer_latency_s": 28.07, "context_window": 1000000,
+      "preferred_kinds": ["code_review", "logic_check", "cross_check"],
+      "captured_at": 1791504000000,
+      "source_url": "https://artificialanalysis.ai/models/comparisons/step-5-vs-claude-sonnet-5"
+    },
+    {
+      "aa_slug": "gemini-3-8-flash", "aliases": ["gemini-3.8-flash-high"],
+      "intelligence": 41, "terminal_bench": 20,
+      "benchmark_version": "Terminal-Bench 4.0", "harness": "Artificial Analysis", "effort": "high",
+      "output_tps": 117, "answer_latency_s": 27.14, "context_window": 1000000,
+      "preferred_kinds": ["research", "extract", "summarize"],
+      "allowed_kinds": ["research", "extract", "summarize", "cross_check"],
+      "captured_at": 1791504000000,
+      "source_url": "https://artificialanalysis.ai/models/comparisons/gemini-3-8-flash-vs-gemini-3-5-flash-lite"
+    },
+    {
+      "aa_slug": "gemini-3-8-flash-medium", "aliases": ["gemini-3.8-flash-medium"],
+      "intelligence": 40, "effort": "medium", "intelligence_index_version": "4.3.2",
+      "context_window": 1000000,
+      "preferred_kinds": ["research", "extract", "summarize"],
+      "allowed_kinds": ["research", "extract", "summarize", "cross_check"],
+      "captured_at": 1791504000000,
+      "source_url": "https://artificialanalysis.ai/models/releases/gemini-3-8-flash"
+    },
+    {
+      "aa_slug": "ling-3-1-flash", "aliases": ["inclusionai/ling-3.1-flash"],
+      "intelligence": 41, "terminal_bench": 33,
+      "benchmark_version": "Terminal-Bench 4.0", "harness": "Artificial Analysis", "effort": "not specified on comparison page",
+      "output_tps": 211, "answer_latency_s": 11.24, "context_window": 1000000,
+      "preferred_kinds": ["extract", "summarize", "code_review", "logic_check", "cross_check"],
+      "captured_at": 1791504000000,
+      "source_url": "https://artificialanalysis.ai/models/comparisons/ling-3-1-flash-vs-gpt-6-astra-xhigh"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+interface:
+  display_name: "GTT 模型协同调度"
+  short_description: "优先外部模型并发辅助，结合 GTT 额度、任务能力和速度，减少 Codex 重复上下文开销"
+  default_prompt: "使用 $gtt-coordinator 为当前主线安排有界辅助任务，优先外部模型并发回收证据。"
+policy:
+  allow_implicit_invocation: true

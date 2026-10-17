@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "state_dir": "C:/absolute/private-runtime",
+  "ledger_path": "C:/absolute/private-runtime/ledger.db",
+  "benchmark_file": "C:/absolute/private-runtime/benchmarks.json",
+  "gtt_interface": {
+    "enabled": true,
+    "timeout_s": 5,
+    "allow_legacy_fallback": true
+  },
+  "allow_codex_fallback": true,
+  "codex_fallback_model": "gpt-6-luna",
+  "recovery": {
+    "enabled": true,
+    "poll_s": 60,
+    "initial_delay_s": 1800,
+    "max_backoff_s": 21600,
+    "probe_timeout_s": 30,
+    "max_probes_per_hour": 2,
+    "max_tokens_per_hour": 24000
+  },
+  "limits": {
+    "global_parallel": 4,
+    "combined_parallel": 6,
+    "max_active_jobs": 4,
+    "max_queued_jobs": 16,
+    "source_parallel": { "zcode": 2, "antigravity": 2 },
+    "quota_ttl_s": 300,
+    "external_queue_grace_s": 3,
+    "max_context_chars": 64000
+  },
+  "sources": [
+    {
+      "id": "zcode",
+      "adapter": "zcode_rpc",
+      "enabled": false,
+      "command": ["C:/absolute/path/node.exe", "C:/absolute/path/zcode.cjs", "app-server"],
+      "provider_config": "C:/absolute/private-config/provider_config.json",
+      "builtin_config": "C:/absolute/path/zcode-builtin.json",
+      "max_parallel": 2
+    },
+    {
+      "id": "antigravity",
+      "adapter": "antigravity_cli",
+      "enabled": false,
+      "command": ["C:/absolute/path/agy.exe"],
+      "project_id": "REPLACE_WITH_YOUR_COORDINATOR_PROJECT_ID",
+      "max_parallel": 2
+    }
+  ],
+  "profile_overrides": {}
+}
