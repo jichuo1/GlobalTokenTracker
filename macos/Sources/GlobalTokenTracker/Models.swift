@@ -61,7 +61,60 @@ struct ShareRow: Decodable, Sendable, Identifiable, Equatable {
     var events: UInt64
     var tokens: UInt64
     var costUsd: Double
+    /// Rate sums (core `speed_exprs`): a model's rate is Σtokens/Σms —
+    /// a weighted mean, never an average of per-event ratios. Zero = no
+    /// usable timing for the group (not a zero speed).
+    var speedIn: UInt64 = 0
+    var speedOut: UInt64 = 0
+    var speedMs: UInt64 = 0
+    /// Timestamp-estimated slice of `speedMs` (no measured duration).
+    var speedEstMs: UInt64 = 0
+    /// Input tokens on events reporting `ttftMs` (prefill numerator).
+    var prefillIn: UInt64 = 0
+    var ttftMs: UInt64 = 0
+    /// Output tokens on events with both timing and `ttftMs`.
+    var decodeOut: UInt64 = 0
+    /// `timedMs - ttftMs` summed on those events.
+    var decodeMs: UInt64 = 0
     var id: String { name }
+
+    init(name: String, events: UInt64, tokens: UInt64, costUsd: Double) {
+        self.name = name
+        self.events = events
+        self.tokens = tokens
+        self.costUsd = costUsd
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, events, tokens, costUsd, speedIn, speedOut, speedMs, speedEstMs
+        case prefillIn, ttftMs, decodeOut, decodeMs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        events = try c.decode(UInt64.self, forKey: .events)
+        tokens = try c.decode(UInt64.self, forKey: .tokens)
+        costUsd = try c.decode(Double.self, forKey: .costUsd)
+        // Older cores don't carry the rate sums — decode as "no timing".
+        speedIn = try c.decodeIfPresent(UInt64.self, forKey: .speedIn) ?? 0
+        speedOut = try c.decodeIfPresent(UInt64.self, forKey: .speedOut) ?? 0
+        speedMs = try c.decodeIfPresent(UInt64.self, forKey: .speedMs) ?? 0
+        speedEstMs = try c.decodeIfPresent(UInt64.self, forKey: .speedEstMs) ?? 0
+        prefillIn = try c.decodeIfPresent(UInt64.self, forKey: .prefillIn) ?? 0
+        ttftMs = try c.decodeIfPresent(UInt64.self, forKey: .ttftMs) ?? 0
+        decodeOut = try c.decodeIfPresent(UInt64.self, forKey: .decodeOut) ?? 0
+        decodeMs = try c.decodeIfPresent(UInt64.self, forKey: .decodeMs) ?? 0
+    }
+
+    /// Headline rate: output tokens/s over the timed span.
+    var outputTps: Double? { speedMs > 0 ? Double(speedOut) / Double(speedMs) * 1000 : nil }
+    var inputTps: Double? { speedMs > 0 ? Double(speedIn) / Double(speedMs) * 1000 : nil }
+    var totalTps: Double? { speedMs > 0 ? Double(speedIn + speedOut) / Double(speedMs) * 1000 : nil }
+    /// Prefill rate — input tokens per TTFT second.
+    var prefillTps: Double? { ttftMs > 0 ? Double(prefillIn) / Double(ttftMs) * 1000 : nil }
+    /// Generation-only rate — output tokens per (timed − TTFT) second.
+    var decodeTps: Double? { decodeMs > 0 ? Double(decodeOut) / Double(decodeMs) * 1000 : nil }
 }
 
 /// Rust `(String, u64)` tuples arrive as two-element arrays.
@@ -334,6 +387,8 @@ struct EventRow: Decodable, Sendable, Identifiable, Equatable {
     var project: String?
     var sessionId: String?
     var tsStart: Int64?
+    var tsEnd: Int64?
+    var ttftMs: Int64?
     var inputTokens: UInt64
     var outputTokens: UInt64
     var reasoningTokens: UInt64
@@ -350,6 +405,38 @@ struct EventRow: Decodable, Sendable, Identifiable, Equatable {
     var id: String { rawRef ?? "\(app)|\(sessionId ?? "")|\(tsStart ?? 0)|\(model ?? "")" }
     var tokens: UInt64 {
         inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens + unclassifiedTokens
+    }
+
+    /// Usable call timing: `durationMs` when measured, else the bounded
+    /// `tsEnd - tsStart` span (same 30 min cap as core's derived_duration);
+    /// the flag marks the timestamp-estimated case.
+    var effectiveMs: (ms: UInt64, est: Bool)? {
+        if let d = durationMs, d > 0 { return (UInt64(d), false) }
+        guard let s = tsStart, let e = tsEnd else { return nil }
+        let span = e - s
+        guard span > 0, span <= 30 * 60 * 1000 else { return nil }
+        return (UInt64(span), true)
+    }
+
+    /// Output tokens/s + estimated flag; nil without usable timing.
+    var outputTps: (Double, Bool)? {
+        effectiveMs.map { (Double(outputTokens) / Double($0.ms) * 1000, $0.est) }
+    }
+    var inputTps: (Double, Bool)? {
+        effectiveMs.map { (Double(inputTokens) / Double($0.ms) * 1000, $0.est) }
+    }
+    var totalTps: (Double, Bool)? {
+        effectiveMs.map { (Double(inputTokens + outputTokens) / Double($0.ms) * 1000, $0.est) }
+    }
+    /// Output tokens per (timed − TTFT) second — needs both.
+    var decodeTps: (Double, Bool)? {
+        guard let (ms, est) = effectiveMs, let t = ttftMs, t > 0, ms > UInt64(t) else { return nil }
+        return (Double(outputTokens) / Double(ms - UInt64(t)) * 1000, est)
+    }
+    /// Input tokens per TTFT second.
+    var prefillTps: Double? {
+        guard let t = ttftMs, t > 0 else { return nil }
+        return Double(inputTokens) / Double(t) * 1000
     }
 }
 

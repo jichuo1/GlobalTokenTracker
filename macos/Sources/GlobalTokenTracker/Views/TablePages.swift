@@ -63,6 +63,7 @@ struct DetailView: View {
         NativeColumn(id: "duration", title: "Duration", min: 58, ideal: 74, trailing: true, mono: true) { r in
             NativeCell(text: r.durationMs.map { Fmt.duration(ms: UInt64(max(0, $0))) } ?? "—")
         },
+        NativeColumn(id: "speed", title: "Speed", min: 64, ideal: 84, trailing: true, mono: true) { r in speedCell(r) },
     ]
 
     private static func num(_ n: UInt64, secondary: Bool = false) -> NativeCell {
@@ -95,6 +96,24 @@ struct DetailView: View {
         }
         return NativeCell(text: s, tooltip: row.costSource,
                           badge: row.costSource == "unpriced" ? ("unpriced", .systemOrange) : nil)
+    }
+
+    /// Output tokens/s over the call's effective timing ("≈" when the span
+    /// is a timestamp estimate, no usable timing shows "—"); the tooltip
+    /// carries the total/in/out/prefill/gen breakdown — same parts as the
+    /// WinUI speed tooltip.
+    private static func speedCell(_ r: EventRow) -> NativeCell {
+        guard let (tps, est) = r.outputTps else { return NativeCell(text: "—", tone: .tertiary) }
+        var parts: [String] = []
+        if let (v, _) = r.totalTps { parts.append(String(localized: "Total \(Fmt.speed(v))")) }
+        if let (v, _) = r.inputTps { parts.append(String(localized: "In \(Fmt.speed(v))")) }
+        if let (v, _) = r.outputTps { parts.append(String(localized: "Out \(Fmt.speed(v))")) }
+        if let v = r.prefillTps { parts.append(String(localized: "Prefill \(Fmt.speed(v))")) }
+        if let (v, _) = r.decodeTps { parts.append(String(localized: "Gen \(Fmt.speed(v))")) }
+        if let (ms, _) = r.effectiveMs { parts.append(String(localized: "Timed \(Fmt.duration(ms: ms))")) }
+        if est { parts.append(String(localized: "estimated")) }
+        return NativeCell(text: "\(est ? "≈" : "")\(Fmt.speed(tps))",
+                          tooltip: parts.joined(separator: " · "))
     }
 
     /// Provenance (raw_ref: source file + offset) — the Windows row tooltip,

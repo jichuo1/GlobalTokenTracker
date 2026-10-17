@@ -84,6 +84,11 @@ enum Fmt {
         )
     }
 
+    /// Throughput in tokens/s — "45.2 tok/s" (core's `fmt::speed`).
+    static func speed(_ v: Double) -> String {
+        "\(v.formatted(.number.precision(.fractionLength(0...1)))) tok/s"
+    }
+
     /// Per-million price, trimmed ("$3", "$0.075") — display currency too.
     static func perMillion(_ v: Double) -> String {
         let (code, rate) = display()

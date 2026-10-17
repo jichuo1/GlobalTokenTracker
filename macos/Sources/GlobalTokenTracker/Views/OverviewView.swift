@@ -8,7 +8,7 @@ import SwiftUI
 // MARK: - Layout (order + hidden, persisted)
 
 enum OverviewWidget: String, CaseIterable, Identifiable, Codable {
-    case stats, trend, share, apps, devices, heat, quotas, unpriced
+    case stats, trend, share, speed, apps, devices, heat, quotas, unpriced
     var id: String { rawValue }
 
     var title: LocalizedStringKey {
@@ -16,6 +16,7 @@ enum OverviewWidget: String, CaseIterable, Identifiable, Codable {
         case .stats: "Summary"
         case .trend: "Trend"
         case .share: "Share"
+        case .speed: "Speed"
         case .apps: "By Tool"
         case .devices: "By Device"
         case .heat: "Activity"
@@ -29,6 +30,7 @@ enum OverviewWidget: String, CaseIterable, Identifiable, Codable {
         case .stats: "square.grid.2x2"
         case .trend: "chart.bar.xaxis"
         case .share: "chart.pie"
+        case .speed: "speedometer"
         case .apps: "list.bullet"
         case .devices: "macbook.and.iphone"
         case .heat: "square.grid.3x3.fill"
@@ -105,6 +107,7 @@ struct OverviewView: View {
         // and other vm changes no longer rebuild charts that didn't change.
         case .trend: TrendCard(vm: vm, series: model.trend).equatable()
         case .share: ShareGrid(vm: vm).equatable()
+        case .speed: SpeedCard(vm: vm).equatable()
         case .apps: ToolsCard(vm: vm).equatable()
         case .devices: if vm.hasPeers { DevicesCard(vm: vm).equatable() }
         case .heat: HeatmapCard(days: vm.heat).equatable()
@@ -431,6 +434,100 @@ private struct ShareGrid: View, Equatable {
                         Fmt.tokensCompact(UInt64(max(0, $0)))
                     }
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Speed (donut + top leaderboard; per-model fine rates in tooltips)
+
+/// Speed overview: models ranked by weighted output speed. The donut folds
+/// the tail into "Other" as a weighted mean — rates don't sum, so a plain
+/// leftover-sum fold would be wrong. Sums come from core (`speed_exprs`).
+private struct SpeedCard: View, Equatable {
+    let vm: OverviewVM
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.vm.range == b.vm.range && a.vm.byModel == b.vm.byModel
+    }
+
+    /// Models with usable timing, fastest output rate first.
+    private var ranked: [ShareRow] {
+        vm.byModel.filter { $0.speedMs > 0 }
+            .sorted { ($0.outputTps ?? 0) > ($1.outputTps ?? 0) }
+    }
+
+    /// Top 4 + "Other" as the tail's weighted mean.
+    private var slices: [(String, Double)] {
+        var out = ranked.prefix(4).map { ($0.name, $0.outputTps ?? 0) }
+        let tail = ranked.dropFirst(4)
+            .reduce((out: UInt64(0), ms: UInt64(0))) { ($0.0 + $1.speedOut, $0.1 + $1.speedMs) }
+        if tail.ms > 0 { out.append((String(localized: "Other"), Double(tail.out) / Double(tail.ms) * 1000)) }
+        return out
+    }
+
+    private var footer: String {
+        var sin = UInt64(0), sout = UInt64(0), ms = UInt64(0)
+        var pin = UInt64(0), ttft = UInt64(0), dout = UInt64(0), dms = UInt64(0)
+        for m in ranked {
+            sin += m.speedIn; sout += m.speedOut; ms += m.speedMs
+            pin += m.prefillIn; ttft += m.ttftMs; dout += m.decodeOut; dms += m.decodeMs
+        }
+        guard ms > 0 else { return "" }
+        var parts = [
+            String(localized: "Total \(Fmt.speed(Double(sin + sout) / Double(ms) * 1000))"),
+            String(localized: "In \(Fmt.speed(Double(sin) / Double(ms) * 1000))"),
+            String(localized: "Out \(Fmt.speed(Double(sout) / Double(ms) * 1000))"),
+        ]
+        if ttft > 0 { parts.append(String(localized: "Prefill \(Fmt.speed(Double(pin) / Double(ttft) * 1000))")) }
+        if dms > 0 { parts.append(String(localized: "Gen \(Fmt.speed(Double(dout) / Double(dms) * 1000))")) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func tip(_ m: ShareRow) -> String {
+        var parts: [String] = []
+        if let v = m.totalTps { parts.append(String(localized: "Total \(Fmt.speed(v))")) }
+        if let v = m.inputTps { parts.append(String(localized: "In \(Fmt.speed(v))")) }
+        if let v = m.outputTps { parts.append(String(localized: "Out \(Fmt.speed(v))")) }
+        if let v = m.prefillTps { parts.append(String(localized: "Prefill \(Fmt.speed(v))")) }
+        if let v = m.decodeTps { parts.append(String(localized: "Gen \(Fmt.speed(v))")) }
+        parts.append(String(localized: "Timed \(Fmt.duration(ms: m.speedMs))"))
+        if m.speedEstMs > 0 {
+            parts.append(String(localized: "est. \(Fmt.duration(ms: m.speedEstMs))"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        let top = Array(ranked.prefix(8))
+        let maxTps = max(1, top.map { $0.outputTps ?? 0 }.max() ?? 1)
+        Card(title: "\(Text(vm.range.title)) · Speed") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 24, alignment: .top)], alignment: .leading, spacing: 20) {
+                Donut(title: "By Model · Speed", items: slices, format: Fmt.speed)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Top Speed").scaledFont(.caption).foregroundStyle(.secondary)
+                    if top.isEmpty {
+                        Text("No data").foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 60)
+                    } else {
+                        ForEach(top) { m in
+                            let tps = m.outputTps ?? 0
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(m.name).lineLimit(1).fontWeight(.medium)
+                                    Spacer()
+                                    Text("\(m.speedEstMs > 0 ? "≈" : "")\(Fmt.speed(tps)) · \(Fmt.count(m.events)) calls")
+                                        .foregroundStyle(.secondary).monospacedDigit()
+                                }
+                                .scaledFont(.callout)
+                                ProgressView(value: tps, total: maxTps).tint(.accentColor)
+                            }
+                            .help(tip(m))
+                        }
+                    }
+                }
+            }
+            if !footer.isEmpty {
+                Text(footer).scaledFont(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
         }
     }
