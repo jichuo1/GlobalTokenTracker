@@ -2309,7 +2309,7 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool, width: f64) -> View {
                     format!("{}{}", fmt::speed(v), if est { " ≈" } else { "" }),
                     true,
                 )
-                .tooltip(event_speed_tip(r)),
+                .into(),
                 None => dtext(theme, "—".into(), true).into(),
             },
         ),
@@ -2327,8 +2327,11 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool, width: f64) -> View {
         // ~4% gray reads on both light and dark Fluent surfaces.
         row = row.background(Brush::Solid(Color::argb(10, 128, 128, 128)));
     }
+    // One tooltip per row — windows-reactor rejects a tooltip nested inside
+    // another tooltip's target subtree, so the rate breakdown rides on the
+    // provenance tooltip as a second line.
     row.content(Grid::new().columns(cols).keyed_children(keyed(cells)))
-        .tooltip(r.raw_ref.clone().unwrap_or_default())
+        .tooltip(row_tip(r))
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -2365,8 +2368,23 @@ fn speed_tip(r: &globaltokentracker_core::store::ShareRow) -> String {
     parts.join(" · ")
 }
 
+/// Row tooltip = provenance (`raw_ref`) plus the per-request rate breakdown
+/// on a second line — the row is the only tooltip level (nested tooltips
+/// inside a tooltip's target are rejected by windows-reactor).
+fn row_tip(r: &EventRow) -> String {
+    let speed = event_speed_tip(r);
+    let prov = r.raw_ref.clone().unwrap_or_default();
+    if speed.is_empty() {
+        return prov;
+    }
+    if prov.is_empty() {
+        return speed;
+    }
+    format!("{prov}\n{speed}")
+}
+
 /// Per-request rate breakdown — same labels as `speed_tip`, for the detail
-/// table's speed cell tooltip.
+/// table's row tooltip second line.
 fn event_speed_tip(r: &EventRow) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some((v, _)) = r.total_tps() {

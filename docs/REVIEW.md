@@ -1770,3 +1770,10 @@
 - **稳定性**：全部分支以 `Option` 表达"无数据"（UI 显 `—` 而非 0.0），除法分母全部 >0 守卫；`ttft_ms` 经 `u64::try_from` 拒负值；u64 求和与既有 peer 信任模型一致（形状校验、不设量级上限——与既有 events/tokens 字段同口径，已记录为一致边界）。
 - **验证命令与实测**：`cargo fmt --all -- --check` 0 差异；`cargo clippy --workspace --all-targets` 0 告警；`cargo test --workspace` 全量通过（core 261 含新增 `speed_fields_aggregate_as_ratio_of_sums`/`speed_exprs_bound_matches_event_row_effective_ms`、扩字段后的 `rebucketed_summary_equals_cube_overview`、`cube_matches_sql_across_ranges_and_filters`、`incremental_refresh_equals_a_full_build`，UI 33 含 9 列 plan 断言，cli/ffi/setup/coordination 全绿）；`cargo check -p globaltokentracker-ui` 通过。对等测试夹具补 `ts_end`/`ttft_ms`，by_model 对等断言扩为 8 字段全比较。
 - **边界与遗留**：macOS Swift 四文件在 Windows 环境无 Swift 工具链，未编译验收，需 CI macOS job 或本机 `swift build` 复核（字段经 `decodeIfPresent` 兜底，旧 core 不会崩）；环图"其他"为尾部加权均值而非可求和切片，已在注释注明；未做按工具/按设备的速率榜（数据已在 cube，属可选项）；`speed_est_ms` 在明细 tooltip 中说明估算来源，历史无 `duration_ms` 行不回填。
+
+## S135 修复明细页嵌套 tooltip 导致整窗退出（2026-10-17）
+
+- **现象与根因**：S134 安装后点击"明细"页整窗静默退出（无 `gtt_panic.log`）。定位：明细行外层 `Border` 已有 `.tooltip(raw_ref)`（溯源信息），S134 在速度单元格上又挂了 `dtext.tooltip(event_speed_tip)`，形成"tooltip 的 target 子树内再嵌套 tooltip"。windows-reactor `pump::planner::view::wrap_tooltip` 先经 `topology::tooltip_owner` 沿祖先链查找——命中外层 Tooltip 节点（子代是其 target）→ 直接返回 `PumpError::StructureUnsupported`；该错误沿 `schedule_dispatch` 置 `host.fault` 并 `exit_ui_thread` → `App::run_component` 返回 Err → 进程退出，全程非 Rust panic，故无日志。
+- **修复**：明细行保持单行单 tooltip——新 `row_tip` 将 `event_speed_tip`（总/输入/输出/预填/解码/估算标注）并入 `raw_ref` 溯源 tooltip 第二行；速度单元格回到纯 `dtext`。速度 Top 榜的 `usage_row().tooltip()` 无祖先 tooltip，不受此约束，保留。
+- **验证命令与实测**：`cargo check -p globaltokentracker-ui` 通过；`cargo clippy -p globaltokentracker-ui --all-targets` 0 告警；`cargo fmt --all -- --check` 通过；`cargo test -p globaltokentracker-ui`（pages plan 断言等 33 项）通过；重打包 `--quiet` 重装后明细页可正常打开、速度列与行 tooltip 正常（实机验证）。
+- **经验**：windows-reactor 的 `ViewKind::Tooltip`/`Flyout`/`ContentDialog` 是树级附着节点，`wrap_tooltip` 对"target 子树内含同族附件"直接判 `StructureUnsupported`；今后给行级 tooltip 内部的子元素挂 tooltip 一律改为合并进父级 tooltip 文本，或在树外另起挂载点。
