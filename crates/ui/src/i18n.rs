@@ -256,6 +256,20 @@ pub fn en(zh: &str) -> &str {
         "统计卡" => "Stats",
         "近 30 天趋势" => "30-day trend",
         "占比分布" => "Share breakdown",
+        "速度统计" => "Speed",
+        "{rl} · 速度统计" => "{rl} · speed",
+        "速度" => "Speed",
+        "速度 Top" => "Top speed",
+        "总 {}" => "Total {}",
+        "输出 {}" => "Output {}",
+        "预填 {}" => "Prefill {}",
+        "解码 {}" => "Decode {}",
+        "{}{} · {} 次调用" => "{}{} · {} calls",
+        "含首尾时间戳估算" => "partly timestamp-estimated",
+        "时长按首尾时间戳估算" => "duration estimated from timestamps",
+        "时长缺失的行按首尾时间戳估算（≈）" => {
+            "rows without durations estimated from timestamps (≈)"
+        }
         "费用" => "Cost",
         "按模型" => "By model",
         "按工具" => "By tool",

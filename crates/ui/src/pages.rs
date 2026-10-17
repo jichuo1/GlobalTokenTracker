@@ -844,7 +844,7 @@ fn heat_card(
             &vm.heat,
             metric,
             args.heat,
-            args.canvas_ready < 8,
+            args.canvas_ready < 9,
             args.cols,
             ctx,
         ),
@@ -1083,7 +1083,8 @@ fn overview_widget(
                         key: i as u8,
                         handle: &args.donuts[i],
                         // Trend takes stage 1, donut `i` stage 2+i (up to
-                        // six with paired devices), the heatmap stage 8.
+                        // six with paired devices), the speed donut stage 8,
+                        // the heatmap stage 9.
                         defer: args.canvas_ready < 2 + i,
                         wide: args.cols >= 5,
                     },
@@ -1099,6 +1100,148 @@ fn overview_widget(
                     .children((
                         w::section_header(theme, Symbol::AllApps, &tf!("{rl} · 占比分布", rl)),
                         reflow_grid(theme, cells, args.cols),
+                    )),
+            ))
+        }
+        // 模型速率卡：环形图按模型加权输出速度（Σout/Σms，非逐事件均值）
+        // 分片，环心为总体均值；右侧 Top 榜按速率排序，行 tooltip 列示
+        // 总/输入/输出/预填/解码分项。时长缺失的事件不计入（缺失≠零速），
+        // 缺 duration_ms 但有首尾时间戳的行按有界 span 估算并以 ≈ 标注。
+        "speed" => {
+            let mut ranked: Vec<_> = vm.by_model.iter().filter(|r| r.speed_ms > 0).collect();
+            ranked.sort_by(|a, b| {
+                b.output_tps()
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.output_tps().unwrap_or(0.0))
+            });
+            // Top-4 直接分片；其余按 Σout/Σms 折成 "其他"（速率不可加总）。
+            let (rest_out, rest_ms) = ranked
+                .iter()
+                .skip(4)
+                .fold((0u64, 0u64), |(o, m), r| (o + r.speed_out, m + r.speed_ms));
+            let mut slices: Vec<(String, f64)> = ranked
+                .iter()
+                .take(4)
+                .map(|r| (r.name.clone(), r.output_tps().unwrap_or(0.0)))
+                .collect();
+            if rest_ms > 0 {
+                slices.push((
+                    t!("其他").to_string(),
+                    rest_out as f64 / rest_ms as f64 * 1000.0,
+                ));
+            }
+            let (in_tok, out_tok, timed_ms, est_ms, prefill_in, ttft_ms, dec_out, dec_ms) =
+                vm.by_model.iter().fold(
+                    (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
+                    |acc, r| {
+                        (
+                            acc.0 + r.speed_in,
+                            acc.1 + r.speed_out,
+                            acc.2 + r.speed_ms,
+                            acc.3 + r.speed_est_ms,
+                            acc.4 + r.prefill_in,
+                            acc.5 + r.ttft_ms,
+                            acc.6 + r.decode_out,
+                            acc.7 + r.decode_ms,
+                        )
+                    },
+                );
+            let rate = |num: u64, ms: u64| (ms > 0).then(|| num as f64 / ms as f64 * 1000.0);
+            let center = rate(out_tok, timed_ms).map_or("—".into(), fmt::speed);
+            let donut = w::donut_cell(
+                theme,
+                tf!("{} · {}", tr("按模型"), tr("速度")),
+                w::DonutSpec {
+                    slices: &slices,
+                    center,
+                    fmt_v: fmt::speed,
+                    key: 6,
+                    handle: &args.donuts[6],
+                    // After the share donuts, before the heatmap.
+                    defer: args.canvas_ready < 8,
+                    wide: args.cols >= 5,
+                },
+                ctx,
+            );
+            let max = ranked.first().and_then(|r| r.output_tps()).unwrap_or(0.0);
+            let mut top_rows: Vec<View> = Vec::new();
+            for r in ranked.iter().take(8) {
+                let tps = r.output_tps().unwrap_or(0.0);
+                // Any timestamp-estimated slice marks the figure ≈ (the
+                // tooltip says how much) — same rule as the macOS card.
+                let est = if r.speed_est_ms > 0 { "≈" } else { "" };
+                top_rows.push(
+                    usage_row(
+                        theme,
+                        r.name.clone(),
+                        if max > 0.0 { tps / max * 100.0 } else { 0.0 },
+                        tf!(
+                            "{}{} · {} 次调用",
+                            est,
+                            fmt::speed(tps),
+                            fmt::tokens_exact(r.events)
+                        ),
+                    )
+                    .tooltip(speed_tip(r)),
+                );
+            }
+            if top_rows.is_empty() {
+                top_rows.push(
+                    TextBlock::new()
+                        .text(t!("暂无数据"))
+                        .font_size(theme.body_size)
+                        .foreground(theme.subtle)
+                        .into(),
+                );
+            }
+            let top_cell = vstack(
+                8.0,
+                vec![
+                    TextBlock::new()
+                        .text(t!("速度 Top"))
+                        .font_size(theme.label_size)
+                        .foreground(theme.subtle)
+                        .into(),
+                    vstack(2.0, top_rows),
+                ],
+            );
+            // 总体分项行：总吞吐、输入、输出速率 + 预填/解码（有报告的行）。
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(v) = rate(in_tok + out_tok, timed_ms) {
+                parts.push(tf!("总 {}", fmt::speed(v)));
+            }
+            if let Some(v) = rate(in_tok, timed_ms) {
+                parts.push(tf!("输入 {}", fmt::speed(v)));
+            }
+            if let Some(v) = rate(out_tok, timed_ms) {
+                parts.push(tf!("输出 {}", fmt::speed(v)));
+            }
+            if let Some(v) = rate(prefill_in, ttft_ms) {
+                parts.push(tf!("预填 {}", fmt::speed(v)));
+            }
+            if let Some(v) = rate(dec_out, dec_ms) {
+                parts.push(tf!("解码 {}", fmt::speed(v)));
+            }
+            if est_ms > 0 {
+                parts.push(t!("时长缺失的行按首尾时间戳估算（≈）").to_string());
+            }
+            Some(w::card(
+                theme,
+                StackPanel::new()
+                    .orientation(Orientation::Vertical)
+                    .spacing(10.0)
+                    .children((
+                        w::section_header(theme, Symbol::Go, &tf!("{rl} · 速度统计", rl)),
+                        reflow_grid(theme, vec![donut, top_cell], args.cols),
+                        TextBlock::new()
+                            .text(if parts.is_empty() {
+                                t!("暂无数据").to_string()
+                            } else {
+                                parts.join("  ·  ")
+                            })
+                            .font_size(theme.label_size)
+                            .foreground(theme.subtle)
+                            .text_wrapping(TextWrapping::Wrap),
                     )),
             ))
         }
@@ -1742,8 +1885,9 @@ pub struct OverviewArgs<'a> {
     pub cols: usize,
     /// Bound to the 1-DIP ruler panel mounted on this page.
     pub ruler: &'a ElementRef<SwapChainPanel>,
-    /// Hover state per share-donut column (pointer → Msg → invalidation).
-    pub donuts: &'a [w::DonutHandle; 6],
+    /// Hover state per share-donut column plus the speed donut (index 6)
+    /// (pointer → Msg → invalidation).
+    pub donuts: &'a [w::DonutHandle; 7],
     /// How many of the page's D2D charts may be mounted yet (trend = 1st,
     /// then one donut per stage). Held at 0 while a slide starts, then
     /// stepped up one per ~16ms from the slide's back half
@@ -1950,9 +2094,9 @@ fn plan_layout<const N: usize>(plan: Plan, k: f64) -> (Vec<GridLength>, [Option<
 }
 
 /// Detail plans over the logical columns time, tool, model, input, output,
-/// cache, cost, duration — as the window narrows the (subtle) cache column
-/// goes first, then the duration, then the tool.
-const DETAIL_PLANS: [Plan; 4] = [
+/// cache, cost, duration, speed — as the window narrows the (subtle) cache
+/// column goes first, then duration, then the tool, then speed.
+const DETAIL_PLANS: [Plan; 5] = [
     &[
         (0, Some(90.0)),
         (1, Some(96.0)),
@@ -1962,6 +2106,7 @@ const DETAIL_PLANS: [Plan; 4] = [
         (5, Some(88.0)),
         (6, Some(92.0)),
         (7, Some(64.0)),
+        (8, Some(78.0)),
     ],
     &[
         (0, Some(84.0)),
@@ -1971,6 +2116,7 @@ const DETAIL_PLANS: [Plan; 4] = [
         (4, Some(80.0)),
         (6, Some(88.0)),
         (7, Some(60.0)),
+        (8, Some(72.0)),
     ],
     &[
         (0, Some(84.0)),
@@ -1979,6 +2125,15 @@ const DETAIL_PLANS: [Plan; 4] = [
         (3, Some(80.0)),
         (4, Some(80.0)),
         (6, Some(88.0)),
+        (8, Some(72.0)),
+    ],
+    &[
+        (0, Some(84.0)),
+        (2, None),
+        (3, Some(80.0)),
+        (4, Some(80.0)),
+        (6, Some(88.0)),
+        (8, Some(72.0)),
     ],
     &[
         (0, Some(84.0)),
@@ -2001,9 +2156,10 @@ pub const DETAIL_PLAN_WIDE: Plan = &[
     (5, Some(108.0)),
     (6, Some(112.0)),
     (7, Some(80.0)),
+    (8, Some(96.0)),
 ];
 
-fn detail_layout(theme: &Theme, width: f64) -> (Vec<GridLength>, [Option<i32>; 8]) {
+fn detail_layout(theme: &Theme, width: f64) -> (Vec<GridLength>, [Option<i32>; 9]) {
     let k = font_scale(theme);
     let plan = if width >= 1350.0 * k {
         DETAIL_PLAN_WIDE
@@ -2054,6 +2210,7 @@ fn detail_header(theme: &Theme, width: f64) -> View {
         h(t!("缓存"), 5, true),
         h(t!("成本"), 6, true),
         h(t!("时长"), 7, true),
+        h(t!("速度"), 8, true),
     ]
     .into_iter()
     .flatten()
@@ -2143,6 +2300,19 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool, width: f64) -> View {
                 .keyed_children(keyed(cost_children)),
         ),
         put(7, dtext(theme, fmt::duration(r.duration_ms), true).into()),
+        put(
+            8,
+            match r.output_tps() {
+                // ≈ marks timestamp-derived timing (no measured duration).
+                Some((v, est)) => dtext(
+                    theme,
+                    format!("{}{}", fmt::speed(v), if est { " ≈" } else { "" }),
+                    true,
+                )
+                .tooltip(event_speed_tip(r)),
+                None => dtext(theme, "—".into(), true).into(),
+            },
+        ),
     ]
     .into_iter()
     .flatten()
@@ -2167,6 +2337,59 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// One model's rate breakdown for hover text: total / input / output over
+/// the timed span, plus prefill (input/TTFT) and decode (output/(timed−TTFT))
+/// when reported; a tail note when some of the span was timestamp-estimated.
+fn speed_tip(r: &globaltokentracker_core::store::ShareRow) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = r.total_tps() {
+        parts.push(tf!("总 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.input_tps() {
+        parts.push(tf!("输入 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.output_tps() {
+        parts.push(tf!("输出 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.prefill_tps() {
+        parts.push(tf!("预填 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.decode_tps() {
+        parts.push(tf!("解码 {}", fmt::speed(v)));
+    }
+    if r.speed_est_ms > 0 {
+        parts.push(t!("含首尾时间戳估算").to_string());
+    }
+    parts.join(" · ")
+}
+
+/// Per-request rate breakdown — same labels as `speed_tip`, for the detail
+/// table's speed cell tooltip.
+fn event_speed_tip(r: &EventRow) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some((v, _)) = r.total_tps() {
+        parts.push(tf!("总 {}", fmt::speed(v)));
+    }
+    if let Some((v, _)) = r.input_tps() {
+        parts.push(tf!("输入 {}", fmt::speed(v)));
+    }
+    if let Some((v, _)) = r.output_tps() {
+        parts.push(tf!("输出 {}", fmt::speed(v)));
+    }
+    if let Some(v) = r.prefill_tps() {
+        parts.push(tf!("预填 {}", fmt::speed(v)));
+    }
+    if let Some((v, _)) = r.decode_tps() {
+        parts.push(tf!("解码 {}", fmt::speed(v)));
+    }
+    if let Some((_, est)) = r.effective_ms()
+        && est
+    {
+        parts.push(t!("时长按首尾时间戳估算").to_string());
+    }
+    parts.join(" · ")
 }
 
 pub fn detail_page(
@@ -4143,29 +4366,29 @@ mod tests {
         // Not measured yet → the widest plan (the ruler arrives a frame later).
         assert_eq!(
             kept(pick_plan(&DETAIL_PLANS, 0.0, 1.0)),
-            [0, 1, 2, 3, 4, 5, 6, 7]
+            [0, 1, 2, 3, 4, 5, 6, 7, 8]
         );
         assert_eq!(
             kept(pick_plan(&DETAIL_PLANS, 900.0, 1.0)),
-            [0, 1, 2, 3, 4, 5, 6, 7]
+            [0, 1, 2, 3, 4, 5, 6, 7, 8]
         );
-        // Cache goes first, then duration, then the tool column.
+        // Cache goes first, then duration, then the tool column, then speed.
         assert_eq!(
             kept(pick_plan(&DETAIL_PLANS, 700.0, 1.0)),
-            [0, 1, 2, 3, 4, 6, 7]
+            [0, 1, 2, 3, 4, 6, 8]
         );
         assert_eq!(
             kept(pick_plan(&DETAIL_PLANS, 600.0, 1.0)),
-            [0, 1, 2, 3, 4, 6]
+            [0, 2, 3, 4, 6, 8]
         );
         assert_eq!(kept(pick_plan(&DETAIL_PLANS, 500.0, 1.0)), [0, 2, 3, 4, 6]);
         // Nothing fits → the narrowest plan, never an empty layout.
         assert_eq!(kept(pick_plan(&DETAIL_PLANS, 200.0, 1.0)), [0, 2, 3, 4, 6]);
-        // A larger body font makes the fixed columns wider: the same 640-wide
+        // A larger body font makes the fixed columns wider: the same 660-wide
         // row that keeps 7 columns at 12pt drops to 5 at 17pt (k ≈ 1.42).
         assert_eq!(
             kept(pick_plan(&DETAIL_PLANS, 660.0, 1.0)),
-            [0, 1, 2, 3, 4, 6, 7]
+            [0, 1, 2, 3, 4, 6, 8]
         );
         assert_eq!(
             kept(pick_plan(&DETAIL_PLANS, 660.0, 17.0 / 12.0)),
@@ -4255,9 +4478,9 @@ mod tests {
 
     #[test]
     fn plan_layout_maps_logical_columns_to_grid_columns() {
-        let (cols, at) = plan_layout::<8>(DETAIL_PLANS[1], 1.0);
-        assert_eq!(cols.len(), 7);
-        // Cache (logical 5) is hidden; cost/duration slide left by one.
+        let (cols, at) = plan_layout::<9>(DETAIL_PLANS[1], 1.0);
+        assert_eq!(cols.len(), 8);
+        // Cache (logical 5) is hidden; cost/duration/speed slide left by one.
         assert_eq!(
             at,
             [
@@ -4268,21 +4491,23 @@ mod tests {
                 Some(4),
                 None,
                 Some(5),
-                Some(6)
+                Some(6),
+                Some(7)
             ]
         );
         // Pixel widths scale with the font; the star column stays a star.
-        let (wide, _) = plan_layout::<8>(DETAIL_PLANS[1], 2.0);
+        let (wide, _) = plan_layout::<9>(DETAIL_PLANS[1], 2.0);
         assert!(matches!(wide[0], GridLength::Pixel(w) if (w - 168.0).abs() < 1e-9));
         assert_eq!(wide[2], GridLength::STAR);
     }
 
     #[test]
     fn high_res_wide_table_plans_expand_columns() {
-        let (wide_cols, wide_at) = plan_layout::<8>(DETAIL_PLAN_WIDE, 1.0);
-        assert_eq!(wide_cols.len(), 8);
+        let (wide_cols, wide_at) = plan_layout::<9>(DETAIL_PLAN_WIDE, 1.0);
+        assert_eq!(wide_cols.len(), 9);
         assert_eq!(wide_at[0], Some(0)); // time
         assert_eq!(wide_at[2], Some(2)); // model (STAR)
+        assert_eq!(wide_at[8], Some(8)); // speed
         // Time column is 136 DIP in the wide plan (vs 90 DIP in normal plans).
         assert_eq!(wide_cols[0], GridLength::Pixel(136.0));
         assert_eq!(wide_cols[2], GridLength::STAR);

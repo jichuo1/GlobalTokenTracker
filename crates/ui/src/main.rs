@@ -168,8 +168,9 @@ pub struct Shell {
     clock_anchor: Option<i8>,
     /// Hour dial: virtualized animated state handle.
     clock_dial: widgets::ClockDialHandle,
-    /// Share-donut hover states — one per share-grid column (4 max).
-    donuts: [widgets::DonutHandle; 6],
+    /// Share-donut hover states — one per share-grid column (6 max) plus the
+    /// speed donut (index 6).
+    donuts: [widgets::DonutHandle; 7],
     /// Vendor quota channels poll at this cadence (network calls stay rare).
     quota_at: Option<std::time::Instant>,
     /// Overview statistics window (persisted in ui.json).
@@ -2920,8 +2921,8 @@ impl Shell {
     /// stagger (all charts allowed, and always so off the Overview page —
     /// nothing to mount).
     fn arm_canvas_stage(&mut self, context: &ComponentContext<Self>, delay_ms: u64) {
-        // trend + up to 6 donuts + heatmap
-        const CHARTS: usize = 8;
+        // trend + up to 6 share donuts + speed donut + heatmap
+        const CHARTS: usize = 9;
         if self.page != Page::Overview || self.canvas_ready >= CHARTS {
             self.canvas_ready = usize::MAX;
             return;

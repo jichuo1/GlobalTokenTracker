@@ -18,6 +18,7 @@ pub const OVERVIEW_WIDGETS: &[(&str, &str, Symbol)] = &[
     ("trend", "近 30 天趋势", Symbol::FourBars),
     ("heat", "活跃热力图", Symbol::Calendar),
     ("share", "占比分布", Symbol::AllApps),
+    ("speed", "速度统计", Symbol::Go),
     ("apps", "本周 · 按工具", Symbol::List),
     ("devices", "按设备", Symbol::Remote),
     ("quotas", "订阅配额", Symbol::Clock),
