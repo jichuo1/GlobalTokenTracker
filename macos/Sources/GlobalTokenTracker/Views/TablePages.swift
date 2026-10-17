@@ -71,6 +71,7 @@ struct DetailView: View {
     }
 
     /// Cost, same rules as the WinUI `event_row`: USD, else credits ("12cr");
+    /// on unpriced rows credits lead (the stored $0 carries no information);
     /// "≈" estimated, "↺" provider-reported; unclassified tokens replace the
     /// figure; an "unpriced" badge when no source knows the model.
     private static func costCell(_ row: EventRow) -> NativeCell {
@@ -78,9 +79,14 @@ struct DetailView: View {
         if row.unclassifiedTokens > 0 {
             s = String(localized: "Unclassified · \(Fmt.tokensExact(row.unclassifiedTokens)) tokens")
         } else {
-            s = row.costUsd.map(Fmt.usd)
-                ?? row.credits.map { "\($0.formatted(.number.precision(.fractionLength(0...1))))cr" }
-                ?? "—"
+            let creditsText = row.credits.filter { $0 > 0 }.map {
+                "\($0.formatted(.number.precision(.fractionLength(0...1))))cr"
+            }
+            if row.costSource == "unpriced" {
+                s = creditsText ?? row.costUsd.map(Fmt.usd) ?? "—"
+            } else {
+                s = row.costUsd.map(Fmt.usd) ?? creditsText ?? "—"
+            }
             switch row.costSource {
             case "estimated": s += " ≈"
             case "provider_reported": s += " ↺"
