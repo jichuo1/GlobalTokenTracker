@@ -80,8 +80,9 @@ struct DetailView: View {
         if row.unclassifiedTokens > 0 {
             s = String(localized: "Unclassified · \(Fmt.tokensExact(row.unclassifiedTokens)) tokens")
         } else {
-            let creditsText = row.credits.filter { $0 > 0 }.map {
-                "\($0.formatted(.number.precision(.fractionLength(0...1))))cr"
+            let creditsText = row.credits.flatMap { value -> String? in
+                guard value > 0 else { return nil }
+                return "\(value.formatted(.number.precision(.fractionLength(0...1))))cr"
             }
             if row.costSource == "unpriced" {
                 s = creditsText ?? row.costUsd.map(Fmt.usd) ?? "—"

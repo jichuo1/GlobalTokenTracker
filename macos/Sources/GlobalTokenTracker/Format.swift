@@ -8,8 +8,9 @@ enum Fmt {
     /// Display currency converted from the ledger USD at core's cached rate
     /// (`fx`), applied on every load. The ledger itself never leaves USD.
     private static let fxLock = NSLock()
-    private static var fxCode = "USD"
-    private static var fxUsdTo = 1.0
+    // Every access is protected by fxLock, including background FFI loads.
+    nonisolated(unsafe) private static var fxCode = "USD"
+    nonisolated(unsafe) private static var fxUsdTo = 1.0
 
     static func setDisplay(code: String, usdTo: Double) {
         fxLock.lock()

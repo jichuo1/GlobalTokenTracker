@@ -1805,3 +1805,10 @@
 - **证据**：独立读取原始快照的请求合计与新账本一致，真实补算与试算一致；两来源再次扫描均零新增，quick_check=ok。排除本次 CodeBuddy 行及专属维护键后，15 张表的行数和逐行内容 SHA-256 在补算前后一致，涵盖其他来源事件、rollup、游标、来源健康、配额和共享数据。用户配置按字节保留。
 - **构建与本机文件**：cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup 与 installer/package.ps1 -SkipBuild 通过，安装器内嵌完整载荷。本机旧 UI/CLI 已单独备份，再以同路径更新，两文件分别与此次 Release 哈希相同；未改变签名、权限、共享或防火墙设置。截图、真实账本、配置、私人用量及逐表哈希清单只保留在 ignored target/diagnostics/codebuddy-repair-20261018，不纳入提交。
 - **验收边界**：使用 computer-use 正常关闭旧版后，用户按物理 Esc 停止 Computer Use；已停止后续窗口操作，没有将文件更新或账本一致当成新 UI 窗口验收。修复后 UI 页面验收未完成。提交推送后另核对精确 SHA 的 Windows/macOS Actions，远端构建通过也不替代本机界面验收。
+
+
+## S140 修复远端 macOS 验收发现的既有 Swift 编译阻塞（2026-10-18）
+
+- **触发与证据**：CodeBuddy 修复提交 26d6080 的 Actions Run 39084887153 中，Windows 全套 342 测试、Clippy、Release 和安装包通过，macOS portable crates 测试与 Clippy 通过；Swift 应用构建失败。完整日志指向既有 Format.swift 的两项共享可变状态声明、OverviewView.swift 的 reduce 结果元组标签、TablePages.swift 的 Optional.filter 调用，属于此前界面代码的编译阻塞，与 CodeBuddy 数据读取无关。
+- **最小修复**：逐项核对 fxCode/fxUsdTo 的全部读写，均已在现有 NSLock 保护下；仅补 nonisolated(unsafe) 声明并注明锁约束，保留后台 FFI 更新与界面格式化的同步方式。依据 Swift 官方 MutableGlobalVariable 诊断说明（https://docs.swift.org/latest/documentation/diagnostics/mutable-global-variable/）中外部锁保护的适用条件，没有放宽模块级并发检查。速度 Other 聚合显式保留 (out, ms) 元组类型；credits 的正值筛选改用 Optional.flatMap 与 guard，保持格式和 nil/零/负值语义。
+- **验证边界**：git diff --check 通过，静态核对变更只涉及上述类型/声明和既有 NSLock；本机 Windows 没有 Swift 工具链，SwiftUI 原生编译由后续精确提交的 macOS Actions 验证，不把静态检查当成原生编译通过。没有新增依赖、数据迁移、计费逻辑或 Windows 程序改动。

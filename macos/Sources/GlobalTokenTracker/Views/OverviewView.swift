@@ -460,7 +460,7 @@ private struct SpeedCard: View, Equatable {
     /// Top 4 + "Other" as the tail's weighted mean.
     private var slices: [(String, Double)] {
         var out = ranked.prefix(4).map { ($0.name, $0.outputTps ?? 0) }
-        let tail = ranked.dropFirst(4)
+        let tail: (out: UInt64, ms: UInt64) = ranked.dropFirst(4)
             .reduce((out: UInt64(0), ms: UInt64(0))) { ($0.0 + $1.speedOut, $0.1 + $1.speedMs) }
         if tail.ms > 0 { out.append((String(localized: "Other"), Double(tail.out) / Double(tail.ms) * 1000)) }
         return out
