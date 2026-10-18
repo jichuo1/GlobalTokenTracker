@@ -1783,3 +1783,25 @@
 - **需求与口径**：用户指出单请求 tooltip 中的五档速率（总/输入/输出/预填/解码）需要按**每个模型**聚合并直接展示，而不只藏在 hover 文本。聚合机制 S134 已就位（`ShareRow` 的 8 个分子/分母列、Σtokens/Σms 加权均值），本轮是纯展示层完善：WinUI/macOS 速度卡 Top 榜每行扩为两行——首行保留"模型名 | 进度条 | ≈输出速率 · N 次调用"，次行小字内联该模型的"总 · 输入 · 预填 · 解码"分项（输出即首行头条不重复）；tooltip 保留完整分项+估算/计时注记。未上报 ttft/解码的行自动缺省对应分段，无分项时次行不渲染。无 Rust 核心改动、无 SQL/聚合逻辑改动（机制复用）。
 - **i18n/本地化**：复用既有键 `总 {}`/`输入 {}`/`预填 {}`/`解码 {}` 与 macOS `Total %@`/`In %@`/`Prefill %@`/`Gen %@`，零新增键。
 - **验证命令与实测**：`cargo check -p globaltokentracker-ui` 通过；`cargo clippy -p globaltokentracker-ui --all-targets` 0 告警；`cargo fmt --all -- --check` 通过；`cargo test -p globaltokentracker-ui` 33 项全过。macOS Swift 改动（`SpeedCard` 次行）同 S134 边界：Windows 环境无 Swift 工具链，待 macOS/CI 复核；行为与 WinUI 完全同构。
+
+
+## S137 CodeBuddy Agent 流式补写、请求计数与历史游标修复（2026-10-18）
+
+- **根因与范围**：消息文件先落盘、Agent 结束后原位补写 `extra.statsSnapshot`；旧实现按文件名永久 seen，且目录 mtime 不变时整体跳过，导致后补用量无法入账。当前本地格式的快照汇总一个请求内的多步调用，不是整个会话的累计值；跨请求 max 水位差分会少算。
+- **实现与取舍**：保留 SourceAdapter 接口和 Estimate 粒度；v2 游标以文件大小、纳秒修改时间、SHA-256 指纹跟踪版本，并缓存归一化的请求快照，不缓存正文。手动刷新强制校验内容；撕裂 JSON 与未完成消息保留重试能力。按稳定 requestId 去重，responseId 后补不改变身份，同一请求选择最新有效快照；计数下降或可选字段减少时，来源限定的事务替换允许纠正。原文件丢失的历史行不删除。
+- **迁移保护**：替换可溯源旧行前，文件账本自动创建独立 VACUUM INTO 备份并验证 quick_check；只迁移 codebuddy_ide 的可回读原始快照。CodeBuddy 的事件替换、游标及汇总待办标志同一事务提交，写入失败整体回滚；汇总失败后即使没有新事件也重试。
+- **来源隔离**：其他来源继续沿用原有 completeness UPSERT 规则。新增按 app 重建 rollup 的内部入口，避免 CodeBuddy 历史校正覆盖其他来源的归档汇总；通用全量 rebuild 仍由同一 SQL 路径保留既有语义。没有新增生产依赖。
+- **验证**：与 S138 合计 18 项 CodeBuddy 专项用例，覆盖同名补写、目录时间戳不变、计数回落、重复请求、responseId 后补、撕裂 JSON、等长同时间戳手动复核、旧 seen 游标、孤立历史、失败回滚、汇总重试和迁移前备份。cargo clippy --workspace --all-targets --locked -- -D warnings 与 cargo fmt --all -- --check 通过；完整工作区测试 342 passed、0 failed、4 项既有 ignored。
+
+## S138 接入 CodeBuddy CLI Agent workflow trace（2026-10-18）
+
+- **范围与依据**：本机 CLI projects 目录没有 JSONL 使用数据，实际可用计量来自 ~/.codebuddy/traces/**/*.json。注册独立 codebuddy_cli 来源，递归有界发现 trace，并监听 .codebuddy；不把 IDE、WorkBuddy 或其他工具折算成 CLI 用量。
+- **计量与去重**：每个已结束 traceId 一个工作流汇总事件，重复副本同键；只读取 trace 汇总，不叠加 spans、lastCall 或心跳。输入/输出分项与 reported total 一致且缓存分项合法时归一化；缺失或矛盾的分项保留为 unclassified_tokens，不猜计费维度。单模型 trace 才归属模型，多模型保留未知；失败请求有真实用量仍计数，零用量错误和未结束 trace 不产生事件。JSON 文件允许原位更新，摘要相同不重复入账。
+- **验证与边界**：专项覆盖汇总守恒、重复 traceId、缺分项、矛盾分项、未结束/零用量错误、带用量失败、多模型及写入失败游标回滚。真实本地 trace 经隔离库和真实账本两轮扫描核对，第二轮零新增。当前接入依据是观测到的 workflow trace；没有把空 projects 中未观测到的 JSONL 格式宣称为已适配或已实测。README 中英文数据源表同步更新。
+
+## S139 备份后补算、本机更新与源外数据保护验收（2026-10-18）
+
+- **授权与操作**：按用户明确授权，先创建一致性账本备份，再隔离试算；正常退出旧版 UI 后再次备份停写账本及既有程序、配置，然后使用修复版本仅扫描 codebuddy_ide 与 codebuddy_cli，完成历史补算和幂等复扫。原数据库未用试算库覆盖，其他来源没有清空游标或重新回放。
+- **证据**：独立读取原始快照的请求合计与新账本一致，真实补算与试算一致；两来源再次扫描均零新增，quick_check=ok。排除本次 CodeBuddy 行及专属维护键后，15 张表的行数和逐行内容 SHA-256 在补算前后一致，涵盖其他来源事件、rollup、游标、来源健康、配额和共享数据。用户配置按字节保留。
+- **构建与本机文件**：cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup 与 installer/package.ps1 -SkipBuild 通过，安装器内嵌完整载荷。本机旧 UI/CLI 已单独备份，再以同路径更新，两文件分别与此次 Release 哈希相同；未改变签名、权限、共享或防火墙设置。截图、真实账本、配置、私人用量及逐表哈希清单只保留在 ignored target/diagnostics/codebuddy-repair-20261018，不纳入提交。
+- **验收边界**：使用 computer-use 正常关闭旧版后，用户按物理 Esc 停止 Computer Use；已停止后续窗口操作，没有将文件更新或账本一致当成新 UI 窗口验收。修复后 UI 页面验收未完成。提交推送后另核对精确 SHA 的 Windows/macOS Actions，远端构建通过也不替代本机界面验收。

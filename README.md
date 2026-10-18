@@ -143,7 +143,8 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 | Cline | 4.x / CLI 3.x / 桌面版：`~/.cline/data/sessions/<id>/<id>.messages.json`；旧版任务：`ui_messages.json` + 编辑器 globalStorage | ✅ 精确（含工具自报成本；自带密钥记为 $0 的按价目表计价） |
 | Command Code | 本地 JSONL | ✅ 精确（含工具自报成本） |
 | Antigravity（应用 / IDE / `agy` CLI） | 本地会话库 `~/.gemini/antigravity*/…/*.db` | ✅ 精确（含思考 token；无缓存写数据） |
-| CodeBuddy IDE | `state.vscdb` / 会话库 | 🟡 会话级 + 模型倍率 |
+| CodeBuddy IDE / Agent | `CodeBuddyExtension/Data/**/messages/*.json` | 🟡 请求级用量快照，支持流式补写与历史补算 |
+| CodeBuddy CLI | `~/.codebuddy/traces/**/*.json` | 🟡 Agent 工作流汇总；缺少分项时保留未分类 token |
 | Cursor / Qoder | 凭据 + 官方配额 API | 🟡 配额为主 |
 
 > [!NOTE]

@@ -99,10 +99,25 @@ impl Engine {
         }
     }
 
-    fn scan_adapter(&self, adapter: &dyn SourceAdapter) -> Result<ScanReport> {
+    pub(crate) fn scan_adapter(&self, adapter: &dyn SourceAdapter) -> Result<ScanReport> {
         let t0 = std::time::Instant::now();
         let items = adapter.discover()?;
-        let report = self.scan_items(adapter, &items)?;
+        if adapter.id() == crate::model::apps::CODEBUDDY_IDE && !items.is_empty() {
+            adapters::codebuddy::backup_legacy(&self.store)?;
+        }
+        let mut report = self.scan_items(adapter, &items)?;
+        if adapters::codebuddy::is_codebuddy(adapter.id()) {
+            // A request correction can also move/remove legacy day buckets.
+            // Rebuild this app only; archived totals of other apps are retained.
+            let pending = format!("{}_rollups_pending", adapter.id());
+            if self.store.get_state(&pending)?.as_deref() == Some("1") {
+                self.store
+                    .rebuild_source_rollups(&local_utc_offset(), adapter.id())?;
+                self.store.set_state(&pending, "0")?;
+            }
+            report.rollup_days.clear();
+            report.rollup_full = false;
+        }
         debug!(
             adapter = adapter.id(),
             ms = t0.elapsed().as_millis() as u64,
@@ -120,7 +135,11 @@ impl Engine {
         Ok(report)
     }
 
-    fn scan_items(&self, adapter: &dyn SourceAdapter, items: &[SourceItem]) -> Result<ScanReport> {
+    pub(crate) fn scan_items(
+        &self,
+        adapter: &dyn SourceAdapter,
+        items: &[SourceItem],
+    ) -> Result<ScanReport> {
         let mut report = ScanReport {
             files_seen: items.len() as u64,
             ..Default::default()
@@ -213,13 +232,26 @@ impl Engine {
         for item in sqlite {
             // Collaboration records and their watermark commit together. A
             // failed write must remain replayable on the next scan.
-            let tx = if adapter.id() == "gtt_coordinator" {
+            let codebuddy = adapters::codebuddy::is_codebuddy(adapter.id());
+            let tx = if adapter.id() == "gtt_coordinator" || codebuddy {
                 Some(self.store.conn().unchecked_transaction()?)
             } else {
                 None
             };
             match adapter.scan_sqlite(item, &self.store) {
                 Ok(outcome) => {
+                    if codebuddy {
+                        // Authoritative request revisions may lower counters or
+                        // remove optional fields. Keep generic completeness
+                        // rules for every other source, replacing only this key.
+                        for event in &outcome.events {
+                            anyhow::ensure!(event.app == adapter.id(), "CodeBuddy app mismatch");
+                            self.store.conn().execute(
+                                "DELETE FROM usage_events WHERE app=?1 AND dedup_key=?2",
+                                rusqlite::params![event.app, event.dedup_key],
+                            )?;
+                        }
+                    }
                     let mut local = ScanReport::default();
                     self.ingest(
                         adapter.id(),
@@ -233,6 +265,10 @@ impl Engine {
                     if tx.is_some() && !local.errors.is_empty() {
                         report.errors.extend(local.errors);
                     } else {
+                        if codebuddy && local.events_ingested > 0 {
+                            self.store
+                                .set_state(&format!("{}_rollups_pending", adapter.id()), "1")?;
+                        }
                         if let Some(tx) = tx {
                             tx.commit()?;
                         }

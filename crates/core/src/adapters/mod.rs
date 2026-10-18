@@ -17,6 +17,7 @@ pub mod antigravity;
 pub mod claude;
 pub mod cline;
 pub mod codebuddy;
+pub mod codebuddy_cli;
 pub mod codex;
 pub mod commandcode;
 pub mod coordinator;
@@ -108,8 +109,7 @@ pub trait SourceAdapter: Send + Sync {
 }
 
 /// All adapters, ordered by spec priority. P0 set first.
-/// Drop every adapter's "seen it, nothing changed" memo — the manual refresh
-/// path (see `codebuddy::forget_scan_memo`).
+/// Force adapters to recheck content fingerprints on manual refresh.
 pub fn forget_scan_memos() {
     codebuddy::forget_scan_memo();
 }
@@ -126,6 +126,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(grok::Grok),
         Box::new(workbuddy::WorkBuddy),
         Box::new(codebuddy::CodeBuddyIde::new()),
+        Box::new(codebuddy_cli::CodeBuddyCli),
         Box::new(minimax_code::MiniMaxCode),
         Box::new(kimi_code::KimiCode),
         Box::new(cline::Cline),
