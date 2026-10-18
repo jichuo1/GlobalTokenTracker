@@ -13,7 +13,7 @@ import SwiftUI
 
 extension Page {
     /// Pages whose figures follow the statistics window.
-    var usesRange: Bool { self == .overview || self == .detail }
+    var usesRange: Bool { self == .overview || self == .speed || self == .detail }
 }
 
 /// Shows or hides a mounted chrome control. The change itself is instant;

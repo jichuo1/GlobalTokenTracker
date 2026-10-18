@@ -105,6 +105,10 @@ enum Core {
         try await detached(priority: .utility) { try call { gtt_fx_status() } }
     }
 
+    nonisolated static func refreshFx() async throws -> FxStatus {
+        try await detached(priority: .utility) { try call { gtt_refresh_fx() } }
+    }
+
     nonisolated static func setDisplayCurrency(_ code: String) async throws -> FxStatus {
         try await detached(priority: .utility) {
             try call { code.withCString { gtt_set_display_currency($0) } }

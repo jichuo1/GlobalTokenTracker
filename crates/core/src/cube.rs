@@ -133,6 +133,7 @@ pub struct OverviewParts {
     pub all: Totals,
     pub by_app: Vec<AppSummary>,
     pub by_model: Vec<ShareRow>,
+    pub by_app_speed: Vec<ShareRow>,
     pub daily: Vec<TrendBucket>,
     pub apps: Vec<String>,
     pub models: Vec<String>,
@@ -577,6 +578,7 @@ impl Cube {
         let mut all = Totals::default();
         let mut by_app: BTreeMap<u16, AppSummary> = BTreeMap::new();
         let mut by_model: BTreeMap<u16, ShareRow> = BTreeMap::new();
+        let mut by_app_speed: BTreeMap<u16, ShareRow> = BTreeMap::new();
         for g in self.groups.iter().filter(keep) {
             add(&mut all, g);
             if g.day != NO_DAY && g.day >= self.today_day {
@@ -586,6 +588,7 @@ impl Cube {
                 continue;
             }
             add(&mut span, g);
+            add_speed(&mut by_app_speed, &self.apps, g.app, g);
             let a = by_app.entry(g.app).or_insert_with(|| AppSummary {
                 app: self.apps[usize::from(g.app)].clone(),
                 events: 0,
@@ -649,12 +652,16 @@ impl Cube {
                     .filter(|g| g.day != NO_DAY && in_span(g)),
             )
         };
+        let mut by_app_speed: Vec<ShareRow> = by_app_speed.into_values().collect();
+        by_app_speed
+            .sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.name.cmp(&b.name)));
         Some(OverviewParts {
             today,
             span,
             all,
             by_app,
             by_model,
+            by_app_speed,
             daily,
             apps: self.app_names(),
             models: self.model_names(apps),
@@ -811,12 +818,14 @@ impl Cube {
             all: Totals::default(),
             by_app: Vec::new(),
             by_model: Vec::new(),
+            by_app_speed: Vec::new(),
             daily: Vec::new(),
             apps: Vec::new(),
             models: Vec::new(),
         };
         let mut by_app: BTreeMap<u16, AppSummary> = BTreeMap::new();
         let mut by_model: BTreeMap<u16, ShareRow> = BTreeMap::new();
+        let mut by_app_speed: BTreeMap<u16, ShareRow> = BTreeMap::new();
         let mut buckets: BTreeMap<String, (TrendBucket, BTreeMap<u16, u64>)> = BTreeMap::new();
         for p in &self.peer_hours {
             let g = &p.group;
@@ -832,6 +841,7 @@ impl Cube {
                     add(&mut parts.span, g);
                     add_app(&mut by_app, &self.apps, g);
                     add_model(&mut by_model, &self.models, g);
+                    add_speed(&mut by_app_speed, &self.apps, g.app, g);
                 }
                 continue;
             };
@@ -844,6 +854,7 @@ impl Cube {
             add(&mut parts.span, g);
             add_app(&mut by_app, &self.apps, g);
             add_model(&mut by_model, &self.models, g);
+            add_speed(&mut by_app_speed, &self.apps, g.app, g);
             let local = ms + self.off_ms;
             let key = if hourly {
                 format!("{:02}:00", local.rem_euclid(DAY_MS) / HOUR_MS)
@@ -869,6 +880,7 @@ impl Cube {
         }
         parts.by_app = by_app.into_values().collect();
         parts.by_model = by_model.into_values().collect();
+        parts.by_app_speed = by_app_speed.into_values().collect();
         parts.daily = buckets
             .into_values()
             .map(|(mut b, m)| {
@@ -992,8 +1004,12 @@ fn add_app(by_app: &mut BTreeMap<u16, AppSummary>, names: &[String], g: &Group) 
 }
 
 fn add_model(by_model: &mut BTreeMap<u16, ShareRow>, names: &[String], g: &Group) {
-    let m = by_model.entry(g.model).or_insert_with(|| ShareRow {
-        name: names[usize::from(g.model)].clone(),
+    add_speed(by_model, names, g.model, g);
+}
+
+fn add_speed(by_model: &mut BTreeMap<u16, ShareRow>, names: &[String], key: u16, g: &Group) {
+    let m = by_model.entry(key).or_insert_with(|| ShareRow {
+        name: names[usize::from(key)].clone(),
         events: 0,
         tokens: 0,
         cost_usd: 0.0,
@@ -1402,6 +1418,70 @@ mod tests {
             store.event_count(apps, models).unwrap(),
             cube.event_count(apps, models),
             "event_count [{what}]"
+        );
+    }
+
+    #[test]
+    fn app_speed_preserves_weighted_sums_across_sql_cube_and_filters() {
+        let store = Store::open_memory().unwrap();
+        let start = day_start_ms(0) + 1000;
+        for (key, app, model, output, duration) in [
+            ("speed-a", "claude", "opus", 100, Some(1000)),
+            ("speed-b", "claude", "opus", 50, Some(100)),
+            ("speed-c", "claude", "opus", 9999, None),
+            ("speed-d", "codex", "gpt", 25, Some(1000)),
+        ] {
+            store
+                .upsert_event(&UsageEvent {
+                    dedup_key: key.into(),
+                    app: app.into(),
+                    model: Some(model.into()),
+                    ts_start: Some(start),
+                    input_tokens: 10,
+                    output_tokens: output,
+                    duration_ms: duration,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let cube = Cube::build(&store).unwrap();
+        let app_filter = vec!["claude".into()];
+        let model_filter = vec!["opus".into()];
+        for range in [
+            Range::All,
+            Range::Today,
+            Range::custom(start - 500, start + 500),
+        ] {
+            for apps in [None, Some(app_filter.as_slice())] {
+                for models in [None, Some(model_filter.as_slice())] {
+                    let expected = store
+                        .speed_by_app(range.start_ms(), range.end_ms(), apps, models)
+                        .unwrap();
+                    let actual = store
+                        .overview_from_cube(&cube, range, apps, models)
+                        .unwrap()
+                        .by_app_speed;
+                    assert_eq!(
+                        serde_json::to_value(actual).unwrap(),
+                        serde_json::to_value(expected).unwrap()
+                    );
+                }
+            }
+        }
+        let row = store
+            .speed_by_app(None, None, Some(&app_filter), None)
+            .unwrap()
+            .remove(0);
+        assert_eq!((row.events, row.speed_out, row.speed_ms), (3, 150, 1100));
+        assert!((row.output_tps().unwrap() - 150.0 / 1.1).abs() < 1e-9);
+        let none: Vec<String> = Vec::new();
+        assert_eq!(
+            store
+                .overview_from_cube_for(&cube, Range::All, None, None, Some(&none))
+                .unwrap()
+                .by_app_speed
+                .len(),
+            0
         );
     }
 

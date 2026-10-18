@@ -126,7 +126,7 @@ struct PageDeck: View {
         .clipped()
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .navigationTitle(model.chromePage.windowTitle)
-        .navigationSubtitle(model.chromePage == .overview ? (model.vm.map { "UTC\($0.tzOffset)" } ?? "") : "")
+        .navigationSubtitle((model.chromePage == .overview || model.chromePage == .speed) ? (model.vm.map { "UTC\($0.tzOffset)" } ?? "") : "")
         .onAppear {
             target = page
             settled = page
@@ -283,6 +283,7 @@ struct PageDeck: View {
     @ViewBuilder private func face(_ p: Page) -> some View {
         switch p {
         case .overview: OverviewView()
+        case .speed: SpeedView()
         case .detail: DetailView()
         case .quota: QuotaView()
         case .devices: DevicesView()

@@ -30,12 +30,13 @@ enum UpdateState: Equatable {
 }
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
-    case overview, detail, quota, devices, sources, prices, settings
+    case overview, speed, detail, quota, devices, sources, prices, settings
     var id: String { rawValue }
 
     var title: LocalizedStringKey {
         switch self {
         case .overview: "Overview"
+        case .speed: "Speed"
         case .detail: "Details"
         case .quota: "Quota"
         case .devices: "Devices"
@@ -53,6 +54,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
     var symbol: String {
         switch self {
         case .overview: "chart.bar.xaxis"
+        case .speed: "speedometer"
         case .detail: "list.bullet.rectangle"
         case .quota: "gauge.with.dots.needle.67percent"
         case .devices: "macbook.and.iphone"

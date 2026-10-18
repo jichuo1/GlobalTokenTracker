@@ -110,6 +110,7 @@ fn lazy_slot(page: Page) -> Option<usize> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Overview,
+    Speed,
     Detail,
     Quota,
     Devices,
@@ -189,6 +190,11 @@ pub struct Shell {
     prices_refreshing: bool,
     /// Why the last price refresh produced nothing (shown on the Prices page).
     price_refresh_error: Option<String>,
+    fx_refreshing: bool,
+    fx_refresh_error: Option<String>,
+    speed_by_app: bool,
+    speed_metric: SpeedMetric,
+    speed_page: usize,
     /// Visible aggregates must rebuild even if the next scan lands nothing —
     /// set by filter/range/page changes, quota polls and repricing.
     views_stale: bool,
@@ -372,6 +378,11 @@ pub enum Msg {
     SetLang(&'static str),
     /// Settings: display currency for money figures (ISO code; "" = USD).
     SetDisplayCurrency(String),
+    RefreshFx,
+    SpeedGroup(bool),
+    SpeedMetric(SpeedMetric),
+    SpeedPage(usize),
+    FxDone(Result<globaltokentracker_core::fx::FxStatus, String>),
     /// Settings: Run-key launch-at-login toggle; arg is the switch's new state.
     SetAutostart(bool),
     SetExternalInterface(bool),
@@ -808,6 +819,7 @@ impl Component for Shell {
         let model_filter = config.models.clone();
         let device_filter = config.devices.clone();
         let page = match std::env::var("GTT_PAGE").as_deref() {
+            Ok("speed") => Page::Speed,
             Ok("detail") => Page::Detail,
             Ok("quota") => Page::Quota,
             Ok("devices") => Page::Devices,
@@ -931,6 +943,11 @@ impl Component for Shell {
             quota_collapsed: std::collections::BTreeSet::new(),
             prices_refreshing: false,
             price_refresh_error: None,
+            fx_refreshing: false,
+            fx_refresh_error: None,
+            speed_by_app: false,
+            speed_metric: SpeedMetric::Output,
+            speed_page: 0,
             views_stale: true,
             cube_rebuild: false,
             filter_gen: 0,
@@ -1379,6 +1396,44 @@ impl Component for Shell {
                 self.config.lang = v.to_string();
                 self.config.save();
                 i18n::set_lang(i18n::Lang::from_config(v));
+            }
+            Msg::SpeedGroup(by_app) => {
+                self.speed_by_app = by_app;
+                self.speed_page = 0;
+            }
+            Msg::SpeedMetric(metric) => {
+                self.speed_metric = metric;
+                self.speed_page = 0;
+            }
+            Msg::SpeedPage(page) => self.speed_page = page,
+            Msg::RefreshFx => {
+                if !self.fx_refreshing {
+                    self.fx_refreshing = true;
+                    self.fx_refresh_error = None;
+                    context.spawn_background(|_| {
+                        power::worker("gtt-fx-manual");
+                        Msg::FxDone(
+                            Store::open(&db_path())
+                                .and_then(|s| globaltokentracker_core::fx::refresh(&s))
+                                .map_err(|e| e.to_string()),
+                        )
+                    });
+                }
+            }
+            Msg::FxDone(result) => {
+                self.fx_refreshing = false;
+                match result {
+                    Ok(st) => {
+                        globaltokentracker_core::viewmodel::fmt::set_display(
+                            &st.display,
+                            st.usd_to,
+                        );
+                        if let Some(s) = &mut self.snap {
+                            s.fx = st;
+                        }
+                    }
+                    Err(e) => self.fx_refresh_error = Some(short_error(&e)),
+                }
             }
             Msg::SetDisplayCurrency(code) => match Store::open(&db_path()) {
                 Ok(store) => {
@@ -1882,6 +1937,7 @@ impl Component for Shell {
                 self.open_menu = None;
                 let prev = self.page;
                 self.page = match tag.as_deref() {
+                    Some("速度" | "Speed" | "speed") => Page::Speed,
                     Some("明细" | "Details" | "detail") => Page::Detail,
                     Some("配额" | "Quota" | "quota") => Page::Quota,
                     Some("设备" | "Devices" | "devices") => Page::Devices,
@@ -2187,6 +2243,7 @@ impl Component for Shell {
                 SelectorBarSlot::Items,
                 [
                     KeyedView::new("overview", item(t!("总览"), Page::Overview)),
+                    KeyedView::new("speed", item(t!("速度"), Page::Speed)),
                     KeyedView::new("detail", item(t!("明细"), Page::Detail)),
                     KeyedView::new("quota", item(t!("配额"), Page::Quota)),
                     KeyedView::new("devices", item(t!("设备"), Page::Devices)),
@@ -2231,7 +2288,7 @@ impl Component for Shell {
             open: self.open_menu,
         };
         let chrome: View = match (self.page, snap) {
-            (Page::Overview | Page::Detail, Some(s)) => {
+            (Page::Overview | Page::Speed | Page::Detail, Some(s)) => {
                 filter_chrome(s, theme, &chrome_state, context)
             }
             _ => Border::new().into(),
@@ -2257,7 +2314,7 @@ impl Component for Shell {
         // closed → an empty background-less Border (XAML skips hit-testing
         // null-background elements, so it never swallows clicks).
         let overlay: View = match (self.page, snap, self.open_menu) {
-            (Page::Overview | Page::Detail, Some(s), Some(kind)) => {
+            (Page::Overview | Page::Speed | Page::Detail, Some(s), Some(kind)) => {
                 dropdown_overlay(s, theme, &chrome_state, kind, context)
             }
             _ => Border::new().grid_row(2).into(),
@@ -2338,7 +2395,9 @@ impl Component for Shell {
                     .content(content),
             ),
         ];
-        if self.open_menu.is_some() && matches!(self.page, Page::Overview | Page::Detail) {
+        if self.open_menu.is_some()
+            && matches!(self.page, Page::Overview | Page::Speed | Page::Detail)
+        {
             root.push(KeyedView::new(
                 "backdrop",
                 Border::new()
@@ -2447,6 +2506,23 @@ impl Shell {
                     canvas_ready,
                 },
             ),
+            Page::Speed => speed_page(
+                snap,
+                theme,
+                context,
+                &SpeedArgs {
+                    by_app: self.speed_by_app,
+                    metric: self.speed_metric,
+                    page: self.speed_page,
+                    cols: self.overview_cols,
+                    cal: CalView {
+                        month: self.cal_month,
+                        anchor: self.cal_anchor,
+                        clock_anchor: self.clock_anchor,
+                    },
+                    clock_dial: &self.clock_dial,
+                },
+            ),
             Page::Detail => detail_page(
                 snap,
                 theme,
@@ -2498,6 +2574,8 @@ impl Shell {
                     external_interface_error: self.external_interface_error.as_deref(),
                     share: &self.share,
                     fx: self.snap.as_ref().map(|s| s.fx.clone()).unwrap_or_default(),
+                    fx_refreshing: self.fx_refreshing,
+                    fx_error: self.fx_refresh_error.as_deref(),
                 },
                 theme,
                 context,
@@ -2509,7 +2587,7 @@ impl Shell {
     /// the list pages pack tighter (10 DIP, their historical rhythm).
     fn page_gap(&self, page: Page) -> f64 {
         match page {
-            Page::Overview | Page::Settings | Page::Devices => self.theme.section_gap,
+            Page::Overview | Page::Speed | Page::Settings | Page::Devices => self.theme.section_gap,
             _ => 10.0,
         }
     }

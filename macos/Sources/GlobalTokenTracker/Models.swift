@@ -173,6 +173,7 @@ struct OverviewVM: Decodable, Sendable, Equatable {
     var range: RangeSpec
     var byApp: [AppSummary]
     var byModel: [ShareRow]
+    var byAppSpeed: [ShareRow] = []
     var daily: [TrendBucket]
     var apps: [String]
     var models: [String]
@@ -190,7 +191,7 @@ struct OverviewVM: Decodable, Sendable, Equatable {
     var deviceWarnings: [OverlapWarning] = []
 
     private enum CodingKeys: String, CodingKey {
-        case today, span, all, range, byApp, byModel, daily, apps, models, quotas, quotaGroups
+        case today, span, all, range, byApp, byModel, byAppSpeed, daily, apps, models, quotas, quotaGroups
         case unpriced, heat, tzOffset, devices, deviceFilter, quotasAllDevices, deviceWarnings
     }
 
@@ -202,6 +203,7 @@ struct OverviewVM: Decodable, Sendable, Equatable {
         range = try c.decode(RangeSpec.self, forKey: .range)
         byApp = try c.decode([AppSummary].self, forKey: .byApp)
         byModel = try c.decode([ShareRow].self, forKey: .byModel)
+        byAppSpeed = try c.decodeIfPresent([ShareRow].self, forKey: .byAppSpeed) ?? []
         daily = try c.decode([TrendBucket].self, forKey: .daily)
         apps = try c.decode([String].self, forKey: .apps)
         models = try c.decode([String].self, forKey: .models)

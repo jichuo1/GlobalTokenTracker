@@ -38,7 +38,7 @@ pub struct AppSummary {
 /// `Σtokens / Σms` — a weighted mean, never an average of per-event ratios —
 /// and `speed_est_ms` marks how much of the timed span came from timestamps
 /// instead of a measured `duration_ms`.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ShareRow {
     pub name: String,
     pub events: u64,
@@ -482,10 +482,38 @@ impl super::Store {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Result<Vec<ShareRow>> {
+        self.speed_groups(MODEL_EXPR, from_ms, to_ms, apps, models)
+    }
+
+    pub fn speed_by_app(
+        &self,
+        from_ms: Option<i64>,
+        to_ms: Option<i64>,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<Vec<ShareRow>> {
+        let mut rows = self.speed_groups("app", from_ms, to_ms, apps, models)?;
+        rows.sort_by(|a, b| {
+            b.cost_usd
+                .partial_cmp(&a.cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(rows)
+    }
+
+    fn speed_groups(
+        &self,
+        dimension: &str,
+        from_ms: Option<i64>,
+        to_ms: Option<i64>,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<Vec<ShareRow>> {
         let (w, p) = scope_where(from_ms, to_ms, apps, models);
         let speed = speed_exprs();
         let mut st = self.conn().prepare(&format!(
-            "SELECT {MODEL_EXPR}, COUNT(*),
+            "SELECT {dimension}, COUNT(*),
                     COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens),0),
                     COALESCE(SUM(cost_usd),0), {speed}
              FROM usage_events {w} GROUP BY 1 ORDER BY cost_usd DESC"

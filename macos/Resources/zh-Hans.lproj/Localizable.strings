@@ -423,3 +423,29 @@
 "By Device · Tokens" = "按设备 · Tokens";
 "Starting sharing…" = "正在开启共享…";
 "Port 4319 is in use — another copy of GlobalTokenTracker may be sharing on this Mac. Retrying…" = "端口 4319 被占用——本机可能有另一个 GlobalTokenTracker 正在共享。正在重试…";
+
+/* Speed rankings and explicit exchange-rate sync. */
+"Speed rankings" = "速度排行榜";
+"Ranking" = "排行榜";
+"Group" = "分组";
+"Rank by" = "排序指标";
+"Total throughput" = "总吞吐";
+"Prefill" = "预填";
+"Decode" = "解码";
+"Weighted output" = "加权输出速度";
+"Weighted by valid timing" = "按有效计时加权";
+"Current leader" = "当前榜首";
+"Estimated timing" = "估算计时占比";
+"%@ ranked groups" = "%@ 项参与排名";
+"Rates are weighted by valid timing. Requests show the full filtered request count." = "按有效计时加权；缺少计时的记录不参与速度排名。请求数为筛选范围内的总请求数。";
+"Top 25. ≈ includes timestamp estimates; unreported metrics show —." = "展示前 25 项；≈ 表示包含时间戳估算，未报告的分项显示 —。";
+"No timing data for this ranking" = "当前没有可用于此项排名的计时数据";
+"Try another metric or widen the current filters." = "请切换指标或扩大当前筛选范围。";
+"%@ requests · Timed %@ · Estimated %@" = "%@ 次请求 · 有效计时 %@ · 估算计时 %@";
+"View speed rankings" = "查看完整速度排行榜";
+"Sync now" = "立即同步";
+"Rate sync failed; cached rates remain available. %@" = "汇率同步失败，继续使用缓存。%@";
+"25 per page. ≈ includes timestamp estimates; unreported metrics show —." = "每页 25 项；≈ 表示包含时间戳估算，未报告的分项显示 —。";
+"%lld–%lld of %lld" = "第 %lld–%lld 项 / 共 %lld 项";
+"Previous" = "上一页";
+"Next" = "下一页";

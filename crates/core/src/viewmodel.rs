@@ -373,6 +373,7 @@ pub struct OverviewVm {
     pub by_app: Vec<AppSummary>,
     /// Per-model totals in the same range — the pie's "按模型" dimension.
     pub by_model: Vec<ShareRow>,
+    pub by_app_speed: Vec<ShareRow>,
     /// Trend buckets for the selected range: per local day, or per local hour
     /// for `Today` and single-day custom windows (`Range::hourly`). Each
     /// bucket carries its tooltip payload (top-3 models).
@@ -632,6 +633,7 @@ impl Store {
                 range,
                 by_app: p.by_app,
                 by_model: p.by_model,
+                by_app_speed: p.by_app_speed,
                 daily: p.daily,
                 apps: p.apps,
                 models: p.models,
@@ -775,6 +777,7 @@ impl Store {
             range,
             by_app: self.by_app(start, end, apps, models)?,
             by_model: self.by_model(start, end, apps, models)?,
+            by_app_speed: self.speed_by_app(start, end, apps, models)?,
             daily,
             apps: self.app_names()?,
             models: self.model_names(apps)?,
@@ -850,26 +853,30 @@ fn merge_parts(vm: &mut OverviewVm, p: crate::cube::OverviewParts) {
     }
     vm.by_app
         .sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.app.cmp(&b.app)));
-    for m in p.by_model {
-        match vm.by_model.iter_mut().find(|x| x.name == m.name) {
-            Some(x) => {
-                x.events += m.events;
-                x.tokens += m.tokens;
-                x.cost_usd += m.cost_usd;
-                x.speed_in += m.speed_in;
-                x.speed_out += m.speed_out;
-                x.speed_ms += m.speed_ms;
-                x.speed_est_ms += m.speed_est_ms;
-                x.prefill_in += m.prefill_in;
-                x.ttft_ms += m.ttft_ms;
-                x.decode_out += m.decode_out;
-                x.decode_ms += m.decode_ms;
+    for (rows, incoming) in [
+        (&mut vm.by_model, p.by_model),
+        (&mut vm.by_app_speed, p.by_app_speed),
+    ] {
+        for m in incoming {
+            match rows.iter_mut().find(|x| x.name == m.name) {
+                Some(x) => {
+                    x.events += m.events;
+                    x.tokens += m.tokens;
+                    x.cost_usd += m.cost_usd;
+                    x.speed_in += m.speed_in;
+                    x.speed_out += m.speed_out;
+                    x.speed_ms += m.speed_ms;
+                    x.speed_est_ms += m.speed_est_ms;
+                    x.prefill_in += m.prefill_in;
+                    x.ttft_ms += m.ttft_ms;
+                    x.decode_out += m.decode_out;
+                    x.decode_ms += m.decode_ms;
+                }
+                None => rows.push(m),
             }
-            None => vm.by_model.push(m),
         }
+        rows.sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.name.cmp(&b.name)));
     }
-    vm.by_model
-        .sort_by(|a, b| cost_desc(a.cost_usd, b.cost_usd).then_with(|| a.name.cmp(&b.name)));
     for b in p.daily {
         match vm.daily.iter_mut().find(|x| x.date == b.date) {
             Some(x) => {

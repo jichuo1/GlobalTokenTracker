@@ -32,6 +32,8 @@ struct GeneralSettings: View {
     @ViewState private var languageChanged = false
     @State private var displayCurrency = "USD"
     @State private var fx: FxStatus?
+    @State private var fxRefreshing = false
+    @State private var fxError: String?
 
     private struct CurrencyOption: Identifiable {
         let code: String
@@ -123,6 +125,32 @@ struct GeneralSettings: View {
                 Text(fxNote)
                     .scaledFont(.caption)
                     .foregroundStyle(.secondary)
+                if let stamp = fx?.fetchedAtMs {
+                    Text("Synced \(Fmt.timestamp(stamp))")
+                        .scaledFont(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button(fxRefreshing ? String(localized: "Syncing…") : String(localized: "Sync now")) {
+                        guard !fxRefreshing else { return }
+                        fxRefreshing = true
+                        fxError = nil
+                        Task {
+                            defer { fxRefreshing = false }
+                            do {
+                                let status = try await Core.refreshFx()
+                                fx = status
+                                Fmt.setDisplay(code: status.display, usdTo: status.usdTo)
+                                model.requestLoad(forceViews: true)
+                            } catch { fxError = error.localizedDescription }
+                        }
+                    }
+                    .disabled(fxRefreshing)
+                    if fxRefreshing { ProgressView().controlSize(.small) }
+                }
+                if let fxError {
+                    Text("Rate sync failed; cached rates remain available. \(fxError)")
+                        .scaledFont(.caption).foregroundStyle(.red)
+                }
             } header: {
                 Text("Currency")
             } footer: {

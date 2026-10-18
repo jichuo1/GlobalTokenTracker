@@ -744,6 +744,16 @@ pub extern "C" fn gtt_fx_status() -> *mut c_char {
     })
 }
 
+/// Force a network rate refresh. Blocking: dispatch off the UI thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn gtt_refresh_fx() -> *mut c_char {
+    guarded(|| {
+        let store = open()?;
+        let status = globaltokentracker_core::fx::refresh(&store).map_err(|e| e.to_string())?;
+        serde_json::to_value(status).map_err(|e| e.to_string())
+    })
+}
+
 /// Set the display currency for money figures (ISO code, e.g. "CNY") and
 /// return the refreshed status. NULL or empty restores the ledger default.
 ///

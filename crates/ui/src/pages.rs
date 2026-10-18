@@ -18,6 +18,9 @@ use globaltokentracker_core::viewmodel::Range;
 use globaltokentracker_core::viewmodel::{app_display, fmt};
 use windows_reactor::*;
 
+mod speed;
+pub use speed::{SpeedArgs, SpeedMetric, speed_page};
+
 pub fn keyed(views: Vec<View>) -> impl Iterator<Item = KeyedView> {
     views
         .into_iter()
@@ -1114,147 +1117,42 @@ fn overview_widget(
                     .unwrap_or(0.0)
                     .total_cmp(&a.output_tps().unwrap_or(0.0))
             });
-            // Top-4 直接分片；其余按 Σout/Σms 折成 "其他"（速率不可加总）。
-            let (rest_out, rest_ms) = ranked
-                .iter()
-                .skip(4)
-                .fold((0u64, 0u64), |(o, m), r| (o + r.speed_out, m + r.speed_ms));
-            let mut slices: Vec<(String, f64)> = ranked
-                .iter()
-                .take(4)
-                .map(|r| (r.name.clone(), r.output_tps().unwrap_or(0.0)))
-                .collect();
-            if rest_ms > 0 {
-                slices.push((
-                    t!("其他").to_string(),
-                    rest_out as f64 / rest_ms as f64 * 1000.0,
-                ));
-            }
-            let (in_tok, out_tok, timed_ms, est_ms, prefill_in, ttft_ms, dec_out, dec_ms) =
-                vm.by_model.iter().fold(
-                    (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
-                    |acc, r| {
-                        (
-                            acc.0 + r.speed_in,
-                            acc.1 + r.speed_out,
-                            acc.2 + r.speed_ms,
-                            acc.3 + r.speed_est_ms,
-                            acc.4 + r.prefill_in,
-                            acc.5 + r.ttft_ms,
-                            acc.6 + r.decode_out,
-                            acc.7 + r.decode_ms,
-                        )
-                    },
-                );
-            let rate = |num: u64, ms: u64| (ms > 0).then(|| num as f64 / ms as f64 * 1000.0);
-            let center = rate(out_tok, timed_ms).map_or("—".into(), fmt::speed);
-            let donut = w::donut_cell(
+            let max = ranked
+                .first()
+                .and_then(|r| r.output_tps())
+                .unwrap_or(1.0)
+                .max(1.0);
+            let mut rows = vec![w::section_header(
                 theme,
-                tf!("{} · {}", tr("按模型"), tr("速度")),
-                w::DonutSpec {
-                    slices: &slices,
-                    center,
-                    fmt_v: fmt::speed,
-                    key: 6,
-                    handle: &args.donuts[6],
-                    // After the share donuts, before the heatmap.
-                    defer: args.canvas_ready < 8,
-                    wide: args.cols >= 5,
-                },
-                ctx,
-            );
-            let max = ranked.first().and_then(|r| r.output_tps()).unwrap_or(0.0);
-            let mut top_rows: Vec<View> = Vec::new();
-            for r in ranked.iter().take(8) {
-                let tps = r.output_tps().unwrap_or(0.0);
-                // Any timestamp-estimated slice marks the figure ≈ (the
-                // tooltip says how much) — same rule as the macOS card.
-                let est = if r.speed_est_ms > 0 { "≈" } else { "" };
-                let mut lines = vec![usage_row(
+                Symbol::Go,
+                &tf!("{rl} · 速度统计", rl),
+            )];
+            for r in ranked.iter().take(3) {
+                rows.push(usage_row(
                     theme,
                     r.name.clone(),
-                    if max > 0.0 { tps / max * 100.0 } else { 0.0 },
-                    tf!(
-                        "{}{} · {} 次调用",
-                        est,
-                        fmt::speed(tps),
-                        fmt::tokens_exact(r.events)
+                    r.output_tps().unwrap_or(0.0) / max * 100.0,
+                    format!(
+                        "{}{}",
+                        if r.speed_est_ms > 0 { "≈" } else { "" },
+                        fmt::speed(r.output_tps().unwrap_or(0.0))
                     ),
-                )];
-                // Per-model fine rates inline: total/input/prefill/decode
-                // under the output headline; the tooltip adds the estimate
-                // and timing notes.
-                if let Some(sub) = speed_subline(r) {
-                    lines.push(
-                        TextBlock::new()
-                            .text(sub)
-                            .font_size(theme.label_size)
-                            .foreground(theme.subtle)
-                            .text_wrapping(TextWrapping::Wrap)
-                            .into(),
-                    );
-                }
-                top_rows.push(vstack(2.0, lines).tooltip(speed_tip(r)));
+                ));
             }
-            if top_rows.is_empty() {
-                top_rows.push(
+            if ranked.is_empty() {
+                rows.push(
                     TextBlock::new()
                         .text(t!("暂无数据"))
-                        .font_size(theme.body_size)
                         .foreground(theme.subtle)
                         .into(),
                 );
             }
-            let top_cell = vstack(
-                8.0,
-                vec![
-                    TextBlock::new()
-                        .text(t!("速度 Top"))
-                        .font_size(theme.label_size)
-                        .foreground(theme.subtle)
-                        .into(),
-                    vstack(2.0, top_rows),
-                ],
+            rows.push(
+                Button::new()
+                    .on_click(ctx.callback(|_| Msg::Nav(Some("speed".into()))))
+                    .content(t!("查看完整速度排行榜")),
             );
-            // 总体分项行：总吞吐、输入、输出速率 + 预填/解码（有报告的行）。
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(v) = rate(in_tok + out_tok, timed_ms) {
-                parts.push(tf!("总 {}", fmt::speed(v)));
-            }
-            if let Some(v) = rate(in_tok, timed_ms) {
-                parts.push(tf!("输入 {}", fmt::speed(v)));
-            }
-            if let Some(v) = rate(out_tok, timed_ms) {
-                parts.push(tf!("输出 {}", fmt::speed(v)));
-            }
-            if let Some(v) = rate(prefill_in, ttft_ms) {
-                parts.push(tf!("预填 {}", fmt::speed(v)));
-            }
-            if let Some(v) = rate(dec_out, dec_ms) {
-                parts.push(tf!("解码 {}", fmt::speed(v)));
-            }
-            if est_ms > 0 {
-                parts.push(t!("时长缺失的行按首尾时间戳估算（≈）").to_string());
-            }
-            Some(w::card(
-                theme,
-                StackPanel::new()
-                    .orientation(Orientation::Vertical)
-                    .spacing(10.0)
-                    .children((
-                        w::section_header(theme, Symbol::Go, &tf!("{rl} · 速度统计", rl)),
-                        reflow_grid(theme, vec![donut, top_cell], args.cols),
-                        TextBlock::new()
-                            .text(if parts.is_empty() {
-                                t!("暂无数据").to_string()
-                            } else {
-                                parts.join("  ·  ")
-                            })
-                            .font_size(theme.label_size)
-                            .foreground(theme.subtle)
-                            .text_wrapping(TextWrapping::Wrap),
-                    )),
-            ))
+            Some(w::card(theme, vstack(10.0, rows)))
         }
         "apps" => {
             let tokens = |a: &globaltokentracker_core::store::AppSummary| {
@@ -2350,30 +2248,6 @@ fn truncate(s: &str, n: usize) -> String {
         format!("{}…", s.chars().take(n - 1).collect::<String>())
     } else {
         s.to_string()
-    }
-}
-
-/// One model's fine rates for the Top list's second line — total/input plus
-/// prefill and decode when reported (output is the row's headline figure).
-/// `None` when nothing beyond the headline is measurable.
-fn speed_subline(r: &globaltokentracker_core::store::ShareRow) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(v) = r.total_tps() {
-        parts.push(tf!("总 {}", fmt::speed(v)));
-    }
-    if let Some(v) = r.input_tps() {
-        parts.push(tf!("输入 {}", fmt::speed(v)));
-    }
-    if let Some(v) = r.prefill_tps() {
-        parts.push(tf!("预填 {}", fmt::speed(v)));
-    }
-    if let Some(v) = r.decode_tps() {
-        parts.push(tf!("解码 {}", fmt::speed(v)));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" · "))
     }
 }
 
@@ -4203,6 +4077,8 @@ pub struct SettingsArgs<'a> {
     pub external_interface_error: Option<&'a str>,
     pub share: &'a crate::devices::ShareState,
     pub fx: globaltokentracker_core::fx::FxStatus,
+    pub fx_refreshing: bool,
+    pub fx_error: Option<&'a str>,
 }
 
 pub fn settings_page(
@@ -4321,16 +4197,48 @@ pub fn settings_page(
         ),
         None => tr("未获取到汇率，按 USD 显示").to_string(),
     };
-    let fx_row = setting_row(
-        theme,
-        "汇率来源",
-        None,
+    let sync_stamp = fx
+        .fetched_at_ms
+        .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+        .map(|t| {
+            tf!(
+                "同步于 {}",
+                t.to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%Y-%m-%d %H:%M")
+            )
+        })
+        .unwrap_or_else(|| t!("尚未同步").to_string());
+    let mut fx_content: Vec<View> = vec![
         TextBlock::new()
             .text(fx_note)
             .font_size(theme.body_size)
-            .vertical_alignment(VerticalAlignment::Center)
+            .text_wrapping(TextWrapping::Wrap)
             .into(),
-    );
+        TextBlock::new()
+            .text(sync_stamp)
+            .font_size(theme.label_size)
+            .foreground(theme.subtle)
+            .into(),
+        Button::new()
+            .is_enabled(!args.fx_refreshing)
+            .on_click(ctx.callback(|_| Msg::RefreshFx))
+            .content(if args.fx_refreshing {
+                t!("正在同步…")
+            } else {
+                t!("立即同步")
+            }),
+    ];
+    if let Some(error) = args.fx_error {
+        fx_content.push(
+            TextBlock::new()
+                .text(format!("{} · {error}", t!("同步失败，继续使用缓存")))
+                .foreground(theme.danger)
+                .font_size(theme.label_size)
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        );
+    }
+    let fx_row = setting_row(theme, "汇率来源", None, vstack(6.0, fx_content));
     let autostart_row = setting_row(
         theme,
         "开机自启动",

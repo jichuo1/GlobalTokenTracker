@@ -46,6 +46,7 @@ char *gtt_external_interface(int set);
  * fetched_at_ms?, stale}. gtt_set_display_currency takes an ISO code
  * ("CNY"); NULL or "" restores the ledger default (USD). */
 char *gtt_fx_status(void);
+char *gtt_refresh_fx(void);
 char *gtt_set_display_currency(const char *code);
 /* Download + SHA-256-verify the update for "stable" | "alpha" → {version, path} */
 char *gtt_download_update(const char *channel);

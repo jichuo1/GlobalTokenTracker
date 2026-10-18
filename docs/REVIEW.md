@@ -1812,3 +1812,19 @@
 - **触发与证据**：CodeBuddy 修复提交 26d6080 的 Actions Run 39084887153 中，Windows 全套 342 测试、Clippy、Release 和安装包通过，macOS portable crates 测试与 Clippy 通过；Swift 应用构建失败。完整日志指向既有 Format.swift 的两项共享可变状态声明、OverviewView.swift 的 reduce 结果元组标签、TablePages.swift 的 Optional.filter 调用，属于此前界面代码的编译阻塞，与 CodeBuddy 数据读取无关。
 - **最小修复**：逐项核对 fxCode/fxUsdTo 的全部读写，均已在现有 NSLock 保护下；仅补 nonisolated(unsafe) 声明并注明锁约束，保留后台 FFI 更新与界面格式化的同步方式。依据 Swift 官方 MutableGlobalVariable 诊断说明（https://docs.swift.org/latest/documentation/diagnostics/mutable-global-variable/）中外部锁保护的适用条件，没有放宽模块级并发检查。速度 Other 聚合显式保留 (out, ms) 元组类型；credits 的正值筛选改用 Optional.flatMap 与 guard，保持格式和 nil/零/负值语义。
 - **验证边界**：git diff --check 通过，静态核对变更只涉及上述类型/声明和既有 NSLock；本机 Windows 没有 Swift 工具链，SwiftUI 原生编译由后续精确提交的 macOS Actions 验证，不把静态检查当成原生编译通过。没有新增依赖、数据迁移、计费逻辑或 Windows 程序改动。
+
+
+## S141 手动联网同步显示汇率（2026-10-18）
+
+- **需求与实现**：Windows/macOS 设置的汇率区域新增立即同步按钮，后台执行强制刷新、不受缓存 TTL 限制；进行中禁用重复点击，展示同步时间和失败状态。自动与手动请求共享进程内 in-flight 保护，RAII 保证失败/异常后释放；获取或验证失败保留原缓存。新增 gtt_refresh_fx C ABI 和对应 Swift utility 线程入口，Windows 通过现有消息/后台任务模式执行，不阻塞 UI。
+- **数据边界**：只更新汇率缓存，仍以 USD 保存账本；新响应必须为 USD 基准、非空且所有倍率有限/为正。没有新增生产依赖，没有重新计价或回放任何用量来源。真实返回数据确认首选源缺少界面支持的 TWD，现按所选币种覆盖情况选择后备源；新缓存不覆盖所选币种时拒绝写入，并保留旧缓存。
+- **验证**：新增测试覆盖新鲜缓存也会刷新、正常替换缓存且保留原用量、联网失败/无效倍率保留旧缓存。隔离账本上的真实网络探针成功读取 Frankfurter，取得有效倍率和同步时间，原始用量不变。探针源码、日志和隔离账本保留在 ignored target/diagnostics/ui-speed-fx-20261018。用户此前按 Esc 停止 Computer Use，未再自动操作窗口，因此按钮实机点击验收仍未完成。
+
+## S142 独立速度排行榜与总览可读性调整（2026-10-18）
+
+- **布局与交互**：Windows 主导航/macOS 侧栏新增速度页，继承日期、自定义日/小时、工具、模型、设备筛选；支持按模型/工具分组和输出、总吞吐、输入、预填、解码五种排序。顶部展示加权输出速度、所选指标榜首和估算计时比例；排名行以清晰的名次、主数值、相对条形、其余四项分项及请求/计时说明排布，未知分项显示破折号。每页最多 25 行并提供完整榜单分页，切换指标/分组回到首页；稳定排序使相同速率按名称排列。
+- **总览**：速度卡改为前三名简洁比较与完整榜单入口。费用/Token 占比仍沿用原有 Donut，其他工具、设备、热力图、配额及未计价组件与本轮修改前逐段核对保持一致；移除速度的占比饼图表达，详细速率移至专页。
+- **统计口径**：保留原有 Σtokens/Σms 加权规则，未知计时不伪造为零速度。新增 by_app_speed，由既有 Cube group 的相同时间/来源/设备范围折叠；SQL 降级路径及 peer 合并也使用同一组分子/分母，不新增账本列或改变 peer 协议。Swift 新字段可缺省解码。界面明确请求数是筛选范围总请求数，时间戳估算单独以近似号和比例标注；不把它称作有效计时样本数。
+- **验证**：新增 SQL/Cube 一致性测试，覆盖全量、今日、小时窗口、工具/模型筛选和空设备筛选，并验证混入无计时请求后仍按有效时长加权。新增 UI 排序测试验证加权排名和缺分项排除。Windows 全工作区测试 347 passed、0 failed、4 项既有 ignored；cargo fmt --all -- --check 和 cargo clippy --workspace --all-targets --locked -- -D warnings 通过。中英文文案及 C ABI 声明/实现一致性检查通过。SwiftUI 原生编译继续交由精确提交的 macOS Actions 验证，未冒充本机截图/交互验收。
+
+- **本机文件验证**：Release UI/CLI 与完整安装器唯一 ZIP 载荷逐项哈希相同；备份当前程序后同路径更新，两文件与 Release 相同。配置按字节保留，未继续启动或操作 UI。程序备份及哈希清单仅保留在 ignored 诊断目录。

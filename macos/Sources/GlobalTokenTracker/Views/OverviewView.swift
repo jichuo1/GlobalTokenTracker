@@ -439,114 +439,38 @@ private struct ShareGrid: View, Equatable {
     }
 }
 
-// MARK: - Speed (donut + top leaderboard; per-model fine rates in tooltips)
+// MARK: - Compact speed summary with a dedicated rankings page
 
-/// Speed overview: models ranked by weighted output speed. The donut folds
-/// the tail into "Other" as a weighted mean — rates don't sum, so a plain
-/// leftover-sum fold would be wrong. Sums come from core (`speed_exprs`).
+/// Three leading models with a relative bar; detailed rates live on Speed.
 private struct SpeedCard: View, Equatable {
     let vm: OverviewVM
-
+    @Environment(AppModel.self) private var model
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.vm.range == b.vm.range && a.vm.byModel == b.vm.byModel
     }
-
-    /// Models with usable timing, fastest output rate first.
     private var ranked: [ShareRow] {
-        vm.byModel.filter { $0.speedMs > 0 }
-            .sorted { ($0.outputTps ?? 0) > ($1.outputTps ?? 0) }
+        vm.byModel.filter { $0.speedMs > 0 }.sorted { ($0.outputTps ?? 0) > ($1.outputTps ?? 0) }
     }
-
-    /// Top 4 + "Other" as the tail's weighted mean.
-    private var slices: [(String, Double)] {
-        var out = ranked.prefix(4).map { ($0.name, $0.outputTps ?? 0) }
-        let tail: (out: UInt64, ms: UInt64) = ranked.dropFirst(4)
-            .reduce((out: UInt64(0), ms: UInt64(0))) { ($0.0 + $1.speedOut, $0.1 + $1.speedMs) }
-        if tail.ms > 0 { out.append((String(localized: "Other"), Double(tail.out) / Double(tail.ms) * 1000)) }
-        return out
-    }
-
-    private var footer: String {
-        var sin = UInt64(0), sout = UInt64(0), ms = UInt64(0)
-        var pin = UInt64(0), ttft = UInt64(0), dout = UInt64(0), dms = UInt64(0)
-        for m in ranked {
-            sin += m.speedIn; sout += m.speedOut; ms += m.speedMs
-            pin += m.prefillIn; ttft += m.ttftMs; dout += m.decodeOut; dms += m.decodeMs
-        }
-        guard ms > 0 else { return "" }
-        var parts = [
-            String(localized: "Total \(Fmt.speed(Double(sin + sout) / Double(ms) * 1000))"),
-            String(localized: "In \(Fmt.speed(Double(sin) / Double(ms) * 1000))"),
-            String(localized: "Out \(Fmt.speed(Double(sout) / Double(ms) * 1000))"),
-        ]
-        if ttft > 0 { parts.append(String(localized: "Prefill \(Fmt.speed(Double(pin) / Double(ttft) * 1000))")) }
-        if dms > 0 { parts.append(String(localized: "Gen \(Fmt.speed(Double(dout) / Double(dms) * 1000))")) }
-        return parts.joined(separator: " · ")
-    }
-
-    /// Per-model fine rates for the row's second line — total/input plus
-    /// prefill and decode when reported (output is the headline figure).
-    private func subline(_ m: ShareRow) -> String? {
-        var parts: [String] = []
-        if let v = m.totalTps { parts.append(String(localized: "Total \(Fmt.speed(v))")) }
-        if let v = m.inputTps { parts.append(String(localized: "In \(Fmt.speed(v))")) }
-        if let v = m.prefillTps { parts.append(String(localized: "Prefill \(Fmt.speed(v))")) }
-        if let v = m.decodeTps { parts.append(String(localized: "Gen \(Fmt.speed(v))")) }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
-    private func tip(_ m: ShareRow) -> String {
-        var parts: [String] = []
-        if let v = m.totalTps { parts.append(String(localized: "Total \(Fmt.speed(v))")) }
-        if let v = m.inputTps { parts.append(String(localized: "In \(Fmt.speed(v))")) }
-        if let v = m.outputTps { parts.append(String(localized: "Out \(Fmt.speed(v))")) }
-        if let v = m.prefillTps { parts.append(String(localized: "Prefill \(Fmt.speed(v))")) }
-        if let v = m.decodeTps { parts.append(String(localized: "Gen \(Fmt.speed(v))")) }
-        parts.append(String(localized: "Timed \(Fmt.duration(ms: m.speedMs))"))
-        if m.speedEstMs > 0 {
-            parts.append(String(localized: "est. \(Fmt.duration(ms: m.speedEstMs))"))
-        }
-        return parts.joined(separator: " · ")
-    }
-
     var body: some View {
-        let top = Array(ranked.prefix(8))
-        let maxTps = max(1, top.map { $0.outputTps ?? 0 }.max() ?? 1)
+        let top = Array(ranked.prefix(3))
+        let firstRate = top.first?.outputTps ?? 0
+        let peak = firstRate > 0 ? firstRate : 1
         Card(title: "\(Text(vm.range.title)) · Speed") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 24, alignment: .top)], alignment: .leading, spacing: 20) {
-                Donut(title: "By Model · Speed", items: slices, format: Fmt.speed)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Top Speed").scaledFont(.caption).foregroundStyle(.secondary)
-                    if top.isEmpty {
-                        Text("No data").foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 60)
-                    } else {
-                        ForEach(top) { m in
-                            let tps = m.outputTps ?? 0
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(m.name).lineLimit(1).fontWeight(.medium)
-                                    Spacer()
-                                    Text("\(m.speedEstMs > 0 ? "≈" : "")\(Fmt.speed(tps)) · \(Fmt.count(m.events)) calls")
-                                        .foregroundStyle(.secondary).monospacedDigit()
-                                }
-                                .scaledFont(.callout)
-                                ProgressView(value: tps, total: maxTps).tint(.accentColor)
-                                if let sub = subline(m) {
-                                    Text(sub)
-                                        .scaledFont(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                        .lineLimit(2)
-                                }
-                            }
-                            .help(tip(m))
-                        }
+            if top.isEmpty {
+                Text("No data").foregroundStyle(.secondary)
+            }
+            ForEach(top) { row in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(row.name).scaledFont(.callout).lineLimit(1)
+                        Spacer()
+                        Text("\(row.speedEstMs > 0 ? "≈" : "")\(Fmt.speed(row.outputTps ?? 0))")
+                            .scaledFont(.callout).fontWeight(.medium).monospacedDigit()
                     }
+                    ProgressView(value: row.outputTps ?? 0, total: peak).tint(.accentColor)
                 }
             }
-            if !footer.isEmpty {
-                Text(footer).scaledFont(.caption).foregroundStyle(.secondary).monospacedDigit()
-            }
+            Button("View speed rankings") { model.page = .speed }
         }
     }
 }

@@ -70,13 +70,19 @@ pub fn cached_rates(store: &Store) -> Option<Rates> {
 pub fn status(store: &Store) -> FxStatus {
     let display = display_currency(store);
     let rates = cached_rates(store);
+    let available = rates.as_ref().is_some_and(|r| {
+        display == r.base
+            || r.rates
+                .get(&display)
+                .is_some_and(|v| v.is_finite() && *v > 0.0)
+    });
     let (source, fetched_at_ms, stale) = match &rates {
-        Some(r) => (
+        Some(r) if available => (
             Some(r.source.clone()),
             Some(r.fetched_at_ms),
             store::now_ms() - r.fetched_at_ms > TTL_MS,
         ),
-        None => (None, None, false),
+        _ => (None, None, false),
     };
     let usd_to = match &rates {
         Some(r) if display == r.base => 1.0,
@@ -94,6 +100,43 @@ pub fn status(store: &Store) -> FxStatus {
 
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+struct FlightGuard;
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Explicit refresh bypasses TTL. Call on a worker thread; automatic and
+/// manual fetches share one guard, and a failed fetch keeps the old cache.
+pub fn refresh(store: &Store) -> Result<FxStatus> {
+    anyhow::ensure!(
+        !IN_FLIGHT.swap(true, Ordering::SeqCst),
+        "A rate sync is already running"
+    );
+    let _guard = FlightGuard;
+    let display = display_currency(store);
+    refresh_with(store, || fetch_rates_for("USD", Some(&display)))
+}
+
+fn refresh_with(store: &Store, fetch: impl FnOnce() -> Result<Rates>) -> Result<FxStatus> {
+    let rates = fetch()?;
+    anyhow::ensure!(
+        rates.base == "USD"
+            && !rates.rates.is_empty()
+            && rates.rates.values().all(|v| v.is_finite() && *v > 0.0),
+        "Invalid exchange-rate response"
+    );
+    let display = display_currency(store);
+    anyhow::ensure!(
+        display == rates.base || rates.rates.contains_key(&display),
+        "Exchange-rate response lacks selected currency {display}"
+    );
+    store.set_state(RATES_KEY, &serde_json::to_string(&rates)?)?;
+    Ok(status(store))
+}
+
 /// Refresh the presentation currency from the cached rate and kick a
 /// background refetch when stale. Called at the top of every viewmodel
 /// build so `fmt::usd` always renders with a current (possibly stale-but-
@@ -108,8 +151,10 @@ pub fn apply(store: &Store) {
 /// blocks and never touches the network from the caller's thread; `:memory:`
 /// stores (tests) are skipped — they have nothing to persist.
 pub fn ensure_fresh(store: &Store) {
+    let display = display_currency(store);
     if let Some(r) = cached_rates(store)
         && store::now_ms() - r.fetched_at_ms <= TTL_MS
+        && (display == r.base || r.rates.contains_key(&display))
     {
         return;
     }
@@ -128,7 +173,8 @@ pub fn ensure_fresh(store: &Store) {
     let spawned = std::thread::Builder::new()
         .name("gtt-fx".into())
         .spawn(move || {
-            match fetch_rates("USD") {
+            let _guard = FlightGuard;
+            match fetch_rates_for("USD", Some(&display)) {
                 Ok(rates) => match serde_json::to_string(&rates) {
                     Ok(json) => match Store::open(&path) {
                         Ok(s) => {
@@ -142,7 +188,6 @@ pub fn ensure_fresh(store: &Store) {
                 },
                 Err(e) => tracing::debug!("fx fetch failed: {e:#}"),
             }
-            IN_FLIGHT.store(false, Ordering::SeqCst);
         });
     if spawned.is_err() {
         IN_FLIGHT.store(false, Ordering::SeqCst);
@@ -166,20 +211,38 @@ fn agent() -> ureq::Agent {
 /// Try the sources in order; the first non-empty rate map wins. Closures keep
 /// the fallback lazy — an early success never costs a later request.
 pub fn fetch_rates(base: &str) -> Result<Rates> {
+    fetch_rates_for(base, None)
+}
+
+fn fetch_rates_for(base: &str, required: Option<&str>) -> Result<Rates> {
     let agent = agent();
     let sources: [Source<'_>; 3] = [
         ("frankfurter", Box::new(|| fetch_frankfurter(&agent, base))),
         ("er-api", Box::new(|| fetch_er_api(&agent, base))),
         ("ecb", Box::new(|| fetch_ecb_xml(&agent, base))),
     ];
-    pick(base, sources)
+    match required {
+        Some(currency) => pick_for(base, Some(currency), sources),
+        None => pick(base, sources),
+    }
 }
 
 fn pick<'a>(base: &str, sources: impl IntoIterator<Item = Source<'a>>) -> Result<Rates> {
+    pick_for(base, None, sources)
+}
+
+fn pick_for<'a>(
+    base: &str,
+    required: Option<&str>,
+    sources: impl IntoIterator<Item = Source<'a>>,
+) -> Result<Rates> {
     let mut last: Option<anyhow::Error> = None;
     for (name, fetch) in sources {
         match fetch() {
-            Ok(rates) if !rates.is_empty() => {
+            Ok(rates)
+                if !rates.is_empty()
+                    && required.is_none_or(|code| code == base || rates.contains_key(code)) =>
+            {
                 return Ok(Rates {
                     base: base.into(),
                     rates,
@@ -187,7 +250,11 @@ fn pick<'a>(base: &str, sources: impl IntoIterator<Item = Source<'a>>) -> Result
                     fetched_at_ms: store::now_ms(),
                 });
             }
-            Ok(_) => last = Some(anyhow::anyhow!("{name}: empty rate map")),
+            Ok(_) => {
+                last = Some(anyhow::anyhow!(
+                    "{name}: empty rates or selected currency unavailable"
+                ));
+            }
             Err(e) => last = Some(e.context(name)),
         }
     }
@@ -287,6 +354,72 @@ mod tests {
     }
 
     #[test]
+    fn manual_refresh_bypasses_fresh_cache_and_preserves_ledger() {
+        let store = mem();
+        let old = Rates {
+            base: "USD".into(),
+            rates: BTreeMap::from([("CNY".into(), 7.0)]),
+            source: "old".into(),
+            fetched_at_ms: store::now_ms(),
+        };
+        store
+            .set_state(RATES_KEY, &serde_json::to_string(&old).unwrap())
+            .unwrap();
+        set_display_currency(&store, "CNY").unwrap();
+        store
+            .upsert_event(&crate::UsageEvent {
+                dedup_key: "fx-fixture".into(),
+                app: "fixture".into(),
+                input_tokens: 123,
+                ..Default::default()
+            })
+            .unwrap();
+        let status = refresh_with(&store, || {
+            Ok(Rates {
+                rates: BTreeMap::from([("CNY".into(), 7.2)]),
+                source: "new".into(),
+                ..old
+            })
+        })
+        .unwrap();
+        assert_eq!(status.usd_to, 7.2);
+        assert_eq!(status.source.as_deref(), Some("new"));
+        assert_eq!(
+            store.totals(None, None, None, None).unwrap().input_tokens,
+            123
+        );
+    }
+
+    #[test]
+    fn failed_or_invalid_refresh_keeps_previous_cache() {
+        let store = mem();
+        let old = Rates {
+            base: "USD".into(),
+            rates: BTreeMap::from([("CNY".into(), 7.0)]),
+            source: "old".into(),
+            fetched_at_ms: 42,
+        };
+        let raw = serde_json::to_string(&old).unwrap();
+        store.set_state(RATES_KEY, &raw).unwrap();
+        assert!(refresh_with(&store, || anyhow::bail!("offline fixture")).is_err());
+        assert_eq!(
+            store.get_state(RATES_KEY).unwrap().as_deref(),
+            Some(raw.as_str())
+        );
+        assert!(
+            refresh_with(&store, || Ok(Rates {
+                rates: BTreeMap::from([("CNY".into(), f64::INFINITY)]),
+                ..old
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            store.get_state(RATES_KEY).unwrap().as_deref(),
+            Some(raw.as_str())
+        );
+    }
+
+    #[test]
     fn display_currency_defaults_and_round_trips() {
         let s = mem();
         assert_eq!(display_currency(&s), "USD");
@@ -333,13 +466,33 @@ mod tests {
         s.set_state(RATES_KEY, &serde_json::to_string(&rates).unwrap())
             .unwrap();
         set_display_currency(&s, "XAU").unwrap();
-        assert_eq!(status(&s).usd_to, 1.0);
+        let st = status(&s);
+        assert_eq!(st.usd_to, 1.0);
+        assert!(st.source.is_none()); // No fictitious 1 USD = 1 XAU quote.
+        assert!(st.fetched_at_ms.is_none());
     }
 
     #[test]
     fn ensure_fresh_skips_in_memory_stores() {
         ensure_fresh(&mem());
         assert!(!IN_FLIGHT.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn selected_currency_missing_from_first_source_uses_fallback() {
+        let sources: Vec<Source<'static>> = vec![
+            (
+                "first",
+                Box::new(|| Ok(BTreeMap::from([("CNY".into(), 7.1)]))),
+            ),
+            (
+                "fallback",
+                Box::new(|| Ok(BTreeMap::from([("TWD".into(), 31.0)]))),
+            ),
+        ];
+        let rates = pick_for("USD", Some("TWD"), sources).unwrap();
+        assert_eq!(rates.source, "fallback");
+        assert_eq!(rates.rates["TWD"], 31.0);
     }
 
     #[test]

@@ -1,1 +1,34 @@
 /* English strings are the source keys; no overrides needed. */
+
+/* Speed rankings and explicit exchange-rate sync. */
+"Speed" = "Speed";
+"Models" = "Models";
+"Tools" = "Tools";
+"Speed rankings" = "Speed rankings";
+"Ranking" = "Ranking";
+"Group" = "Group";
+"Rank by" = "Rank by";
+"Output" = "Output";
+"Input" = "Input";
+"Total throughput" = "Total throughput";
+"Prefill" = "Prefill";
+"Decode" = "Decode";
+"Weighted output" = "Weighted output";
+"Weighted by valid timing" = "Weighted by valid timing";
+"Current leader" = "Current leader";
+"Estimated timing" = "Estimated timing";
+"%@ ranked groups" = "%@ ranked groups";
+"Rates are weighted by valid timing. Requests show the full filtered request count." = "Rates are weighted by valid timing. Requests show the full filtered request count.";
+"Top 25. ≈ includes timestamp estimates; unreported metrics show —." = "Top 25. ≈ includes timestamp estimates; unreported metrics show —.";
+"No timing data for this ranking" = "No timing data for this ranking";
+"Try another metric or widen the current filters." = "Try another metric or widen the current filters.";
+"%@ requests · Timed %@ · Estimated %@" = "%@ requests · Timed %@ · Estimated %@";
+"View speed rankings" = "View speed rankings";
+"Synced %@" = "Synced %@";
+"Sync now" = "Sync now";
+"Syncing…" = "Syncing…";
+"Rate sync failed; cached rates remain available. %@" = "Rate sync failed; cached rates remain available. %@";
+"25 per page. ≈ includes timestamp estimates; unreported metrics show —." = "25 per page. ≈ includes timestamp estimates; unreported metrics show —.";
+"%lld–%lld of %lld" = "%lld–%lld of %lld";
+"Previous" = "Previous";
+"Next" = "Next";

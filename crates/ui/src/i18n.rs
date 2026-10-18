@@ -282,7 +282,33 @@ pub fn en(zh: &str) -> &str {
         "金额按缓存汇率换算展示，账本始终以 USD 记录" => {
             "Amounts convert at the cached rate; the ledger always stays USD"
         }
+        "加权输出速度" => "Weighted output",
+        "按有效计时加权" => "Weighted by valid timing",
+        "当前榜首" => "Current leader",
+        "估算计时占比" => "Estimated timing",
+        "{} 项参与排名" => "{} ranked groups",
+        "总吞吐" => "Total throughput",
+        "按有效计时加权；缺少计时的记录不参与速度排名。请求数为筛选范围内的总请求数。" => {
+            "Rates are weighted by valid timing. Requests show the full filtered request count."
+        }
+        "展示前 25 项；≈ 表示包含时间戳估算，未报告的分项显示 —。" => {
+            "Top 25. Approximate timing is marked with ≈; unreported metrics show —."
+        }
+        "{} 次请求 · 有效计时 {} 秒 · 估算计时 {}%" => {
+            "{} requests · Timed {} s · Estimated {}%"
+        }
+        "当前筛选下没有可用于此项排名的计时数据。" => {
+            "No timing data for this ranking under the current filters."
+        }
+        "查看完整速度排行榜" => "View speed rankings",
+        "预填" => "Prefill",
+        "解码" => "Decode",
+        "每页 25 项；≈ 表示包含时间戳估算，未报告的分项显示 —。" => {
+            "25 per page. Approximate timing is marked with ≈; unreported metrics show —."
+        }
+        "第 {}–{} 项 / 共 {} 项" => "{}–{} of {}",
         "汇率来源" => "Rate source",
+        "同步失败，继续使用缓存" => "Sync failed; keeping cached rates",
         "缓存已过期" => "cache stale",
         "未获取到汇率，按 USD 显示" => "No rate fetched yet; showing USD",
         "外观" => "Appearance",
