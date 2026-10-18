@@ -1828,3 +1828,9 @@
 - **验证**：新增 SQL/Cube 一致性测试，覆盖全量、今日、小时窗口、工具/模型筛选和空设备筛选，并验证混入无计时请求后仍按有效时长加权。新增 UI 排序测试验证加权排名和缺分项排除。Windows 全工作区测试 347 passed、0 failed、4 项既有 ignored；cargo fmt --all -- --check 和 cargo clippy --workspace --all-targets --locked -- -D warnings 通过。中英文文案及 C ABI 声明/实现一致性检查通过。SwiftUI 原生编译继续交由精确提交的 macOS Actions 验证，未冒充本机截图/交互验收。
 
 - **本机文件验证**：Release UI/CLI 与完整安装器唯一 ZIP 载荷逐项哈希相同；备份当前程序后同路径更新，两文件与 Release 相同。配置按字节保留，未继续启动或操作 UI。程序备份及哈希清单仅保留在 ignored 诊断目录。
+
+## S143 0.8.6 正式版准备与分批交付（2026-10-18）
+
+- **范围与基线**：用户授权分批推送并发布 0.8.6。CodeBuddy、macOS 编译修复、汇率与速度页已分别提交为 26d6080、d0bc54f、7058042，均已推送；7058042 的 Windows/macOS Actions Run 39087910950 成功。本次单独统一 workspace、锁文件中五个本地 crate 及中英文构建文档至 0.8.6，不调整依赖。实查远端最新正式版与可达标签为 v0.8.5（1efeae7），v0.8.6 尚不存在。
+- **发布取舍**：沿用现有 stable-release.yml，从最新 main 触发；Windows 完整检查和安装器、macOS portable 检查与 Universal DMG 全部成功后才允许发布。公告按 v0.8.5 之后的最终净变化核对，覆盖汇率、五类速率及独立排行榜、CodeBuddy Agent/CLI、Qoder 修复，合并中间展示步骤，维护类提交保留在完整记录。未重新切分或改写已推送历史，未提前手工打标签或上传未经流水线验证的本地旧版包。
+- **本地验证**：cargo test --workspace --locked：347 passed、0 failed、4 项既有 ignored；cargo fmt --all -- --check 与 cargo clippy --workspace --all-targets --locked -- -D warnings 通过。python -m unittest discover -s .github/release-templates -p 'test_*.py'：31 passed；validate_build.py 校验 v0.8.6 与 workspace 一致；generate_release_notes.py --channel stable --no-llm 预览基线为 v0.8.5，git diff --check 通过。正式发布结果以随后精确 SHA 的 Actions、Release 标签、BUILD_INFO.txt 与附件 SHA-256 回读为准；没有把本地测试或此前构建当成本次发布已成功，也未继续用户已停止的窗口操作。
