@@ -49,7 +49,7 @@ The Windows UI is native WinUI 3 (Rust + windows-reactor); the macOS app is nati
 |---|---|---|
 | Claude Code | Local JSONL logs | ✅ exact + quota (when credentialed) |
 | Codex | Local sessions | ✅ exact + quota |
-| Devin CLI | Local `devin/cli/sessions.db` | ✅ exact (incl. TTFT) |
+| Devin CLI | Local `~/.local/share/devin/cli/sessions.db` (including macOS), `$XDG_DATA_HOME/devin/cli/sessions.db`, and legacy native data directories | ✅ exact tokens (incl. TTFT; internal compactor calls remain unpriced without an identified model rate) |
 | OpenCode / ZCode / Grok / WorkBuddy / MiniMax Code / Kimi Code | Local logs | ✅ exact |
 | DeepSeek Harness (CLI / DSH Desktop) | Local sessions `~/.dsh/sessions/…` | ✅ exact |
 | Freebuff Desktop | Per-project databases `~/.config/freebuff-desktop/projects/*/desktop-v2.db` (Claude Code / Codex engine threads are counted by those sources) | ✅ exact (free tier counts as US$0) |

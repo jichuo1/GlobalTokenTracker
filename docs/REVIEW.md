@@ -1834,3 +1834,12 @@
 - **范围与基线**：用户授权分批推送并发布 0.8.6。CodeBuddy、macOS 编译修复、汇率与速度页已分别提交为 26d6080、d0bc54f、7058042，均已推送；7058042 的 Windows/macOS Actions Run 39087910950 成功。本次单独统一 workspace、锁文件中五个本地 crate 及中英文构建文档至 0.8.6，不调整依赖。实查远端最新正式版与可达标签为 v0.8.5（1efeae7），v0.8.6 尚不存在。
 - **发布取舍**：沿用现有 stable-release.yml，从最新 main 触发；Windows 完整检查和安装器、macOS portable 检查与 Universal DMG 全部成功后才允许发布。公告按 v0.8.5 之后的最终净变化核对，覆盖汇率、五类速率及独立排行榜、CodeBuddy Agent/CLI、Qoder 修复，合并中间展示步骤，维护类提交保留在完整记录。未重新切分或改写已推送历史，未提前手工打标签或上传未经流水线验证的本地旧版包。
 - **本地验证**：cargo test --workspace --locked：347 passed、0 failed、4 项既有 ignored；cargo fmt --all -- --check 与 cargo clippy --workspace --all-targets --locked -- -D warnings 通过。python -m unittest discover -s .github/release-templates -p 'test_*.py'：31 passed；validate_build.py 校验 v0.8.6 与 workspace 一致；generate_release_notes.py --channel stable --no-llm 预览基线为 v0.8.5，git diff --check 通过。正式发布结果以随后精确 SHA 的 Actions、Release 标签、BUILD_INFO.txt 与附件 SHA-256 回读为准；没有把本地测试或此前构建当成本次发布已成功，也未继续用户已停止的窗口操作。
+
+
+## Devin 本地数据路径与历史回补（2026-10-21）
+
+- **问题与修复**：macOS 上 CLI 实际使用 `~/.local/share/devin/cli/sessions.db`，原先只查 `dirs::data_dir()` 会漏掉整库。发现与监听共用原生目录、Unix 默认目录及绝对路径 `XDG_DATA_HOME` 候选，兼容旧安装；按规范化文件路径排除符号链接别名。
+- **解析与回补**：用 SQLite 结构化读取 role + metadata 替代对紧凑 JSON 的字面 LIKE 过滤；忽略损坏 JSON、非 assistant 与无 metrics 行，并让水位越过这些行。新 `devin-metrics-v2` 标记触发一次历史重扫，沿用 `devin:{request_id}` 键，已有事件与跨目录数据库副本继续合并。只读取源库，不映射会话累计 credits。
+- **计价边界**：本地 `compactor` 是独立压缩模型，不能拿主会话所选模型冒充请求模型；其 token 保留，缺少明确价目时保持 unpriced。常规推理保留实际模型与会话请求模型。
+- **回归验证**：6 项 Devin 测试覆盖指标、原生/Unix/XDG 路径与别名去重、带空格 JSON 的旧游标回补、回补后增量、损坏/非 assistant 行水位、跨库请求去重及 compactor 计价隔离。0.8.5 基线的 macOS 可移植三 crate 共 262 项测试通过；整合远端 0.8.6 main 后重新验证，301 项测试通过、4 项既有外部条件测试跳过；clippy `--all-targets -- -D warnings` 通过。
+- **本地验收边界**：在独立账本副本中全量扫描已发现源并复核 Devin 四类 token；二次 Devin 扫描无新增。价格可用性按本地缓存价目核查，未声称完成线上报价刷新或 Windows 实机验证。

@@ -92,5 +92,5 @@ Optional repository secrets for Developer ID signing + notarization:
 | Antigravity / Gemini | `~/.gemini/antigravity*` | path logic only |
 | DeepSeek Harness | `~/.dsh`, `~/Library/Application Support/dsh-desktop/harness` | path logic only |
 | ZCode, Grok, WorkBuddy, Qoder, Kimi Code, MiniMax, Command Code | home-directory dot folders | path logic only |
-| Devin CLI | `~/Library/Application Support/devin/cli/sessions.db` | ⚠️ mirrors the Windows `%APPDATA%` layout; unconfirmed |
+| Devin CLI | `~/.local/share/devin/cli/sessions.db`, `$XDG_DATA_HOME/devin/cli/sessions.db`; legacy `~/Library/Application Support/devin/cli/sessions.db` | ✅ exact token totals verified against local CLI records |
 | CodeBuddy IDE | `~/Library/Application Support/CodeBuddyExtension/Data` | ⚠️ mirrors the Windows layout; unconfirmed |

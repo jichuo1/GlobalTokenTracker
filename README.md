@@ -135,7 +135,7 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 |---|---|---|
 | Claude Code | 本地 JSONL 会话日志 | ✅ token 精确 + 配额（凭据可用时） |
 | Codex | 本地会话日志 | ✅ 精确 + 配额 |
-| Devin CLI | 本地会话库 `devin/cli/sessions.db` | ✅ 精确（含 TTFT） |
+| Devin CLI | 本地会话库：`~/.local/share/devin/cli/sessions.db`（含 macOS）、`$XDG_DATA_HOME/devin/cli/sessions.db`，兼容系统数据目录 | ✅ token 精确（含 TTFT；内部 compactor 无明确模型价格时标为未计价） |
 | OpenCode / ZCode / Grok / WorkBuddy | 本地日志 | ✅ 精确 |
 | MiniMax Code / Kimi Code | 本地日志 | ✅ 精确 |
 | DeepSeek Harness（CLI / DSH Desktop） | 本地会话 `~/.dsh/sessions/…` | ✅ 精确 |
