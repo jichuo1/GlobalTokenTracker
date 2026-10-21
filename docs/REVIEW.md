@@ -1843,3 +1843,9 @@
 - **计价边界**：本地 `compactor` 是独立压缩模型，不能拿主会话所选模型冒充请求模型；其 token 保留，缺少明确价目时保持 unpriced。常规推理保留实际模型与会话请求模型。
 - **回归验证**：6 项 Devin 测试覆盖指标、原生/Unix/XDG 路径与别名去重、带空格 JSON 的旧游标回补、回补后增量、损坏/非 assistant 行水位、跨库请求去重及 compactor 计价隔离。0.8.5 基线的 macOS 可移植三 crate 共 262 项测试通过；整合远端 0.8.6 main 后重新验证，301 项测试通过、4 项既有外部条件测试跳过；clippy `--all-targets -- -D warnings` 通过。
 - **本地验收边界**：在独立账本副本中全量扫描已发现源并复核 Devin 四类 token；二次 Devin 扫描无新增。价格可用性按本地缓存价目核查，未声称完成线上报价刷新或 Windows 实机验证。
+
+
+## macOS 新增视图的 CLT 构建兼容（2026-10-21）
+
+- **问题与修复**：0.8.6 新增速度页和汇率设置的 7 个状态声明重新使用 `@State`，本机 Swift 6.4 / macOS SDK 的 Command Line Tools 缺少 SwiftUIMacros 插件，导致整个应用无法构建。沿用项目既有 `ViewState` 动态属性包装，与同一文件及其余视图保持一致；不改变页面逻辑、计价或设置键。
+- **验证**：修复前逐项核对 7 处宏错误与 `ViewState.swift` 既有实现；修复后 `macos/scripts/build-app.sh --universal` 的 arm64 / x86_64 Release 均构建成功，双架构检查及 ad-hoc 签名严格校验通过。Rust 可移植三 crate 的 301 项测试、Clippy 及格式检查已在前一 Devin 提交通过，本提交仅修改 Swift 状态声明及此审查记录。

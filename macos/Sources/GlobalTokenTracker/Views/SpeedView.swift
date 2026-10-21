@@ -17,9 +17,9 @@ private enum SpeedMetric: String, CaseIterable, Identifiable {
 
 struct SpeedView: View {
     @Environment(AppModel.self) private var model
-    @State private var byTool = false
-    @State private var metric = SpeedMetric.output
-    @State private var page = 0
+    @ViewState private var byTool = false
+    @ViewState private var metric = SpeedMetric.output
+    @ViewState private var page = 0
 
     private func rows(_ vm: OverviewVM) -> [ShareRow] { byTool ? vm.byAppSpeed : vm.byModel }
     private func ranked(_ vm: OverviewVM) -> [ShareRow] {

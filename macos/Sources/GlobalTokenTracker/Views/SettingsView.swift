@@ -30,10 +30,10 @@ struct GeneralSettings: View {
     @ViewState private var launchAtLogin = Prefs.launchAtLogin
     @ViewState private var loginError: String?
     @ViewState private var languageChanged = false
-    @State private var displayCurrency = "USD"
-    @State private var fx: FxStatus?
-    @State private var fxRefreshing = false
-    @State private var fxError: String?
+    @ViewState private var displayCurrency = "USD"
+    @ViewState private var fx: FxStatus?
+    @ViewState private var fxRefreshing = false
+    @ViewState private var fxError: String?
 
     private struct CurrencyOption: Identifiable {
         let code: String
