@@ -343,7 +343,8 @@ struct SchedulingView: View {
                 Text("开启时需要同一工作流的在线监工；关闭仍保留预算、模型池和恢复保护。").font(.caption).foregroundStyle(.secondary)
                 }
                 if !workflowSettings,let i=nodeIndex,let n=graph?.nodes[i] {editor(i,n)}
-            }.padding(10).frame(maxWidth:.infinity,alignment:.leading)
+            }.frame(maxWidth:.infinity,alignment:.leading)
+                .multilineTextAlignment(.leading).padding(10)
         }.frame(minWidth:270,idealWidth:300,maxWidth:360)
     }
     private var runPanel: some View {
@@ -356,7 +357,7 @@ struct SchedulingView: View {
                     if !detailValue["nodes"][id]["job_id"].text.isEmpty {Button("查看节点 \(id) 报告") {request("router_collect",params:.object(["job_id":detailValue["nodes"][id]["job_id"],"max_chars":.number(12000)]))}}
                 }
                 Text(report.isEmpty ? detail:report).font(.system(.caption,design:.monospaced)).textSelection(.enabled)
-            }.frame(maxWidth:.infinity,alignment:.leading)
+            }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
         }
     }
     private var graphCanvas: some View {
@@ -436,11 +437,24 @@ struct SchedulingView: View {
                 Menu("从模型池添加备用") { ForEach(settings.pool.filter { $0.expiresAt > now && $0.id != n.routeId && !n.fallbackRoutes.contains($0.id) }) { p in Button(routes.first { $0.id == p.id }?.model ?? p.id) { mutate { g in if g.nodes[i].fallbackRoutes.count < 8 { g.nodes[i].fallbackRoutes.append(p.id) } } } } }
                 Button("清空备用") { mutate { $0.nodes[i].fallbackRoutes = [] } }
             }
-            DisclosureGroup("套用职责模板") {LazyVGrid(columns:Array(repeating:GridItem(.flexible()),count:2)) {ForEach(templates) {t in Button(t.title) {applyTemplate(t,to:i)}.help(t.role)}}}
+            DisclosureGroup("套用职责模板") {
+                VStack(alignment:.leading,spacing:8) {
+                    ForEach(templates) {t in
+                        Button {applyTemplate(t,to:i)} label: {
+                            VStack(alignment:.leading,spacing:4) {
+                                Text(t.title).font(.body.weight(.semibold))
+                                Text(t.role).font(.caption).foregroundStyle(.secondary)
+                            }.frame(maxWidth:.infinity,alignment:.leading)
+                                .fixedSize(horizontal:false,vertical:true).padding(6)
+                        }.buttonStyle(.bordered)
+                    }
+                }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
+            }
             Text("绑定：\(routes.first { $0.id == n.routeId }.map { "\($0.source) / \($0.model)" } ?? n.routeId)").font(.caption).fixedSize(horizontal:false,vertical:true)
             TextField("节点提示词",text:Binding(get:{n.task["prompt"].text},set:{v in mutate {$0.nodes[i].task["prompt"] = .string(v)}}))
             Text("给出具体任务与验收条件；运行时会提供本次输入和上游报告。").font(.caption).foregroundStyle(.secondary)
             DisclosureGroup("高级调用参数") {
+            VStack(alignment:.leading,spacing:8) {
             Text("输出与等待参数留空可继承配置档；模型原生容量和共享预算仍有效。").font(.caption).foregroundStyle(.secondary)
             ForEach(["kind", "max_output_tokens", "token_budget", "deadline_s", "hard_deadline_s", "ttft_s", "idle_s", "output_mode", "report_max_chars"], id: \.self) { key in
                 TextField(parameterName(key), text: Binding(get: { if case .number(let v) = n.task[key] { return String(Int(v)) }; return n.task[key].text }, set: { v in mutate { g in if v.isEmpty && !["kind","prompt"].contains(key) {var fields=g.nodes[i].task.fields;fields.removeValue(forKey:key);g.nodes[i].task = .object(fields)} else {g.nodes[i].task[key] = ["kind", "prompt", "output_mode"].contains(key) ? .string(v) : (Double(v).map(SchedulerJSON.number) ?? .null)} } }))
@@ -448,6 +462,7 @@ struct SchedulingView: View {
             Text("高级节点参数 JSON").font(.caption)
             TextEditor(text: $taskText).frame(height: 140).border(.quaternary)
             Button("应用高级参数") { do { let value = try JSONDecoder().decode(SchedulerJSON.self, from: Data(taskText.utf8)); guard case .object = value else { return }; mutate { $0.nodes[i].task = value } } catch { self.error = error.localizedDescription } }
+            }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
             }
         }
     }

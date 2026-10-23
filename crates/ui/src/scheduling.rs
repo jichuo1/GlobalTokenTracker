@@ -786,14 +786,23 @@ fn command(
 ) -> View {
     Button::new()
         .is_enabled(enabled)
+        .min_height(58.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
+        .horizontal_content_alignment(HorizontalAlignment::Stretch)
+        .vertical_content_alignment(VerticalAlignment::Center)
+        .automation_name(format!("{label}。{description}"))
         .on_click(ctx.callback(move |_| Msg::Scheduling(Action::Menu(Box::new(action())))))
         .content(
-            StackPanel::new()
-                .spacing(3.0)
-                .children((TextBlock::new().text(label), secondary(description))),
+            Border::new().padding(Thickness::xy(4.0, 3.0)).content(
+                StackPanel::new().spacing(3.0).children((
+                    TextBlock::new()
+                        .text(label)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .text_wrapping(TextWrapping::Wrap),
+                    secondary(description),
+                )),
+            ),
         )
-        .tooltip(description)
 }
 fn menu(label: &str, description: &str, id: &'static str, ctx: &ViewContext<Shell>) -> View {
     Button::new()
@@ -930,23 +939,31 @@ fn menu_panel(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         .width(320.0)
         .content(
             StackPanel::new().spacing(10.0).children((
-                row(vec![
-                    TextBlock::new()
-                        .text(match state.open_menu {
-                            Some("add") => "选择职责模板",
-                            Some("view") => "视图与操作说明",
-                            _ => "更多操作",
-                        })
-                        .font_size(16.0)
-                        .into(),
-                    button("收起", || Action::CloseMenu, ctx),
-                ]),
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::Auto])
+                    .column_spacing(12.0)
+                    .children((
+                        TextBlock::new()
+                            .text(match state.open_menu {
+                                Some("add") => "选择职责模板",
+                                Some("view") => "视图与操作说明",
+                                _ => "更多操作",
+                            })
+                            .font_size(16.0)
+                            .text_wrapping(TextWrapping::Wrap)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        Border::new()
+                            .grid_column(1)
+                            .vertical_alignment(VerticalAlignment::Center)
+                            .content(button("收起", || Action::CloseMenu, ctx)),
+                    )),
                 ScrollViewer::new()
                     .max_height(380.0)
                     .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
                     .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
                     .content(
                         StackPanel::new()
+                            .margin(Thickness::new(0.0, 0.0, 12.0, 0.0))
                             .spacing(7.0)
                             .keyed_children(crate::pages::keyed(items)),
                     ),
