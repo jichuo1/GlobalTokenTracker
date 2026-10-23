@@ -132,18 +132,24 @@ class Task:
     output_mode: str = "fixed"
     queue_wait_s: float = 120
     report_max_chars: int = DEFAULT_REPORT_CHARS
+    allowed_routes: list | None = None
 
     @classmethod
-    def parse(cls, data, max_context_chars=64000):
+    def parse(cls, data, max_context_chars=64000, *, runtime_limits=None):
+        from .profiles import DEFAULT_LIMITS
+        limits = DEFAULT_LIMITS | (runtime_limits or {})
+        if runtime_limits is not None:
+            max_context_chars = limits["max_context_chars"]
         if not isinstance(data, dict):
             raise ValueError("Task must be an object")
         unknown = set(data) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError("Unknown task fields: " + ", ".join(sorted(unknown)))
         task = cls(**data)
+        task._runtime_limits = limits
         task._queue_wait_explicit = "queue_wait_s" in data
-        if not isinstance(task.report_max_chars, int) or isinstance(task.report_max_chars, bool) or not 1000 <= task.report_max_chars <= MAX_REPORT_CHARS:
-            raise ValueError(f"report_max_chars must be an integer between 1000 and {MAX_REPORT_CHARS}")
+        if not isinstance(task.report_max_chars, int) or isinstance(task.report_max_chars, bool) or not 1000 <= task.report_max_chars <= limits["max_report_chars"]:
+            raise ValueError(f"report_max_chars must be an integer between 1000 and {limits['max_report_chars']}")
         from .preferences import validate_scope
         validate_scope(task.preference_scope)
         if not isinstance(task.output_mode, str) or task.output_mode not in {"fixed", "adaptive", "native"}:
@@ -152,13 +158,13 @@ class Task:
             task.output_mode = "adaptive"
         if task.timeout_mode not in {"activity", "hard"}:
             raise ValueError("timeout_mode must be activity or hard")
-        for key, low, high in [("hard_deadline_s", 5, 86400), ("idle_s", 1, 3600),
-                               ("stall_grace_s", 0, 300), ("price_weight", 0, 100), ("queue_wait_s", 0, 3600)]:
+        for key, low, high in [("hard_deadline_s", 5, limits["max_hard_deadline_s"]), ("idle_s", 1, limits["max_idle_s"]),
+                               ("stall_grace_s", 0, 300), ("price_weight", 0, 100), ("queue_wait_s", 0, limits["max_queue_wait_s"])]:
             value = number(getattr(task, key))
             if value is None or not low <= value <= high:
                 raise ValueError(f"{key} must be between {low} and {high}")
-        if task.ttft_s is not None and (number(task.ttft_s) is None or not 1 <= task.ttft_s <= 3600):
-            raise ValueError("ttft_s must be null or between 1 and 3600")
+        if task.ttft_s is not None and (number(task.ttft_s) is None or not 1 <= task.ttft_s <= limits["max_ttft_s"]):
+            raise ValueError(f"ttft_s must be null or between 1 and {limits['max_ttft_s']}")
         for key in ["prefer_free", "prefer_new_models"]:
             if not isinstance(getattr(task, key), bool):
                 raise ValueError(f"{key} must be a boolean")
@@ -182,9 +188,9 @@ class Task:
         if len(task.prompt) + len(task.context) > max_context_chars:
             raise ValueError("Payload exceeds the bounded excerpt limit")
         reject_secrets(task.prompt + "\n" + task.context)
-        for key, low, high in [("deadline_s", 5, 900), ("fanout", 1, 4),
-                               ("min_quality", 0, 100), ("max_attempts", 1, 16),
-                               ("max_output_tokens", 256, MAX_OUTPUT_TOKENS), ("priority", 0, 100)]:
+        for key, low, high in [("deadline_s", 5, limits["max_deadline_s"]), ("fanout", 1, limits["max_fanout"]),
+                               ("min_quality", 0, 100), ("max_attempts", 1, limits["max_attempts"]),
+                               ("max_output_tokens", 256, limits["max_output_tokens"]), ("priority", 0, 100)]:
             value = number(getattr(task, key))
             if value is None or not low <= value <= high:
                 raise ValueError(f"{key} must be between {low} and {high}")
@@ -206,14 +212,14 @@ class Task:
             if task.allow_fallback and task.max_attempts > calls:
                 calls += 1  # one bounded replacement, not pre-paid consumption
             from .slicing import requested_output
-            output_allowance = MAX_OUTPUT_TOKENS if task.output_mode == "native" else requested_output(task)
+            output_allowance = limits["max_output_tokens"] if task.output_mode == "native" else requested_output(task)
             allowance = calls * (output_allowance + prompt_allowance)
             if task.verify:
                 allowance += math.ceil(task.fanout * 5000 / 2)
-            default_cap = MAX_TASK_TOKENS if task.max_output_tokens > 65536 or task.output_mode == "native" else DEFAULT_TASK_TOKENS
+            default_cap = limits["max_task_tokens"] if task.max_output_tokens > 65536 or task.output_mode == "native" else min(DEFAULT_TASK_TOKENS, limits["max_task_tokens"])
             task.token_budget = min(default_cap, 24000 if allowance <= 24000 else math.ceil(allowance / 8192) * 8192)
-        if number(task.token_budget) is None or not 1000 <= task.token_budget <= MAX_TASK_TOKENS:
-            raise ValueError(f"token_budget must be between 1000 and {MAX_TASK_TOKENS}")
+        if number(task.token_budget) is None or not 1000 <= task.token_budget <= limits["max_task_tokens"]:
+            raise ValueError(f"token_budget must be between 1000 and {limits['max_task_tokens']}")
         if not isinstance(task.web_tool_budget, int) or isinstance(task.web_tool_budget, bool) or not 2 <= task.web_tool_budget <= 12:
             raise ValueError("web_tool_budget must be between 2 and 12")
         from .hook_guard import public_url
@@ -226,6 +232,11 @@ class Task:
                 raise ValueError(f"{key} must be a bounded string")
         if task.preferred_route is not None and not isinstance(task.preferred_route, str):
             raise ValueError("preferred_route must be a route ID")
+        if task.allowed_routes is not None:
+            if not isinstance(task.allowed_routes,list) or len(task.allowed_routes)>128 or any(not isinstance(v,str) or not v or len(v)>200 for v in task.allowed_routes):
+                raise ValueError("allowed_routes must be null or a bounded list of route IDs")
+            for route in task.allowed_routes:reject_secrets(route)
+            task.allowed_routes=list(dict.fromkeys(task.allowed_routes))
         return task
 
     def public(self):
@@ -249,7 +260,7 @@ class WorkerFailure(Exception):
     def public(self):
         result = {"code": self.code, "scope": self.scope, "message": redact(str(self))[:500]}
         # Diagnostic counters only. Never serialize arbitrary vendor payloads.
-        allowed = {"requested_output_tokens", "reported_output_tokens", "reported_reasoning_tokens", "visible_output_chars", "report_chars", "json_error_offset", "frame_chars"}
+        allowed = {"requested_output_tokens", "reported_output_tokens", "reported_reasoning_tokens", "visible_output_chars", "report_chars", "json_error_offset", "frame_chars", "native_exit_code", "stderr_chars"}
         details = {k: v for k, v in self.details.items() if k in allowed and isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 1_000_000_000_000}
         finish_reason = self.details.get("finish_reason")
         if isinstance(finish_reason, str) and finish_reason in {"length", "stop", "error"}:
@@ -259,6 +270,9 @@ class WorkerFailure(Exception):
                 "non_text_report", "report_too_large", "missing_json_object", "invalid_json", "excessive_nesting",
                 "unexpected_root", "invalid_unicode", "required_completion_fields", "required_report_arrays", "unexpected_native_frame_root", "incomplete_json"}:
             details["contract_reason"] = reason
+        timeout_reason = self.details.get("timeout_reason")
+        if isinstance(timeout_reason, str) and timeout_reason in {"first_activity_timeout", "inactivity_timeout", "hard_deadline"}:
+            details["timeout_reason"] = timeout_reason
         if details:
             result["details"] = details
         return result

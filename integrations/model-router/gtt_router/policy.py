@@ -15,12 +15,23 @@ def rank_routes(task, routes, ledger, store, inflight=None, excluded=None, remai
     horizon = task.hard_deadline_s if task.timeout_mode == "activity" else task.deadline_s
     remaining_s = horizon if remaining_s is None else remaining_s
     candidates, rejected = [], []
+    from .scheduling import settings, route_reason
+    from .controls import DispatchBlocked
+    try:
+        selection = settings(store, selector_only=True)
+        selection_error = None
+    except DispatchBlocked as error:
+        selection, selection_error = {}, error.code
     logical = task.kind in {"code_review", "logic_check", "cross_check"}
     for route in routes:
         reasons = []
+        selected = selection_error or route_reason(selection, route)
+        if selected:
+            reasons.append(selected)
         health = store.health("route:" + route.id)
         kind_health = store.health("route:" + route.id + ":kind:" + task.kind)
         provider_health = store.health("provider:" + route.failure_domain)
+        source_health = store.health("source:" + route.source)
         route_availability = store.availability("route:" + route.id)
         provider_availability = store.availability("provider:" + route.failure_domain)
         source_availability = store.availability("source:" + route.source)
@@ -34,6 +45,8 @@ def rank_routes(task, routes, ledger, store, inflight=None, excluded=None, remai
             reasons.append("disabled_or_no_auth_hint")
         if route.id in excluded:
             reasons.append("already_attempted")
+        if task.allowed_routes is not None and route.id not in task.allowed_routes:
+            reasons.append("outside_task_route_pool")
         if task.needs_web and "web" not in route.capabilities:
             reasons.append("web_not_supported")
         if route.profile.get("allowed_kinds") is not None and task.kind not in route.profile["allowed_kinds"]:
@@ -43,7 +56,7 @@ def rank_routes(task, routes, ledger, store, inflight=None, excluded=None, remai
             reasons.append("context_too_large")
         if max(health["cooldown_until"], provider_health["cooldown_until"]) > now_ms():
             reasons.append("circuit_open")
-        if health.get("verification_required") or provider_health.get("verification_required"):
+        if health.get("verification_required") or provider_health.get("verification_required") or source_health.get("verification_required"):
             reasons.append("recovery_verification_required")
         if quota["known"] and quota["remaining_percent"] <= 0:
             reasons.append("fresh_quota_exhausted")
@@ -79,7 +92,7 @@ def rank_routes(task, routes, ledger, store, inflight=None, excluded=None, remai
                 latency_scale = max(.25, bounded_cost / observed_cost)
                 latency_adjustment = "smaller_output_ceiling_after_output_dominated_history"
         eta *= latency_scale
-        queue_cost = inflight.get(route.source, 0) * eta / max(1, route.max_parallel)
+        queue_cost = inflight.get(route.source, 0) * eta / max(1, getattr(task, "_source_parallel", {}).get(route.source, route.max_parallel))
         eta += queue_cost
         effective_window = remaining_s
         if task.timeout_mode == "activity" and route.catalog_metadata.get("activity_observability") == "final_only":
@@ -111,6 +124,12 @@ def rank_routes(task, routes, ledger, store, inflight=None, excluded=None, remai
         fit = 8 if task.kind in route.profile.get("preferred_kinds", []) else 0
         penalty = diversity.get(route.failure_domain, 0) * 7
         score = quality_component + terminal_component + speed_component + success_rate * 12 + fit + confidence - penalty - token_penalty
+        if task.allowed_routes is not None:
+            score += 1000 * (len(task.allowed_routes)-task.allowed_routes.index(route.id))
+        elif selection.get("mode") == "directed":
+            # Pool order is deliberate; still subject to every hard gate above.
+            index = next(i for i, r in enumerate(selection["pool"]) if r["route_id"] == route.id)
+            score += 1000 * (len(selection["pool"]) - index)
         if quota["known"]:
             score += quota["remaining_percent"] * .03
         else:

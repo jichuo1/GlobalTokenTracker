@@ -32,3 +32,5 @@
 "%lld–%lld of %lld" = "%lld–%lld of %lld";
 "Previous" = "Previous";
 "Next" = "Next";
+
+"Scheduling" = "Scheduling";

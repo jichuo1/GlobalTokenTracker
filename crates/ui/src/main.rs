@@ -16,6 +16,7 @@ mod gpu_slide;
 mod heat;
 mod i18n;
 mod pages;
+mod scheduling;
 mod theme;
 mod tray;
 mod trend;
@@ -115,11 +116,13 @@ pub enum Page {
     Quota,
     Devices,
     Sources,
+    Scheduling,
     Prices,
     Settings,
 }
 
 pub struct Shell {
+    scheduler: scheduling::State,
     snap: Option<Snapshot>,
     /// Sources / prices tables — independent of `snap`, see `PageData`.
     sources: Option<Vec<SourceHealth>>,
@@ -281,6 +284,7 @@ pub enum MenuKind {
 }
 
 pub enum Msg {
+    Scheduling(scheduling::Action),
     Loaded(LoadOutcome),
     Failed(String),
     Tick(u64),
@@ -824,10 +828,22 @@ impl Component for Shell {
             Ok("quota") => Page::Quota,
             Ok("devices") => Page::Devices,
             Ok("sources") => Page::Sources,
+            Ok("scheduling") => Page::Scheduling,
             Ok("prices") => Page::Prices,
             Ok("settings") => Page::Settings,
             _ => Page::Overview,
         };
+        if page == Page::Scheduling {
+            context.spawn_background(|_| {
+                Msg::Scheduling(scheduling::Action::Received(
+                    globaltokentracker_core::scheduler::call(
+                        "router_scheduling",
+                        serde_json::json!({}),
+                    )
+                    .map_err(|e| e.to_string()),
+                ))
+            });
+        }
         // force_prices=true: one refresh attempt on every launch (per spec:
         // 每次打开软件自动获取一次), off the UI thread. Subsequent scans only
         // refresh when >12h stale.
@@ -902,6 +918,7 @@ impl Component for Shell {
             ..Default::default()
         };
         Self {
+            scheduler: scheduling::State::default(),
             snap: None,
             sources: None,
             prices: None,
@@ -982,6 +999,7 @@ impl Component for Shell {
 
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
+            Msg::Scheduling(action) => self.scheduler.update(action, context),
             Msg::Loaded(outcome) => {
                 let is_real_scan = match &outcome {
                     LoadOutcome::Fresh(s) => s.scanned,
@@ -1942,6 +1960,7 @@ impl Component for Shell {
                     Some("配额" | "Quota" | "quota") => Page::Quota,
                     Some("设备" | "Devices" | "devices") => Page::Devices,
                     Some("数据源" | "Sources" | "sources") => Page::Sources,
+                    Some("调度" | "Scheduling" | "scheduling") => Page::Scheduling,
                     Some("价格" | "Prices" | "prices") => Page::Prices,
                     Some("设置" | "Settings" | "settings") => Page::Settings,
                     Some("总览" | "Overview" | "overview") => Page::Overview,
@@ -1961,6 +1980,9 @@ impl Component for Shell {
                     match self.page {
                         Page::Devices => self.load_devices(context),
                         Page::Settings => self.load_viewers(context),
+                        Page::Scheduling => {
+                            self.scheduler.update(scheduling::Action::Load, context);
+                        }
                         _ => {}
                     }
                 }
@@ -2248,6 +2270,7 @@ impl Component for Shell {
                     KeyedView::new("quota", item(t!("配额"), Page::Quota)),
                     KeyedView::new("devices", item(t!("设备"), Page::Devices)),
                     KeyedView::new("sources", item(t!("数据源"), Page::Sources)),
+                    KeyedView::new("scheduling", item(t!("调度"), Page::Scheduling)),
                     KeyedView::new("prices", item(t!("价格"), Page::Prices)),
                     KeyedView::new("settings", item(t!("设置"), Page::Settings)),
                 ],
@@ -2547,6 +2570,7 @@ impl Shell {
                 },
             ),
             Page::Sources => sources_page(self.sources.as_deref(), theme),
+            Page::Scheduling => scheduling::page(&self.scheduler, theme, context),
             Page::Prices => prices_page(
                 self.prices.as_ref(),
                 theme,
@@ -2606,7 +2630,14 @@ impl Shell {
         if page == self.page {
             self.block_count.set(blocks.len());
         }
-        pages::frame_page(
+        let frame = if page == Page::Scheduling && self.scheduler.is_workspace() {
+            pages::canvas_frame_page
+        } else if page == Page::Scheduling {
+            pages::bounded_frame_page
+        } else {
+            pages::frame_page
+        };
+        frame(
             &self.theme,
             self.page_gap(page),
             blocks,
@@ -3121,9 +3152,20 @@ fn ensure_single_instance() -> Option<SingleInstanceGuard> {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
-    let name: Vec<u16> = "Local\\GlobalTokenTracker_SingleInstance_Mutex\0"
-        .encode_utf16()
-        .collect();
+    let test_instance = if cfg!(debug_assertions) {
+        std::env::var("GTT_UI_TEST_INSTANCE").ok().filter(|s| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+    } else {
+        None
+    };
+    let mutex_name = test_instance.map_or_else(
+        || "Local\\GlobalTokenTracker_SingleInstance_Mutex".to_owned(),
+        |id| format!("Local\\GlobalTokenTracker_Test_{id}"),
+    );
+    let name: Vec<u16> = format!("{mutex_name}\0").encode_utf16().collect();
 
     unsafe {
         let handle = CreateMutexW(std::ptr::null(), 1, name.as_ptr());

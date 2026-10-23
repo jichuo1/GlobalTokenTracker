@@ -17,6 +17,7 @@ pub mod peer;
 pub mod power;
 pub mod pricing;
 pub mod quota;
+pub mod scheduler;
 pub mod store;
 pub mod sync;
 pub mod trend;

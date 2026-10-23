@@ -24,6 +24,22 @@ def clean_usage(value):
     return {k: count(v) for k, v in value.items() if k in TOKEN_KEYS and count(v) is not None} if isinstance(value, dict) else {}
 
 
+def positive_usage(value):
+    """Native boot-zero placeholders do not prove zero generation usage."""
+    if isinstance(value, dict):
+        value = dict(value)
+        for key, dimensions in [("inputTokens", {"cacheRead": "cacheReadTokens", "cacheWrite": "cacheWriteTokens"}),
+                                ("outputTokens", {"reasoning": "reasoningTokens"})]:
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                value[key] = nested.get("total")
+                for native, target in dimensions.items():
+                    if target not in value and native in nested:
+                        value[target] = nested[native]
+    cleaned = clean_usage(value)
+    return cleaned if any(v > 0 for v in cleaned.values()) else {}
+
+
 def total_tokens(value):
     usage = clean_usage(value)
     explicit = [usage[k] for k in ("totalTokens", "total_tokens") if k in usage]
@@ -58,6 +74,8 @@ def normalize(value, total=None):
 
 
 def project_attempt(job_id, index, attempt, results):
+    if attempt.get("generation_not_started") is True:
+        return None
     if attempt.get("state") not in {"succeeded", "failed", "running"}:
         return None
     if attempt.get("state")=="running" and attempt.get("token_measurement")!="reported":

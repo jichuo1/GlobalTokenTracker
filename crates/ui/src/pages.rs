@@ -712,6 +712,38 @@ pub fn frame_page(theme: &Theme, gap: f64, blocks: Vec<View>, slide: &Slide) -> 
     page_frame(theme, vstack(gap, w::slide_children(blocks, slide)))
 }
 
+/// The workflow canvas measures against the viewport instead of its node extent.
+pub fn bounded_frame_page(theme: &Theme, gap: f64, blocks: Vec<View>, slide: &Slide) -> View {
+    ScrollViewer::new()
+        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+        .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+        .content(
+            Border::new()
+                .padding(Thickness::xy(24.0, 16.0))
+                .background(
+                    theme
+                        .page_bg
+                        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground)),
+                )
+                .content(vstack(gap, w::slide_children(blocks, slide))),
+        )
+}
+
+pub fn canvas_frame_page(theme: &Theme, _gap: f64, blocks: Vec<View>, slide: &Slide) -> View {
+    Border::new()
+        .padding(Thickness::xy(16.0, 12.0))
+        .background(
+            theme
+                .page_bg
+                .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground)),
+        )
+        .content(
+            Grid::new()
+                .rows([GridLength::STAR])
+                .keyed_children(keyed(w::slide_children(blocks, slide))),
+        )
+}
+
 // ---------------------------------------------------------------- overview
 
 fn edit_chrome(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContext<Shell>) -> View {

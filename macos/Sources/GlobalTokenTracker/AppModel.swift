@@ -30,7 +30,7 @@ enum UpdateState: Equatable {
 }
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
-    case overview, speed, detail, quota, devices, sources, prices, settings
+    case overview, speed, detail, quota, devices, sources, scheduling, prices, settings
     var id: String { rawValue }
 
     var title: LocalizedStringKey {
@@ -41,6 +41,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .quota: "Quota"
         case .devices: "Devices"
         case .sources: "Sources"
+        case .scheduling: "Scheduling"
         case .prices: "Prices"
         case .settings: "Settings"
         }
@@ -59,6 +60,7 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .quota: "gauge.with.dots.needle.67percent"
         case .devices: "macbook.and.iphone"
         case .sources: "externaldrive.connected.to.line.below"
+        case .scheduling: "point.3.connected.trianglepath.dotted"
         case .prices: "dollarsign.circle"
         case .settings: "gearshape"
         }

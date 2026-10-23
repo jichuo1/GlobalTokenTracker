@@ -735,6 +735,48 @@ pub extern "C" fn gtt_external_interface(set: i32) -> *mut c_char {
     guarded(|| external(if set < 0 { None } else { Some(set != 0) }))
 }
 
+/// Local scheduling UI bridge; shells call it on a background queue.
+/// # Safety
+/// `req_json` is NULL or a valid NUL-terminated UTF-8 JSON string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_scheduler(req_json: *const c_char) -> *mut c_char {
+    guarded(|| {
+        let request: Value = arg(req_json)?;
+        let method = request["method"]
+            .as_str()
+            .ok_or("Missing scheduling method")?;
+        if method == "validate_graph" {
+            let graph: globaltokentracker_core::scheduler::Workflow =
+                serde_json::from_value(request["params"].clone()).map_err(|e| e.to_string())?;
+            return graph
+                .order()
+                .map(|order| json!({"order":order}))
+                .map_err(|e| e.to_string());
+        }
+        if method == "router_start" {
+            globaltokentracker_core::scheduler::ensure_running().map_err(|e| e.to_string())?;
+            return globaltokentracker_core::scheduler::call(
+                "router_scheduling",
+                json!({"action":"refresh"}),
+            )
+            .map_err(|e| e.to_string());
+        }
+        if !matches!(
+            method,
+            "router_collect"
+                | "router_scheduling"
+                | "router_workflow_plan"
+                | "router_workflow_submit"
+                | "router_workflow_status"
+                | "router_workflow_cancel"
+        ) {
+            return Err("Unknown scheduling method".into());
+        }
+        globaltokentracker_core::scheduler::call(method, request["params"].clone())
+            .map_err(|e| e.to_string())
+    })
+}
+
 /// Display-currency status: `{"display","usd_to","source","fetched_at_ms","stale"}`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gtt_fx_status() -> *mut c_char {

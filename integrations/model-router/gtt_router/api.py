@@ -43,6 +43,14 @@ def _reason(params):
     reject_secrets(reason)
 
 
+def dispatch_management(service, method, params):
+    # This authenticated loopback UI endpoint does not expose model execution.
+    if method != "router_scheduling":
+        raise ValueError("Unknown local management method")
+    params = _group_args(params or {}, {"action", "value", "expected_revision", "route_id", "workflow_id", "luna_supervision"}, set())
+    return service.scheduling.control(**params)
+
+
 def dispatch(service, method, params):
     service.require_external_interface()
     params = params or {}
@@ -50,6 +58,16 @@ def dispatch(service, method, params):
         raise ValueError("Arguments must be an object")
     if method == "router_inventory":
         return service.inventory(**params)
+    if method == "router_scheduling":
+        return dispatch_management(service, method, params)
+    if method in {"router_workflow_plan", "router_workflow_submit"}:
+        _group_args(params, {"definition", "input_text", "workflow_id", "request_id", "acknowledge_unknown_risk"} if method.endswith("submit") else {"definition", "workflow_id"}, {"definition"})
+        target = service.scheduling.submit if method.endswith("submit") else service.scheduling.plan
+        return target(**params)
+    if method in {"router_workflow_status", "router_workflow_cancel"}:
+        _group_args(params, {"run_id"}, {"run_id"})
+        target = service.scheduling.cancel if method.endswith("cancel") else service.scheduling.status
+        return target(**params)
     if method == "router_plan":
         return service.plan(params["task"])
     if method == "router_recheck":

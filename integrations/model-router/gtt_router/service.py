@@ -114,6 +114,8 @@ class RouterService:
         self.state_dir = Path(config["state_dir"]).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.store = StateStore(self.state_dir / "router-state.sqlite")
+        from .scheduling import Scheduling
+        self.scheduling = Scheduling(self)
         self.catalog = catalog or Catalog(config)
         self.adapters = dict(ADAPTERS if adapters is None else adapters)
         self.limits = config.get("limits", {})
@@ -130,20 +132,28 @@ class RouterService:
         self.groups = ResearchGroups(self)
         from .coordination import Coordination
         self.coordination = Coordination(self)
-        self.coordinators = ThreadPoolExecutor(max_workers=int(self.limits.get("max_active_jobs", 4)), thread_name_prefix="gtt-job")
+        self.call_profile()
+        self.applied_coordinator_threads = int(self.limits.get("max_active_jobs", 4))
+        # Executor threads are lazy. Only the configured number of dispatch
+        # loops is submitted; changing it never cancels paid native requests.
+        self.coordinators = ThreadPoolExecutor(max_workers=64, thread_name_prefix="gtt-job")
         for _ in range(int(self.limits.get("max_active_jobs", 4))):
             self.coordinators.submit(self._dispatch_loop)
         from .recovery import RecoveryController
         self.recovery = RecoveryController(self)
+        self.call_profile()
 
     def record_failure(self, route, failure):
         from .recovery import CONNECTIVITY_ERRORS
+        from .store import SOURCE_CONTRACT_ERRORS
         cooldown = failure.retry_after_s if failure.retry_after_s is not None else 30
         delay = self.config.get("recovery", {}).get("initial_delay_s", 1800)
         penalty = .16 if failure.code in CONNECTIVITY_ERRORS else .06
         self.store.failure("route:" + route.id, failure.code, cooldown, penalty, delay)
         if failure.scope == "provider":
             self.store.failure("provider:" + route.failure_domain, failure.code, cooldown, .12, delay)
+        if failure.scope == "source" and failure.code in SOURCE_CONTRACT_ERRORS:
+            self.store.failure("source:" + route.source, failure.code, cooldown, .04, delay)
         if failure.code in {"timeout", "provider_request_failed", "adapter_error"}:
             # One failed API provider must not make the whole coding application
             # unusable; software-level penalties are deliberately gentler.
@@ -255,14 +265,28 @@ class RouterService:
             raise DispatchBlocked("luna_supervisor_required",
                 "Start a real Luna monitor and register role=supervisor in this workflow before dispatch")
 
-    def require_dispatch(self, workflow_id, *, runtime=False):
+    def require_dispatch(self, workflow_id, *, runtime=False, route=None, task=None):
         try:
+            cancellation = getattr(task, "_cancellation_event", None)
+            if cancellation is not None and cancellation.is_set():
+                raise DispatchBlocked("workflow_cancelled")
             self.require_external_interface()
-            self.require_supervisor(workflow_id)
+            self.require_scheduling(route)
+            if task is None or not getattr(task, "_workflow_supervision_opt_out", False):
+                self.require_supervisor(workflow_id)
         except DispatchBlocked as error:
             if runtime:
                 raise WorkerFailure(error.code, str(error), scope="task") from None
             raise
+
+    def require_scheduling(self, route=None):
+        from .scheduling import settings, route_reason
+        value = settings(self.store, selector_only=True)
+        reason = route_reason(value, route) if route is not None else (None if value["enabled"] else "scheduling_disabled")
+        if reason is None and route is None and value["mode"] == "directed" and not any(r["expires_at"] > now_ms() for r in value["pool"]):
+            reason = "directed_pool_expired" if value["pool"] else "directed_pool_empty"
+        if reason:
+            raise DispatchBlocked(reason)
 
     def sync_codex_agents(self, owner, agents, lease_s=120):
         if not isinstance(owner, str) or not owner or len(owner) > 200:
@@ -293,6 +317,9 @@ class RouterService:
         return [a for a in self._active_codex() if a.get("role") != "supervisor" and task.work_key and a["workflow_id"] == task.workflow_id and a["work_key"] == task.work_key]
 
     def _fallback(self, job, task, index, failure, verifier=False):
+        from .scheduling import settings
+        if task.allowed_routes is not None or settings(self.store, selector_only=True)["mode"] == "directed":
+            return {"worker": index, "ok": False, "verifier": verifier, "error": failure.public(), "selection_mode": "directed"}
         return {"worker": index, "ok": False, "verifier": verifier, "error": failure.public(),
                 "codex_fallback": {"recommended_model": self.config.get("codex_fallback_model", "gpt-6-luna"),
                                    "reasoning_effort": "high" if task.kind in {"code_review", "logic_check", "cross_check"} else "medium",
@@ -328,6 +355,7 @@ class RouterService:
         for route in output["routes"]:
             route["health"] = self.store.health("route:" + route["route_id"])
             route["provider_health"] = self.store.health("provider:" + route["failure_domain"])
+            route["source_health"] = self.store.health("source:" + route["source"])
             route["availability"] = self.store.availability("route:" + route["route_id"])
             route["provider_availability"] = self.store.availability("provider:" + route["failure_domain"])
             route["source_availability"] = self.store.availability("source:" + route["source"])
@@ -347,7 +375,7 @@ class RouterService:
             compact[-1]["availability_weight"] = round(route["availability"]["weight"] * route["provider_availability"]["weight"] * route["source_availability"]["weight"], 4)
             due = [route[k]["next_probe_at"] for k in ["availability", "provider_availability", "source_availability"] if route[k]["next_probe_at"]]
             compact[-1]["next_probe_at"] = min(due) if due else 0
-            compact[-1]["verification_required"] = bool(route["health"].get("verification_required") or route["provider_health"].get("verification_required"))
+            compact[-1]["verification_required"] = any(route[k].get("verification_required") for k in ["health", "provider_health", "source_health"])
             compact[-1]["last_verified_at"] = route["health"].get("last_verified_at", 0)
             compact[-1]["availability_state"] = "verification_required" if compact[-1]["verification_required"] else ("cooling_down" if compact[-1]["circuit_until"] > now_ms() else ("verified" if compact[-1]["last_verified_at"] else "unverified"))
         return {"refreshed_at": output["refreshed_at"], "routes": compact,
@@ -361,7 +389,7 @@ class RouterService:
                 "availability_note": output["availability_note"], "external_first": True}
 
     def plan(self, data):
-        task = Task.parse(data, self.limits.get("max_context_chars", 64000))
+        task = self.parse_task(data)
         self.ensure_catalog()
         with self.capacity:
             covered = self._covered(task)
@@ -369,10 +397,65 @@ class RouterService:
                 return {"candidates": [], "covered_by_codex": covered, "reason": "work_already_covered", "external_first": True}
             candidates, rejected = rank_routes(task, self.catalog.routes, self.catalog.ledger, self.store, self.inflight,
                                                preferences=self.preference_for(task))
+        excluded_count = 0
+        if task.allowed_routes is not None:
+            scoped = [r for r in rejected if r["route_id"] in task.allowed_routes]
+            excluded_count = len(rejected) - len(scoped)
+            rejected = scoped
         result = public_plan(candidates, rejected)
+        if excluded_count:
+            result["outside_allowed_routes_count"] = excluded_count
         result.update({"active_codex_agents": len(self._active_codex()), "external_first": True, "warnings": routing_warnings(task)})
         result["preferences"] = self.preference_view(task)
+        result["effective_task"] = task.public()
+        result["call_profile"] = self.call_profile()
         return result
+
+    def call_profile(self):
+        from .scheduling import settings
+        from .profiles import resolve_unchecked, PRESETS
+        value = settings(self.store, selector_only=True)
+        profile = resolve_unchecked(value["call_profile"])
+        if "max_context_chars" not in value["call_profile"].get("limits", {}) and "max_context_chars" not in PRESETS[profile["preset"]].get("limits", {}):
+            profile["limits"]["max_context_chars"] = self.config.get("limits", {}).get("max_context_chars", 64000)
+        has_limit_override = any(profile[k] is not None for k in ["parallel","combined_parallel","coordinator_threads"]) or bool(profile["source_parallel"]) or "max_context_chars" in value["call_profile"].get("limits",{}) or "max_context_chars" in PRESETS[profile["preset"]].get("limits",{})
+        limits = dict(self.config.get("limits", {})) if has_limit_override else self.config.setdefault("limits",{})
+        if profile["parallel"] is not None:
+            limits["global_parallel"] = profile["parallel"]
+        if profile["combined_parallel"] is not None:
+            limits["combined_parallel"] = profile["combined_parallel"]
+        wanted_threads = profile["coordinator_threads"] or limits.get("max_active_jobs", 4)
+        if hasattr(self, "coordinators") and wanted_threads != self.applied_coordinator_threads:
+            with self.capacity:
+                if not self.stopping:
+                    difference = wanted_threads - self.applied_coordinator_threads
+                    if difference > 0:
+                        for _ in range(difference):
+                            self.coordinators.submit(self._dispatch_loop)
+                    else:
+                        for _ in range(-difference):
+                            self.pending_jobs.put((float("-inf"), next(self.sequence), None))
+                    self.applied_coordinator_threads = wanted_threads
+        limits["max_active_jobs"] = getattr(self, "applied_coordinator_threads", wanted_threads)
+        profile["coordinator_threads_applied"] = limits["max_active_jobs"]
+        profile["restart_required"] = wanted_threads != limits["max_active_jobs"]
+        limits["max_context_chars"] = profile["limits"]["max_context_chars"]
+        limits["source_parallel"] = limits.get("source_parallel", {}) | profile["source_parallel"]
+        self.limits = limits
+        profile["recovery"] = self.config.get("recovery", {}) | profile["recovery"] if profile["recovery"] else self.config.setdefault("recovery",{})
+        if hasattr(self, "recovery"):
+            self.recovery.configure(profile["recovery"])
+        return profile
+
+    def parse_task(self, data):
+        if not isinstance(data, dict):
+            raise ValueError("Task must be an object")
+        profile = self.call_profile()
+        merged = profile["defaults"].get("common", {}) | profile["defaults"].get(data.get("kind"), {}) | data
+        task = Task.parse(merged, runtime_limits=profile["limits"])
+        task._native_options = profile["source_options"]
+        task._source_parallel = profile["source_parallel"]
+        return task
 
     def _save(self, job):
         with job.changed:
@@ -380,11 +463,14 @@ class RouterService:
             self.coordination.on_save(job)
             job.changed.notify_all()
 
-    def submit(self, data):
-        task = Task.parse(data, self.limits.get("max_context_chars", 64000))
-        self.require_dispatch(task.workflow_id)
+    def submit(self, data, *, _supervision_required=True, _cancellation_event=None):
+        task = self.parse_task(data)
+        task._cancellation_event = _cancellation_event
+        task._workflow_supervision_opt_out = not _supervision_required
+        self.require_dispatch(task.workflow_id, task=task)
         self.ensure_catalog()
         with self.capacity:
+            self.require_dispatch(task.workflow_id, task=task)
             if self.stopping:
                 raise ValueError("Coordinator is stopping")
             covered = self._covered(task)
@@ -424,7 +510,7 @@ class RouterService:
         waiting_reason = "queue_deadline"
         with self.capacity:
             while True:
-                self.require_dispatch(task.workflow_id, runtime=True)
+                self.require_dispatch(task.workflow_id, runtime=True, task=task)
                 if job.cancel.is_set() or self.stopping:
                     raise WorkerFailure("cancelled")
                 if self._covered(task):
@@ -456,6 +542,7 @@ class RouterService:
                 for candidate in candidates:
                     route = candidate["route"]
                     source_limit = self.limits.get("source_parallel", {}).get(route.source, route.max_parallel)
+                    provider_limit = getattr(task, "_source_parallel", {}).get(route.source, route.max_parallel)
                     combined = self.total_inflight + len(self._active_codex())
                     with job.changed:
                         if job.attempt_count >= job.task.max_attempts:
@@ -501,7 +588,7 @@ class RouterService:
                             if self.total_inflight >= global_limit - reserved:
                                 capacity_waiting = True
                                 continue
-                        if self.total_inflight >= self.limits.get("global_parallel", 4) or combined >= self.limits.get("combined_parallel", 6) or self.inflight.get(route.source, 0) >= source_limit or self.inflight.get("provider:" + route.failure_domain, 0) >= route.max_parallel:
+                        if self.total_inflight >= self.limits.get("global_parallel", 4) or combined >= self.limits.get("combined_parallel", 6) or self.inflight.get(route.source, 0) >= source_limit or self.inflight.get("provider:" + route.failure_domain, 0) >= provider_limit:
                             capacity_waiting = True
                             continue
                         job.tokens_reserved += estimated_next
@@ -544,13 +631,19 @@ class RouterService:
             self.capacity.notify_all()
 
     def _worker(self, job, task, index, deadline, verifier_context=None):
+        task = copy.copy(task)
+        if not hasattr(task, "_runtime_limits"):
+            profile = self.call_profile()
+            task._runtime_limits = profile["limits"]
+            task._native_options = profile["source_options"]
+            task._source_parallel = profile["source_parallel"]
         excluded = set(getattr(job, "blocked_routes", ())) | {r for r,until in getattr(job,"avoid_until",{}).items() if until>now_ms()}
         last_error = None
         prompt = make_prompt(task, index, verifier_context)
         local_attempts = 0
         enlarged_routes = set()
         while True:
-            if local_attempts >= task.max_attempts:
+            if local_attempts >= min(task.max_attempts, task._runtime_limits["max_attempts"]):
                 return {"worker": index, "ok": False, "error": (last_error or WorkerFailure("attempt_budget_exhausted")).public(),
                         "verifier": verifier_context is not None}
             try:
@@ -591,12 +684,15 @@ class RouterService:
                 remaining = max(0, deadline - time.monotonic())
                 attempt_deadline -= min(60, remaining * .2)
             attempt["attempt_deadline_at"] = now_ms() + int(max(0, attempt_deadline - time.monotonic()) * 1000)
-            first_window = task.ttft_s or min(task.deadline_s, 900 if getattr(job, "research_group", False) else task.deadline_s)
+            first_window = task.ttft_s or min(task.deadline_s, task._runtime_limits["max_deadline_s"] if getattr(job, "research_group", False) else task.deadline_s)
             context_deadline = attempt_deadline if task.timeout_mode == "hard" else min(attempt_deadline, time.monotonic() + first_window)
             context = ExecutionContext(job.cancel, context_deadline, workspace, progress,
                                        timeout_mode=task.timeout_mode, hard_deadline=attempt_deadline,
                                        ttft_s=first_window, idle_s=task.idle_s, stall_grace_s=task.stall_grace_s)
-            context.max_protocol_frame_bytes = min(16 * 1024 * 1024, max(2 * 1024 * 1024, decision["effective_output_tokens"] * 16, task.report_max_chars * 4))
+            call_limits = getattr(task, "_runtime_limits", {})
+            context.protocol_frame_limit = call_limits.get("max_protocol_frame_bytes", 16777216)
+            context.max_protocol_buffer_bytes = call_limits.get("max_protocol_buffer_bytes", 67108864)
+            context.max_protocol_frame_bytes = min(context.protocol_frame_limit, max(2 * 1024 * 1024, decision["effective_output_tokens"] * 16, task.report_max_chars * 4))
             attempt["timeout_mode"] = task.timeout_mode
             attempt["activity_observability"] = route.catalog_metadata.get("activity_observability", "unknown")
             charged = False
@@ -626,14 +722,21 @@ class RouterService:
                     raise WorkerFailure("adapter_not_registered")
                 execution_task = replace(task, max_output_tokens=decision["effective_output_tokens"])
                 execution_task._research_group = getattr(task, "_research_group", False)
-                self.require_dispatch(task.workflow_id, runtime=True)
+                self.require_dispatch(task.workflow_id, runtime=True, task=task)
                 with job.changed:
                     job.attempts.append(attempt)
                 self._save(job)
                 progress({"phase": "waiting", "activity": context.public_activity()})
-                self.require_dispatch(task.workflow_id, runtime=True)
+                self.require_dispatch(task.workflow_id, runtime=True, route=route, task=task)
                 request_started = True
-                raw = adapter(route, prompt, execution_task, context)
+                execution_route = route
+                options = getattr(task, "_native_options", {}).get(route.source, {})
+                if options or route.source in getattr(task, "_source_parallel", {}):
+                    execution_route = copy.copy(route)
+                    execution_route.runtime = dict(route.runtime) | {"gtt_call_options": options}
+                    execution_route.max_parallel = getattr(task, "_source_parallel", {}).get(route.source, route.max_parallel)
+                attempt["call_policy"] = {"limits": task._runtime_limits, "source_options": options}
+                raw = adapter(execution_route, prompt, execution_task, context)
                 attempt.update({k: raw[k] for k in ("native_dedup_key", "native_backed") if k in raw})
                 if isinstance(raw.get("actual_selection"), dict):
                     attempt["actual_model"] = raw["actual_selection"].get("model", route.model)
@@ -662,7 +765,11 @@ class RouterService:
                         job.progress.pop(str(index), None)
                     return {"worker": index, "ok": False, "error": failure.public(), "verifier": verifier_context is not None}
                 attempt.update({k: failure.metering[k] for k in ("native_dedup_key", "native_backed", "actual_model") if k in failure.metering})
-                if failure.usage or failure.code not in {"auth_failed", "model_unavailable", "cancelled"}:
+                if failure.metering.get("unknown_paid_outcome") is True:
+                    attempt["unknown_paid_outcome"] = True
+                if failure.metering.get("generation_not_started") is True:
+                    attempt.update({"generation_not_started": True, "tokens_charged": 0, "token_measurement": "not_started", "usage": {}})
+                elif failure.usage or failure.code not in {"auth_failed", "model_unavailable", "cancelled"}:
                     charge(failure.usage)
                 last_error = failure
                 if failure.scope == "source":
@@ -681,8 +788,12 @@ class RouterService:
                 if failure.code not in {"cancelled", "timeout"} or not job.cancel.is_set():
                     self.record_failure(route, failure)
                 self._save(job)
+                if failure.metering.get("unknown_paid_outcome") is True and (getattr(task,"_cancellation_event",None) is not None or getattr(task,"_slice",None)):
+                    return {"worker":index,"ok":False,"error":failure.public(),"unknown_paid_outcome":True,"verifier":verifier_context is not None}
                 if failure.code == "cancelled" or not task.allow_fallback:
                     return {"worker": index, "ok": False, "error": failure.public(), "verifier": verifier_context is not None}
+                if failure.code == "timeout" and getattr(task,"_cancellation_event",None) is not None:
+                    return {"worker":index,"ok":False,"error":failure.public(),"verifier":verifier_context is not None}
                 record = getattr(task, "_slice", None)
                 if (record and failure.code == "incomplete_output" and failure.details.get("contract_reason") == "incomplete_json"
                         and failure.details.get("report_chars", 0) > 0 and record["end"] - record["start"] >= 2 * job.request.slice_min_chars):
@@ -694,12 +805,13 @@ class RouterService:
                         return {"worker": index, "ok": False, "error": failure.public(), "verifier": verifier_context is not None}
                     failed_ceiling = decision["effective_output_tokens"]
                     minimum = failed_ceiling + 1
-                    if minimum > MAX_OUTPUT_TOKENS or task.output_mode == "fixed" and minimum > task.max_output_tokens:
+                    output_cap = getattr(task, "_runtime_limits", {}).get("max_output_tokens", MAX_OUTPUT_TOKENS)
+                    if minimum > output_cap or task.output_mode == "fixed" and minimum > task.max_output_tokens:
                         return {"worker": index, "ok": False, "error": failure.public(), "verifier": verifier_context is not None,
                                 "recovery_stopped": "caller_or_coordinator_output_ceiling"}
                     task = copy.copy(task)
                     task._output_floor = minimum
-                    task._output_target = min(MAX_OUTPUT_TOKENS, failed_ceiling * 2)
+                    task._output_target = min(output_cap, failed_ceiling * 2)
                     if record and getattr(job, "slice_state", None):
                         with job.changed:
                             for saved in job.slice_state["records"]:
@@ -751,15 +863,17 @@ class RouterService:
                 reports = [{"worker": r["worker"], "model": r["route"]["model"], "source": r["route"]["source"], "content": r["content"]} for r in good]
                 verification_task = Task(kind="cross_check", prompt="Compare the reports against the original request: " + job.task.prompt,
                                          workflow_id=job.task.workflow_id, work_key=job.task.work_key,
-                                         context=job.task.context, deadline_s=max(5, min(job.task.deadline_s, 900, job.deadline - time.monotonic())),
+                                         context=job.task.context, deadline_s=max(5, min(job.task.deadline_s, getattr(job.task,"_runtime_limits",{}).get("max_deadline_s",900), job.deadline - time.monotonic())),
                                          max_output_tokens=job.task.max_output_tokens, min_quality=job.task.min_quality,
                                          output_mode=job.task.output_mode, queue_wait_s=job.task.queue_wait_s,
                                          preference_scope=job.task.preference_scope, routing_strategy=job.task.routing_strategy,
-                                         allow_fallback=job.task.allow_fallback, preferred_route=job.task.preferred_route,
+                                         allow_fallback=job.task.allow_fallback, preferred_route=job.task.preferred_route, allowed_routes=job.task.allowed_routes,
                                          timeout_mode=job.task.timeout_mode, hard_deadline_s=job.task.hard_deadline_s,
                                          ttft_s=job.task.ttft_s, idle_s=job.task.idle_s, stall_grace_s=job.task.stall_grace_s,
                                          price_weight=job.task.price_weight, prefer_free=job.task.prefer_free,
-                                         prefer_new_models=job.task.prefer_new_models)
+                                         prefer_new_models=job.task.prefer_new_models, report_max_chars=job.task.report_max_chars)
+                for field in ["_runtime_limits","_native_options","_source_parallel","_workflow_supervision_opt_out","_cancellation_event"]:
+                    if hasattr(job.task,field):setattr(verification_task,field,getattr(job.task,field))
                 verification_task._queue_wait_explicit = getattr(job.task, "_queue_wait_explicit", False)
                 if len(json.dumps(reports, ensure_ascii=False)) + len(verification_task.context) > self.limits.get("max_context_chars", 64000):
                     verifier = {"worker": job.task.fanout, "ok": False, "verifier": True,
@@ -900,6 +1014,7 @@ class RouterService:
         return self.collect(job_id)
 
     def shutdown(self):
+        self.scheduling.shutdown()
         self.recovery.stop()
         with self.capacity:
             self.stopping = True

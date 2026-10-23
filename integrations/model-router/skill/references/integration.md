@@ -16,7 +16,9 @@
 
 模型总输出预算包含思考。最终报告要求 JSON：
 
-单次 `max_output_tokens` 范围为 256–65536。`code_review`/`logic_check`/`cross_check` 未显式指定时为 32768，默认 `deadline_s=600`；其他任务沿用 8192/180。调用方显式字段保持优先。默认总预算按输入、并发和 verifier 预留计算并封顶 200000；这不承诺全部请求一定消耗至上限或一定能在预算内完成。已知模型 `output_limit` 会收紧单次实际请求，并同时用于预约计数；`router_plan` 与 attempt 的 requested/effective_output_tokens 可审计。自定义来源的 model 元数据可提供正整数 `output_limit`，未知上限保持未知，不从上下文窗口猜测。
+单次 `max_output_tokens` 范围为256–524288。逻辑任务默认32768/600秒，其他任务8192/180秒。常规默认总预算封顶200000，显式大输出/native可扩大，普通任务硬上限4000000。已知模型output_limit收紧实际请求及预约；plan/attempt保留requested/effective。未知上限不从上下文窗口猜测。长正文显式report_max_chars为1000–4194304字符，默认120000；该容量同时传给提示词、解析及有界原生帧，不等于实际生成长度。0.3.1通过health的report_capacity_v1声明能力，基础协议仍为2；客户端在新字段派发前检查能力。
+
+显式queue_wait_s优先于legacy external_queue_grace_s接力默认。没有显式值时保留原配置行为；研究组沿组总截止等待。等待不占原生执行预约、不续期模型活动，也不提高全局/来源/provider/scope容量。
 
 ```json
 {
@@ -35,6 +37,10 @@
 `router_sync_codex_agents` 使用调用方实际代理 ID 和范围，默认租约 120 秒。相同 workflow/work_key 避免重复，实施与审阅可用不同用途键。外部满额先找合格外部来源，等待短宽限期后才返回 Luna 建议；明确设置 `allow_fallback=false` 时不改执行源。
 
 ## GTT 桥接与额度
+
+GTT 设置的「外部协同接口」是协同观察与模型调度的共同门禁。共享文件为全局数据目录的 `external-interface.json`，格式 `{"schema_version":1,"enabled":false}`；有效账本旁的同名文件也可收紧权限，全局关闭不能被自定义账本绕过。GTT_DATA_DIR 与旧目录兼容按原生 GTT 的路径规则解析。文件缺失为旧版开启状态；非布尔值、未知字段/版本、重复键、超4096字节或读取异常均拒绝外部调用。GUI 显示错误，保存切换用同目录原子替换；不触碰 UI 其他配置或来源凭证。
+
+所有 MCP/API 业务调用在入口读取共享门禁；普通/组提交、续研、每次预约与实际 adapter 调用前还要求有效 Luna supervisor。关闭后没有 SQLite 回退、新重试或后台恢复探测；已有付费调用不强杀，完成仍正常计量。重新开启只恢复接口可用性，继续调度仍须真实监工及有效租约。开关关闭时只能通过用户本地设置重新开启，外部接口不提供开关写入入口。
 
 `observations.py` 优先调用 `globaltokentracker-cli coordination snapshot` v1，验证版本、时效、类型、范围和作用域后只保留白名单。默认自动定位 Windows 已安装 CLI，也可在本机 `gtt_interface.command` 指定绝对路径参数数组；默认 5 秒超时、512 KiB 输出上限。CLI 缺失、旧版或传输失败可回退 `bridge.py` 的 SQLite `mode=ro/query_only`；`allow_legacy_fallback=false` 可关闭。`router_inventory` 的 `gtt.origin` 显示实际传输和回退原因。有效 unavailable 响应不会被数据库回退覆盖。
 

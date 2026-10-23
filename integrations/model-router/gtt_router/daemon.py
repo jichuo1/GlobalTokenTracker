@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .api import dispatch
+from .api import dispatch, dispatch_management
 from .service import RouterService
 from .processes import background_options
 from . import __version__
@@ -190,6 +190,9 @@ class LocalClient:
 
     def call(self, method, params=None):
         try:
+            if method == "router_scheduling" or method.startswith("router_workflow_"):
+                if "scheduling_v1" not in self.runtime_info().get("features", []):
+                    raise ValueError("resident_feature_missing: scheduling_v1; align the runtime before using visual dispatch")
             if method in CONTRACT_METHODS:
                 health = self.runtime_info()
                 if health.get("runtime_contract_version", 0) != RUNTIME_CONTRACT_VERSION:
@@ -197,7 +200,7 @@ class LocalClient:
                 task = (params or {}).get("task", {})
                 if isinstance(task, dict) and "report_max_chars" in task and "report_capacity_v1" not in health.get("features", []):
                     raise ValueError("resident_feature_missing: installed coordinator does not support report_max_chars; align the runtime version; no task dispatched")
-            return self._request(method, params, timeout=150 if method == "router_recheck" else 30)
+            return self._request(method, params, timeout=150 if method in {"router_recheck", "router_scheduling"} else 30)
         except (OSError, urllib.error.URLError):
             # Submission is never automatically replayed after an ambiguous outcome.
             raise ValueError("Local coordinator unavailable; inspect status before resubmitting") from None
@@ -231,12 +234,12 @@ def serve(config_path):
                 self.respond(403, {"error": "Unauthorized local request"})
             elif self.path == "/health":
                 self.respond(200, {"service": "gtt-model-router", "pid": os.getpid(), "version": __version__,
-                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION, "features": ["report_capacity_v1"]})
+                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION, "features": ["report_capacity_v1", "scheduling_v1", "runtime_limits_v1"]})
             else:
                 self.respond(404, {"error": "Unknown local route"})
 
         def do_POST(self):
-            if not self.authorized() or self.path != "/rpc":
+            if not self.authorized() or self.path not in {"/rpc", "/manage"}:
                 self.respond(403, {"error": "Unauthorized local request"})
                 return
             try:
@@ -245,7 +248,8 @@ def serve(config_path):
                 if not 0 < length <= 16 * 1024 * 1024:
                     raise ValueError("Request size exceeds the coordinator limit")
                 payload = json.loads(self.rfile.read(length))
-                result = dispatch(service, payload["method"], payload.get("params", {}))
+                handler = dispatch_management if self.path == "/manage" else dispatch
+                result = handler(service, payload["method"], payload.get("params", {}))
                 self.respond(200, {"result": result})
             except (ValueError, TypeError, KeyError) as error:
                 self.respond(200, {"error": str(error)[:300]})

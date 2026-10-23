@@ -4,6 +4,8 @@ import json
 import math
 import re
 from .models import DEFAULT_REPORT_CHARS, MAX_REPORT_CHARS as HARD_REPORT_CHARS
+from .profiles import ABS_LIMITS
+HARD_REPORT_CHARS = ABS_LIMITS["max_report_chars"]
 
 MAX_REPORT_CHARS = DEFAULT_REPORT_CHARS
 MAX_ENVELOPE_CHARS = 1000

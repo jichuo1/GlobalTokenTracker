@@ -449,3 +449,5 @@
 "%lld–%lld of %lld" = "第 %lld–%lld 项 / 共 %lld 项";
 "Previous" = "上一页";
 "Next" = "下一页";
+
+"Scheduling" = "调度";

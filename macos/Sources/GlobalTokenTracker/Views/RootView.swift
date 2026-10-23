@@ -288,6 +288,7 @@ struct PageDeck: View {
         case .quota: QuotaView()
         case .devices: DevicesView()
         case .sources: SourcesView()
+        case .scheduling: SchedulingView()
         case .prices: PricesView()
         case .settings: SettingsView()
         }
