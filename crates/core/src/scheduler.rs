@@ -258,14 +258,41 @@ impl Workflow {
         Ok(self.nodes.len() - 1)
     }
 
+    /// Read-only connection preview; never clones prompts or edits the graph.
+    pub fn can_connect(&self, from: usize, to: usize) -> Result<()> {
+        self.order()?;
+        let a = &self.nodes.get(from).context("起始节点不存在")?.id;
+        let b = &self.nodes.get(to).context("目标节点不存在")?.id;
+        if a == b
+            || self.edges.len() >= 4096
+            || self.edges.iter().any(|e| e.from == *a && e.to == *b)
+        {
+            bail!("连线重复、连接自身或超出范围");
+        }
+        let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for edge in &self.edges {
+            outgoing.entry(&edge.from).or_default().push(&edge.to);
+        }
+        let mut pending = vec![b.as_str()];
+        let mut visited = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if id == a {
+                bail!("检测到循环依赖");
+            }
+            if visited.insert(id)
+                && let Some(next) = outgoing.get(id)
+            {
+                pending.extend(next);
+            }
+        }
+        Ok(())
+    }
+
     pub fn connect(&mut self, from: usize, to: usize) -> Result<()> {
+        self.can_connect(from, to)?;
         let a = self.nodes.get(from).context("起始节点不存在")?.id.clone();
         let b = self.nodes.get(to).context("目标节点不存在")?.id.clone();
         self.edges.push(Edge { from: a, to: b });
-        if let Err(e) = self.order() {
-            self.edges.pop();
-            return Err(e);
-        }
         Ok(())
     }
 
@@ -582,5 +609,21 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn connection_preview_rejects_cycles_and_duplicates_without_mutating_the_graph() {
+        let mut g = sample();
+        g.connect(0, 1).unwrap();
+        g.connect(1, 2).unwrap();
+        let before = g.edges.clone();
+        assert!(g.can_connect(2, 0).is_err());
+        assert!(g.can_connect(0, 1).is_err());
+        assert!(g.can_connect(0, 0).is_err());
+        assert!(g.can_connect(0, 99).is_err());
+        assert_eq!(g.edges, before);
+        assert!(g.can_connect(0, 2).is_ok());
+        assert_eq!(g.edges, before);
+        g.connect(0, 2).unwrap();
+        assert_eq!(g.edges.len(), 3);
     }
 }

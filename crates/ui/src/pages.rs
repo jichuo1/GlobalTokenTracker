@@ -1805,7 +1805,7 @@ pub fn dropdown_overlay(
                 .keyed_children(keyed(items)),
         );
     Grid::new()
-        .grid_row(2)
+        .grid_row(3)
         .horizontal_alignment(HorizontalAlignment::Left)
         .vertical_alignment(VerticalAlignment::Top)
         .margin(Thickness::new(x, 4.0, 0.0, 0.0))

@@ -2253,14 +2253,13 @@ impl Component for Shell {
                 .text(label)
                 .is_selected(self.page == page)
         };
-        // Nav floats on row 0 centered across the full window width — the
-        // TitleBar.Content slot centers within the area that excludes the
-        // caption buttons, which reads as left-shifted.
+        // Navigation lives in its own client row below the native caption
+        // area. Pointer gestures here must never drag or maximize the window.
         let nav = SelectorBar::new()
             .on_selected_text_changed(context.callback(Msg::Nav))
             .horizontal_alignment(HorizontalAlignment::Center)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_row(0)
+            .grid_row(1)
             .collection_slot(
                 SelectorBarSlot::Items,
                 [
@@ -2275,10 +2274,8 @@ impl Component for Shell {
                     KeyedView::new("settings", item(t!("设置"), Page::Settings)),
                 ],
             );
-        // Brand mark pinned to the caption area's left edge. It renders in
-        // the root Grid's row 0, on top of the TitleBar (TitleBar.Content is
-        // centered by design and LeftHeader is not bound in this framework
-        // version — so the nav keeps the Content slot and the brand floats).
+        // The top strip is reserved for branding, native window controls and
+        // window dragging. Page navigation is outside this entire strip.
         let brand = StackPanel::new()
             .orientation(Orientation::Horizontal)
             .spacing(10.0)
@@ -2332,7 +2329,7 @@ impl Component for Shell {
             ));
         }
         chrome_rows.push(KeyedView::new("filters", chrome));
-        let chrome = StackPanel::new().grid_row(1).keyed_children(chrome_rows);
+        let chrome = StackPanel::new().grid_row(2).keyed_children(chrome_rows);
         // Dropdown overlay renders last so its card floats above the page;
         // closed → an empty background-less Border (XAML skips hit-testing
         // null-background elements, so it never swallows clicks).
@@ -2340,7 +2337,7 @@ impl Component for Shell {
             (Page::Overview | Page::Speed | Page::Detail, Some(s), Some(kind)) => {
                 dropdown_overlay(s, theme, &chrome_state, kind, context)
             }
-            _ => Border::new().grid_row(2).into(),
+            _ => Border::new().grid_row(3).into(),
         };
         // Close prompt: quit vs hide-to-tray, with a remember checkbox.
         // The secondary button is disabled when no tray icon exists (hiding
@@ -2399,15 +2396,28 @@ impl Component for Shell {
             KeyedView::new(
                 "titlebar",
                 TitleBar::new()
-                    .preferred_height(WindowTitleBarHeight::Tall)
+                    .preferred_height(WindowTitleBarHeight::Standard)
                     .grid_row(0),
             ),
-            KeyedView::new("nav", nav),
+            KeyedView::new(
+                "nav",
+                Border::new()
+                    .grid_row(1)
+                    .min_height(44.0)
+                    .border_brush(theme.divider)
+                    .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+                    .content(
+                        ScrollViewer::new()
+                            .horizontal_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                            .vertical_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+                            .content(nav),
+                    ),
+            ),
             KeyedView::new("brand", brand),
             KeyedView::new(
                 "pagehost",
                 Border::new()
-                    .grid_row(2)
+                    .grid_row(3)
                     .background(
                         theme
                             .page_bg
@@ -2424,7 +2434,7 @@ impl Component for Shell {
             root.push(KeyedView::new(
                 "backdrop",
                 Border::new()
-                    .grid_row(1)
+                    .grid_row(2)
                     .grid_row_span(2)
                     .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
                     .on_pointer_pressed(context.callback(|_: PointerEventInfo| Msg::CloseMenu)),
@@ -2457,7 +2467,12 @@ impl Component for Shell {
                 ),
         ));
         Grid::new()
-            .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
+            .rows([
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::STAR,
+            ])
             .keyed_children(root)
     }
 }

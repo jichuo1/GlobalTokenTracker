@@ -15,6 +15,12 @@ pub enum Action {
     Received(Result<Value, String>),
     StopDrag,
     CaptureLost,
+    EditNode,
+    Menu(Box<Action>),
+    ToggleMenu(&'static str),
+    CloseMenu,
+    ClearSelection,
+    ClearFlash(u64),
     Enabled(bool),
     Directed(bool),
     Source(String, bool),
@@ -145,6 +151,12 @@ pub struct State {
     tab: &'static str,
     template_index: usize,
     show_params: bool,
+    show_node_details: bool,
+    pointer: (f64, f64),
+    hover: Option<usize>,
+    flash: Option<(usize, u64, std::time::Instant)>,
+    flash_sequence: u64,
+    open_menu: Option<&'static str>,
     show_run: bool,
     pan_tool: bool,
     viewport: std::rc::Rc<std::cell::Cell<(f64, f64)>>,
@@ -187,6 +199,12 @@ impl Default for State {
             tab: "workflow",
             template_index: 0,
             show_params: false,
+            show_node_details: false,
+            pointer: (0.0, 0.0),
+            hover: None,
+            flash: None,
+            flash_sequence: 0,
+            open_menu: None,
             show_run: false,
             pan_tool: false,
             viewport: std::rc::Rc::new(std::cell::Cell::new((800.0, 500.0))),
@@ -216,6 +234,77 @@ impl State {
                 .map_err(|e| e.to_string()),
             ))
         });
+    }
+    fn active_run(&self) -> bool {
+        self.detail
+            .as_ref()
+            .is_some_and(|d| matches!(d["state"].as_str(), Some("running" | "cancelling")))
+    }
+    fn run_disabled_reason(&self) -> Option<&'static str> {
+        if !self.loaded {
+            return Some("尚未连接调度服务；请在更多中启动服务或刷新状态。");
+        }
+        if self.busy {
+            return Some("正在处理请求，请稍候。");
+        }
+        if self.active_run() {
+            return Some("已有工作流正在运行，可查看结果或停止。");
+        }
+        let Some(w) = self.workflow().filter(|w| !w.nodes.is_empty()) else {
+            return Some("先从模型库拖入模型，或通过添加节点选择职责模板。");
+        };
+        if self.dirty {
+            return Some("请先保存修改，再运行工作流。");
+        }
+        if w.nodes
+            .iter()
+            .any(|n| n.node_type == "model" && n.route_id.is_empty())
+        {
+            return Some("请先为模型节点选择模型，或从模型库拖入节点框。");
+        }
+        if self.draft.mode == "directed"
+            && self
+                .draft
+                .pool
+                .iter()
+                .all(|r| r.expires_at <= model::now_ms())
+        {
+            return Some("定向模型池为空或已到期，请在来源与模型池中选择模型。");
+        }
+        if !self.draft.enabled {
+            return Some("调度总开关已关闭，请在来源与模型池中检查。");
+        }
+        if w.luna_supervision
+            && !self
+                .snapshot
+                .supervisors
+                .iter()
+                .any(|v| v["workflow_id"].as_str() == Some(self.workflow_id.as_str()))
+        {
+            return Some("需要同一工作流的在线 Luna；可在工作流设置中关闭监工。");
+        }
+        None
+    }
+    fn reposition(&mut self, index: usize, x: f64, y: f64) {
+        if let Some(node) = self.workflow_mut().and_then(|w| w.nodes.get_mut(index)) {
+            let (x, y) = (x.clamp(-10000.0, 10000.0), y.clamp(-10000.0, 10000.0));
+            if (node.x - x).abs() > 0.01 || (node.y - y).abs() > 0.01 {
+                node.x = x;
+                node.y = y;
+                self.dirty = true;
+            }
+        }
+    }
+    fn pulse(&mut self, ctx: &ComponentContext<Shell>) {
+        if let Some(node) = self.node {
+            self.flash_sequence += 1;
+            let id = self.flash_sequence;
+            self.flash = Some((node, id, std::time::Instant::now()));
+            ctx.spawn_background(move |_| {
+                std::thread::sleep(std::time::Duration::from_millis(220));
+                Msg::Scheduling(Action::ClearFlash(id))
+            });
+        }
     }
     fn routes(&self) -> Vec<&Route> {
         let q = self.query.to_lowercase();
@@ -269,7 +358,7 @@ impl State {
                 | Action::AddTemplate(_)
                 | Action::ApplyTemplate(_)
         );
-        if (self.saving && !matches!(&action, Action::Received(_)))
+        if (self.saving && !matches!(&action, Action::Received(_) | Action::ClearFlash(_)))
             || (self.busy
                 && matches!(
                     &action,
@@ -298,12 +387,18 @@ impl State {
             ),
             Action::StopDrag => self.drag.cancel(),
             Action::CaptureLost => self.drag.lost(),
+            Action::Menu(next) => {self.open_menu=None;self.update(*next,ctx);},
+            Action::ToggleMenu(id) => {self.open_menu=if self.open_menu==Some(id){None}else{Some(id)};},
+            Action::CloseMenu => self.open_menu=None,
+            Action::EditNode => {self.show_node_details=true;self.show_params=false;},
+            Action::ClearSelection => {self.node=None;self.show_node_details=false;self.drag.cancel();},
+            Action::ClearFlash(id) => {if self.flash.as_ref().is_some_and(|f|f.1==id) {self.flash=None;}},
             Action::PickTemplate(v) => {if let Some(i)=v {self.template_index=i.min(self.templates.len().saturating_sub(1));}},
-            Action::ToggleParams => self.show_params = !self.show_params,
-            Action::ToggleRun => self.show_run = !self.show_run,
+            Action::ToggleParams => {self.tab="workflow";self.show_params = !self.show_params;self.show_node_details=false;},
+            Action::ToggleRun => {self.tab="workflow";self.show_run = !self.show_run;},
             Action::TogglePan => { self.pan_tool = !self.pan_tool; self.drag.cancel(); },
             Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
-            Action::CloseInspector => {self.show_params=false;self.node=None;},
+            Action::CloseInspector => {self.show_params=false;self.show_node_details=false;},
             Action::AddFallback(id) => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)) && n.node_type=="model" && id!=n.route_id && !n.fallback_routes.contains(&id) && n.fallback_routes.len()<8 {n.fallback_routes.push(id);self.dirty=true;}}
             Action::ClearFallback => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)){n.fallback_routes.clear();self.dirty=true;}}
             Action::Acknowledge(v) => self.acknowledge=v,
@@ -312,9 +407,9 @@ impl State {
             Action::CallPreset(i) => { if let Some(p)=self.snapshot.call_presets.get(i){self.draft.call_profile=p["value"].clone();self.profile_editor=serde_json::to_string_pretty(&self.draft.call_profile).unwrap_or_default();self.dirty=true;} }
             Action::ProfileEditor(v) => self.profile_editor=v,
             Action::ApplyProfile => match serde_json::from_str::<Value>(&self.profile_editor){Ok(v) if v.is_object()=>{self.draft.call_profile=v;self.dirty=true;},_=>self.error=Some("调用配置需要合法的 JSON 对象".into())},
-            Action::Plan => {if let Some(w)=self.workflow(){self.request("router_workflow_plan",json!({"definition":w,"workflow_id":self.workflow_id}),ctx);}},
+            Action::Plan => {self.show_run=true;self.tab="workflow";if let Some(w)=self.workflow(){self.request("router_workflow_plan",json!({"definition":w,"workflow_id":self.workflow_id}),ctx);}},
             Action::Reload => {
-                self.dirty = false;
+                self.dirty = false;self.node=None;self.show_node_details=false;self.drag.cancel();
                 self.request("router_scheduling", json!({}), ctx);
             }
             Action::Save => {
@@ -418,7 +513,7 @@ impl State {
             }
             Action::Select(i) => {
                 self.selected = i;
-                self.node = None;
+                self.node = None;self.show_node_details=false;
             }
             Action::Name(v) => {
                 if let Some(w) = self.workflow_mut()
@@ -504,6 +599,7 @@ impl State {
             }
             Action::Zoom(delta) => { let (width,height)=self.viewport.get(); let anchor=((width-210.0)/2.0,height/2.0);let world=((anchor.0-self.pan.0)/self.zoom,(anchor.1-self.pan.1)/self.zoom);self.zoom=(self.zoom+delta).clamp(0.1,1.8);self.pan=(anchor.0-world.0*self.zoom,anchor.1-world.1*self.zoom); },
             Action::Press(p) => {
+                self.pointer=(p.x,p.y);self.error=None;
                 if p.is_right_button_pressed || p.is_middle_button_pressed || (self.pan_tool && p.x >= 210.0) {
                     self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
                 } else if p.x < 200.0 && p.y >= 42.0 {
@@ -527,24 +623,20 @@ impl State {
                 }
             }
             Action::Move(p) => {
-                if self.drag.current.is_none(){return;}
                 let (x, y) = self.point(p);
+                if self.drag.current.is_none(){let hover=if p.x>=210.0 {self.workflow().and_then(|w|w.hit(x,y))} else {None};if hover==self.hover{return;}self.hover=hover;}
+                self.pointer=(p.x,p.y);
                 match self.drag.movement() {
-                    Some(Drag::Node(i, dx, dy)) => {
-                        if let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i)) {
-                            n.x = (x - dx).clamp(-10000.0, 10000.0);
-                            n.y = (y - dy).clamp(-10000.0, 10000.0);
-                            self.dirty = true;
-                        }
-                    }
+                    Some(Drag::Node(i,dx,dy)) => self.reposition(i,x-dx,y-dy),
                     Some(Drag::Pan(dx, dy)) => self.pan = (p.x - dx, p.y - dy),
                     _ => {}
                 }
             }
             Action::Release(p) => {
+                self.pointer=(p.x,p.y);
                 let (x, y) = self.point(p);
                 match self.drag.release() {
-                    Some(Drag::Node(i,dx,dy)) => {if let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)){n.x=(x-dx).clamp(-10000.0,10000.0);n.y=(y-dy).clamp(-10000.0,10000.0);self.dirty=true;}},
+                    Some(Drag::Node(i,dx,dy)) => self.reposition(i,x-dx,y-dy),
                     Some(Drag::Pan(dx,dy)) => self.pan=(p.x-dx,p.y-dy),
                     Some(Drag::Model(index)) => {
                         if p.x < 210.0 || p.y < 0.0 || p.y > self.viewport.get().1 || p.x > self.viewport.get().0 { return; }
@@ -586,10 +678,12 @@ impl State {
                     }
                     _ => {}
                 }
+                self.pulse(ctx);
             }
             Action::WorkflowId(v) => self.workflow_id = v,
             Action::Input(v) => self.input = v,
             Action::Run => {
+                self.show_run=true;
                 if self.dirty {
                     self.error = Some("请先保存工作流和模型池".into());
                 } else if let Some(w) = self.workflow().cloned() {
@@ -638,10 +732,250 @@ fn label_actions(label: String, actions: Vec<View>) -> View {
         ))
 }
 
+fn help_for(label: &str) -> &'static str {
+    match label {
+        "运行工作流" => "按已保存的节点和连线调用模型，会占用工作流预算；可先在更多中预检。",
+        "保存修改" | "保存" | "保存并应用" => {
+            "保存节点、模型池和调用配置；保存本身不会发出模型请求。"
+        }
+        "停止" => "请求停止当前工作流。已发生的调用仍保留真实用量和结果。",
+        "预检" | "运行前预检" => "检查模型路线、能力门槛和预算，不生成模型内容。",
+        "工作流设置" => "调整名称、预算、并发和可选 Luna；对后续运行生效。",
+        "来源与模型池" | "模型池" => {
+            "查看来源连通性，选择本轮模型和有效期，设置优先顺序。"
+        }
+        "调用配置" | "调用配置档" => {
+            "选择预设或编辑兼容、输出与等待参数；节点显式值优先。"
+        }
+        "启动服务" => "启动本机已安装的协调器，不安装软件或更改登录状态。",
+        "刷新状态" => "重新读取现有状态，不做真实生成检测。",
+        "重新扫描来源" => "重新扫描原生模型目录；目录存在不代表已经验证可调用。",
+        "重载设置" => "放弃未保存修改，重新读取已保存设置。",
+        "适应全图" | "适应" => "缩放和平移视口，使全部节点进入可见区域。",
+        "编辑节点" => "打开当前选中节点的职责、提示词、标签和高级参数。",
+        "输入与结果" => "填写本次输入，查看运行状态和节点报告。",
+        "添加节点" => "选择职责模板；也可以直接从左侧模型库拖入。",
+        "套用" => "将所选职责模板应用到当前节点，可继续修改职责和提示词。",
+        "清空备用路线" => "仅移除本节点的备用模型，不影响原模型池。",
+        "顺序串联" => "按节点顺序重建依赖链，将独立分支改为串行执行。",
+        "清空连线" => "移除依赖关系，节点会成为独立分支。",
+        _ => "",
+    }
+}
+fn secondary(text: impl Into<String>) -> View {
+    TextBlock::new()
+        .text(text)
+        .font_size(12.0)
+        .text_wrapping(TextWrapping::Wrap)
+        .opacity(0.72)
+        .into()
+}
 fn button(label: &str, action: impl Fn() -> Action + 'static, ctx: &ViewContext<Shell>) -> View {
     Button::new()
         .on_click(ctx.callback(move |_| Msg::Scheduling(action())))
-        .content(TextBlock::new().text(label))
+        .content(label)
+        .tooltip(help_for(label))
+}
+fn command(
+    label: &str,
+    description: &str,
+    action: impl Fn() -> Action + 'static,
+    enabled: bool,
+    ctx: &ViewContext<Shell>,
+) -> View {
+    Button::new()
+        .is_enabled(enabled)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .on_click(ctx.callback(move |_| Msg::Scheduling(Action::Menu(Box::new(action())))))
+        .content(
+            StackPanel::new()
+                .spacing(3.0)
+                .children((TextBlock::new().text(label), secondary(description))),
+        )
+        .tooltip(description)
+}
+fn menu(label: &str, description: &str, id: &'static str, ctx: &ViewContext<Shell>) -> View {
+    Button::new()
+        .on_click(ctx.callback(move |_| Msg::Scheduling(Action::ToggleMenu(id))))
+        .content(format!("{label} ▾"))
+        .tooltip(description)
+}
+fn more_menu(_state: &State, ctx: &ViewContext<Shell>) -> View {
+    menu("更多", "预检、设置、模型池和服务管理。", "more", ctx)
+}
+fn more_items(state: &State, ctx: &ViewContext<Shell>) -> Vec<View> {
+    vec![
+        command(
+            "运行前预检",
+            help_for("运行前预检"),
+            || Action::Plan,
+            !state.busy && state.workflow().is_some(),
+            ctx,
+        ),
+        command(
+            "工作流设置",
+            help_for("工作流设置"),
+            || Action::ToggleParams,
+            true,
+            ctx,
+        ),
+        command(
+            "来源与模型池",
+            help_for("来源与模型池"),
+            || Action::Tab("sources"),
+            true,
+            ctx,
+        ),
+        command(
+            "调用配置",
+            help_for("调用配置"),
+            || Action::Tab("profiles"),
+            true,
+            ctx,
+        ),
+        command(
+            "输入与结果",
+            help_for("输入与结果"),
+            || Action::ToggleRun,
+            true,
+            ctx,
+        ),
+        secondary("服务管理"),
+        command(
+            "刷新状态",
+            help_for("刷新状态"),
+            || Action::Load,
+            !state.busy,
+            ctx,
+        ),
+        command(
+            "重新扫描来源",
+            help_for("重新扫描来源"),
+            || Action::Refresh,
+            !state.busy,
+            ctx,
+        ),
+        command(
+            "启动服务",
+            help_for("启动服务"),
+            || Action::Start,
+            !state.busy,
+            ctx,
+        ),
+        command(
+            "重载设置",
+            help_for("重载设置"),
+            || Action::Reload,
+            !state.busy,
+            ctx,
+        ),
+    ]
+}
+fn view_items(state: &State, ctx: &ViewContext<Shell>) -> Vec<View> {
+    vec![
+        command("适应全图", help_for("适应全图"), || Action::Fit, true, ctx),
+        command(
+            if state.pan_tool {
+                "退出平移工具"
+            } else {
+                "平移工具"
+            },
+            "开启后可从任意节点位置拖动整个画布；空白处始终可直接拖动。",
+            || Action::TogglePan,
+            true,
+            ctx,
+        ),
+        row(vec![
+            button("−", || Action::Zoom(-0.1), ctx),
+            secondary(format!("{:.0}%", state.zoom * 100.0)),
+            button("+", || Action::Zoom(0.1), ctx),
+        ]),
+        command(
+            "输入与结果",
+            help_for("输入与结果"),
+            || Action::ToggleRun,
+            true,
+            ctx,
+        ),
+        secondary("操作指南"),
+        secondary(
+            "拖左侧模型：创建节点；拖入模型节点：替换绑定。拖节点主体：移动；从右端口拖到下游：连线。蓝色外框和底部名称表示已选中，点击编辑节点查看参数。",
+        ),
+        secondary("连线决定依赖；独立分支可并行。预检不生成内容，运行会按已保存配置占用预算。"),
+    ]
+}
+fn menu_panel(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
+    let items = match state.open_menu {
+        Some("add") => state
+            .templates
+            .iter()
+            .enumerate()
+            .map(|(i, t)| command(&t.title, &t.role, move || Action::AddTemplate(i), true, ctx))
+            .collect(),
+        Some("view") => view_items(state, ctx),
+        _ => more_items(state, ctx),
+    };
+    Border::new()
+        .background(
+            theme
+                .page_bg
+                .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground)),
+        )
+        .border_brush(theme.divider)
+        .border_thickness(Thickness::uniform(1.0))
+        .corner_radius(CornerRadius::uniform(8.0))
+        .padding(Thickness::uniform(14.0))
+        .width(320.0)
+        .content(
+            StackPanel::new().spacing(10.0).children((
+                row(vec![
+                    TextBlock::new()
+                        .text(match state.open_menu {
+                            Some("add") => "选择职责模板",
+                            Some("view") => "视图与操作说明",
+                            _ => "更多操作",
+                        })
+                        .font_size(16.0)
+                        .into(),
+                    button("收起", || Action::CloseMenu, ctx),
+                ]),
+                ScrollViewer::new()
+                    .max_height(380.0)
+                    .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+                    .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                    .content(
+                        StackPanel::new()
+                            .spacing(7.0)
+                            .keyed_children(crate::pages::keyed(items)),
+                    ),
+            )),
+        )
+}
+fn field_help(label: &str) -> &'static str {
+    match label {
+        "节点职责（可自由调整）" => "说明这个节点负责什么、交付什么；用于生成任务指令。",
+        "节点提示词" => "给出具体任务与验收条件，上游报告会随连线提供。",
+        "分类标签（逗号分隔）" => "用于识别与组织节点，不改变模型权限。",
+        "工作流 ID" => "启用 Luna 时应与在线监工登记的工作流一致。",
+        "本次输入材料" => "本次运行的共享材料，连同上游证据传给模型。",
+        "总 Token 预算" | "节点 Token 预算" => {
+            "限制后续分配；原生隐藏用量在返回后计量，可能出现超预算报告。"
+        }
+        "并发目标" => "同时就绪的目标数，实际仍受来源与全局容量约束。",
+        "最大输出 Tokens" => "包括模型隐藏思考；最终上限还受配置档和模型容量约束。",
+        "首次响应期待（秒）" | "首次活动等待（秒）" => {
+            "等待真实活动的时间窗口，不把重复心跳当作进度。"
+        }
+        "硬截止（秒）" => "本次调用的最终时间边界。",
+        "停滞窗口（秒）" => "开始输出后的空闲等待，真实活动会刷新窗口。",
+        "输出模式 fixed/adaptive/native" => {
+            "留空继承；fixed 固定、adaptive 有界调整、native 使用已知原生容量。"
+        }
+        "报告字符上限" => "报告正文容量，不是模型输出 Token 数。",
+        "调用配置 JSON" => "先选择预设，再按需覆盖参数；应用到草稿后仍需保存。",
+        "高级节点参数 JSON" => "用于精确设置调用参数；普通职责和提示词可在上方编辑。",
+        _ => "",
+    }
 }
 fn line(
     label: &str,
@@ -661,7 +995,33 @@ fn line(
             .min_height(if label.contains("JSON") { 140.0 } else { 32.0 })
             .text(value)
             .on_text_changed(ctx.callback(move |v| Msg::Scheduling(action(v)))),
+        TextBlock::new()
+            .text(field_help(label))
+            .font_size(12.0)
+            .text_wrapping(TextWrapping::Wrap)
+            .opacity(0.72)
+            .max_height(if field_help(label).is_empty() {
+                0.0
+            } else {
+                90.0
+            }),
     ))
+}
+fn section(title: &str, description: &str, items: Vec<View>) -> View {
+    Expander::new().slots([
+        SlotView::new(
+            ExpanderSlot::Header,
+            StackPanel::new()
+                .spacing(3.0)
+                .children((TextBlock::new().text(title), secondary(description))),
+        ),
+        SlotView::new(
+            ExpanderSlot::Content,
+            StackPanel::new()
+                .spacing(10.0)
+                .keyed_children(crate::pages::keyed(items)),
+        ),
+    ])
 }
 fn row(children: Vec<View>) -> View {
     StackPanel::new()
@@ -674,22 +1034,38 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
     if state.tab == "workflow" {
         return vec![workspace_view(state, theme, ctx)];
     }
-    let mut blocks = vec![w::section_header(theme, Symbol::World, "模型调度")];
-    blocks.push(row(vec![
-        button("启动服务", || Action::Start, ctx),
-        button("刷新状态", || Action::Load, ctx),
-        button("重新扫描来源", || Action::Refresh, ctx),
-        button(
-            if state.busy {
-                "处理中…"
-            } else {
-                "保存并应用"
-            },
-            || Action::Save,
-            ctx,
-        ),
-        button("重载设置", || Action::Reload, ctx),
-    ]));
+    let mut blocks = vec![
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .children((
+                StackPanel::new().spacing(4.0).children((
+                    TextBlock::new()
+                        .text(if state.tab == "profiles" {
+                            "调用配置"
+                        } else {
+                            "来源与模型池"
+                        })
+                        .font_size(20.0),
+                    secondary(if state.tab == "profiles" {
+                        "选择预设并按需覆盖；保存后作用于后续分配。"
+                    } else {
+                        "先选可用来源和模型，再回到工作流编排。"
+                    }),
+                )),
+                Border::new().grid_column(1).content(row(vec![
+                    Button::new()
+                        .style(ButtonStyle::Accent)
+                        .is_enabled(state.dirty && !state.busy)
+                        .on_click(ctx.callback(|_| Msg::Scheduling(Action::Save)))
+                        .content("保存修改")
+                        .tooltip(help_for("保存修改")),
+                    more_menu(state, ctx),
+                ])),
+            )),
+    ];
+    if state.open_menu.is_some() {
+        blocks.push(menu_panel(state, theme, ctx));
+    }
     blocks.push(row(vec![
         TextBlock::new().text("允许模型调度").into(),
         ToggleSwitch::new()
@@ -885,106 +1261,84 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
 }
 
 fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
+    let reason = state.run_disabled_reason();
+    let mut actions = vec![
+        Button::new()
+            .style(ButtonStyle::Accent)
+            .is_enabled(reason.is_none())
+            .on_click(ctx.callback(|_| Msg::Scheduling(Action::Run)))
+            .content("▶ 运行工作流")
+            .tooltip(reason.unwrap_or(help_for("运行工作流"))),
+        Button::new()
+            .is_enabled(state.dirty && !state.busy)
+            .on_click(ctx.callback(|_| Msg::Scheduling(Action::Save)))
+            .content("保存修改")
+            .tooltip(help_for("保存修改")),
+    ];
+    if state.active_run() {
+        actions.insert(0, button("停止", || Action::Cancel, ctx));
+    }
+    actions.push(more_menu(state, ctx));
     let head = Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .column_spacing(16.0)
+        .children((
+            StackPanel::new().spacing(4.0).children((
+                ComboBox::new()
+                    .placeholder_text("选择或添加工作流")
+                    .items_source(state.draft.workflows.iter().map(|w| w.name.as_str()))
+                    .selected_index((!state.draft.workflows.is_empty()).then_some(state.selected))
+                    .max_width(255.0)
+                    .on_selection_changed(ctx.callback(|v: Option<usize>| {
+                        Msg::Scheduling(v.map_or(Action::StopDrag, Action::Select))
+                    })),
+                secondary(format!(
+                    "{} · {} 个节点",
+                    if state.busy {
+                        "处理中"
+                    } else if state.dirty {
+                        "有未保存修改"
+                    } else {
+                        "已同步"
+                    },
+                    state.workflow().map_or(0, |w| w.nodes.len())
+                )),
+            )),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(row(actions)),
+        ));
+    let view = menu(
+        "视图与帮助",
+        "画布缩放、平移、结果面板和操作说明。",
+        "view",
+        ctx,
+    );
+    let tools = Grid::new()
         .columns([GridLength::STAR, GridLength::Auto])
         .children((
             row(vec![
-                button("保存", || Action::Save, ctx),
-                button("预检", || Action::Plan, ctx),
-                button("运行", || Action::Run, ctx),
-                button("停止", || Action::Cancel, ctx),
-                button("模型池", || Action::Tab("sources"), ctx),
-                button("调用配置", || Action::Tab("profiles"), ctx),
+                TextBox::new()
+                    .placeholder_text("搜索模型库")
+                    .text(&state.query)
+                    .width(140.0)
+                    .on_text_changed(ctx.callback(|v| Msg::Scheduling(Action::Query(v))))
+                    .tooltip("按模型或来源名称筛选左侧列表。"),
+                button("‹", || Action::Palette(-1), ctx),
+                button("›", || Action::Palette(1), ctx),
+                secondary(format!("第 {} 页", state.palette + 1)),
             ]),
-            TextBlock::new()
-                .grid_column(1)
-                .text(if state.busy {
-                    "处理中"
-                } else if state.dirty {
-                    "未保存"
-                } else {
-                    "已同步"
-                })
-                .foreground(theme.subtle)
-                .vertical_alignment(VerticalAlignment::Center),
+            Border::new().grid_column(1).content(row(vec![
+                menu("＋ 添加节点", help_for("添加节点"), "add", ctx),
+                view,
+            ])),
         ));
-    let selection = row(vec![
-        ComboBox::new()
-            .items_source(state.draft.workflows.iter().map(|w| w.name.as_str()))
-            .selected_index((!state.draft.workflows.is_empty()).then_some(state.selected))
-            .width(230.0)
-            .on_selection_changed(ctx.callback(|v: Option<usize>| {
-                Msg::Scheduling(v.map_or(Action::StopDrag, Action::Select))
-            }))
-            .into(),
-        TextBlock::new()
-            .text("Luna 监工")
-            .vertical_alignment(VerticalAlignment::Center)
-            .into(),
-        ToggleSwitch::new()
-            .is_on(
-                state
-                    .workflow()
-                    .map_or(state.probe_supervision, |w| w.luna_supervision),
-            )
-            .on_toggled(ctx.callback(|v| Msg::Scheduling(Action::Supervision(v))))
-            .into(),
-        button("工作流参数", || Action::ToggleParams, ctx),
-        button(
-            if state.show_run {
-                "收起运行面板"
-            } else {
-                "输入与结果"
-            },
-            || Action::ToggleRun,
-            ctx,
-        ),
-    ]);
-    let tools = row(vec![
-        TextBox::new()
-            .placeholder_text("搜索模型")
-            .text(&state.query)
-            .width(130.0)
-            .on_text_changed(ctx.callback(|v| Msg::Scheduling(Action::Query(v))))
-            .into(),
-        button("‹", || Action::Palette(-1), ctx),
-        button("›", || Action::Palette(1), ctx),
-        ComboBox::new()
-            .items_source(state.templates.iter().map(|t| t.title.as_str()))
-            .selected_index(Some(state.template_index))
-            .width(130.0)
-            .on_selection_changed(ctx.callback(|v| Msg::Scheduling(Action::PickTemplate(v))))
-            .into(),
-        button(
-            "添加",
-            {
-                let i = state.template_index;
-                move || Action::AddTemplate(i)
-            },
-            ctx,
-        ),
-        button(
-            if state.pan_tool {
-                "平移中"
-            } else {
-                "平移"
-            },
-            || Action::TogglePan,
-            ctx,
-        ),
-        button("适应", || Action::Fit, ctx),
-        button("−", || Action::Zoom(-0.1), ctx),
-        button("+", || Action::Zoom(0.1), ctx),
-        TextBlock::new()
-            .text(format!("{:.0}%", state.zoom * 100.0))
-            .vertical_alignment(VerticalAlignment::Center)
-            .into(),
-    ]);
-    let side = state.node.is_some() || state.show_params;
+    let side = state.show_node_details || state.show_params;
     let body = Grid::new()
         .columns([
             GridLength::STAR,
-            GridLength::Pixel(if side { 300.0 } else { 0.0 }),
+            GridLength::Pixel(if side { 310.0 } else { 0.0 }),
         ])
         .children((
             Border::new().content(canvas(state, theme, ctx)),
@@ -997,39 +1351,77 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
                     Border::new().into()
                 }),
         ));
-    let error = TextBlock::new()
-        .text(state.error.as_deref().unwrap_or(""))
-        .foreground(theme.danger)
-        .text_wrapping(TextWrapping::Wrap)
-        .max_height(if state.error.is_some() { 44.0 } else { 0.0 });
-    let hint = TextBlock::new()
-        .text("空白处左键拖动平移 · 拖动节点移动 · 从右端口连接 · 适应可查看全图")
-        .foreground(theme.subtle)
-        .font_size(theme.label_size);
-    Grid::new()
+    let selected = state
+        .node
+        .and_then(|i| state.workflow().and_then(|w| w.nodes.get(i)));
+    let mut context = vec![
+        TextBlock::new()
+            .text(selected.map_or_else(
+                || {
+                    reason
+                        .unwrap_or("从左侧拖入模型，或添加职责模板开始编排。")
+                        .to_owned()
+                },
+                |n| format!("已选中：{} · 拖动移动，右端口连接下游", n.title),
+            ))
+            .foreground(if selected.is_some() {
+                theme.accent
+            } else {
+                theme.subtle
+            })
+            .text_wrapping(TextWrapping::Wrap)
+            .into(),
+    ];
+    if selected.is_some() {
+        context.push(button("编辑节点", || Action::EditNode, ctx));
+        context.push(button("取消选择", || Action::ClearSelection, ctx));
+    }
+    let status = StackPanel::new().spacing(4.0).children((
+        TextBlock::new()
+            .text(state.error.as_deref().unwrap_or(""))
+            .foreground(theme.danger)
+            .text_wrapping(TextWrapping::Wrap)
+            .max_height(if state.error.is_some() { 44.0 } else { 0.0 }),
+        row(context),
+    ));
+    let main = Grid::new()
         .rows([
-            GridLength::Auto,
-            GridLength::Auto,
             GridLength::Auto,
             GridLength::Auto,
             GridLength::STAR,
             GridLength::Auto,
+            GridLength::Auto,
         ])
-        .row_spacing(8.0)
+        .row_spacing(10.0)
         .children((
             head,
-            Border::new().grid_row(1).content(selection),
-            Border::new().grid_row(2).content(tools),
-            Border::new()
-                .grid_row(3)
-                .content(StackPanel::new().spacing(4.0).children((error, hint))),
-            Border::new().grid_row(4).content(body),
-            Border::new().grid_row(5).content(if state.show_run {
+            Border::new().grid_row(1).content(tools),
+            Border::new().grid_row(2).content(body),
+            Border::new().grid_row(3).content(status),
+            Border::new().grid_row(4).content(if state.show_run {
                 run_panel(state, ctx)
             } else {
                 Border::new().into()
             }),
-        ))
+        ));
+    let mut layers = vec![KeyedView::new("workspace", main)];
+    if state.open_menu.is_some() {
+        layers.push(KeyedView::new(
+            "dismiss",
+            Border::new()
+                .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
+                .on_pointer_pressed(ctx.callback(|_| Msg::Scheduling(Action::CloseMenu))),
+        ));
+        layers.push(KeyedView::new(
+            "menu",
+            Border::new()
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .vertical_alignment(VerticalAlignment::Top)
+                .margin(Thickness::new(0.0, 48.0, 0.0, 0.0))
+                .content(menu_panel(state, theme, ctx)),
+        ));
+    }
+    Grid::new().keyed_children(layers)
 }
 
 fn run_panel(state: &State, ctx: &ViewContext<Shell>) -> View {
@@ -1118,12 +1510,47 @@ fn run_panel(state: &State, ctx: &ViewContext<Shell>) -> View {
 }
 
 fn inspector(state: &State, _theme: &Theme, ctx: &ViewContext<Shell>) -> View {
-    let mut blocks = vec![button("关闭参数栏", || Action::CloseInspector, ctx)];
+    let mut blocks = vec![
+        TextBlock::new()
+            .text(if state.show_params {
+                "工作流设置"
+            } else {
+                "节点设置"
+            })
+            .font_size(18.0)
+            .into(),
+        secondary(if state.show_params {
+            "配置本工作流的执行范围和保护条件。"
+        } else {
+            "修改当前选中节点的职责与交付要求。"
+        }),
+        button("收起设置", || Action::CloseInspector, ctx),
+    ];
     if state.show_params {
+        blocks.push(section(
+            "工作流管理",
+            "新建、移除以及批量调整依赖。",
+            vec![
+                button("新工作流", || Action::New, ctx),
+                button("移除工作流", || Action::RemoveWorkflow, ctx),
+                button("顺序串联", || Action::Chain, ctx),
+                button("清空连线", || Action::Unlink, ctx),
+            ],
+        ));
         blocks.push(row(vec![
-            button("新工作流", || Action::New, ctx),
-            button("移除工作流", || Action::RemoveWorkflow, ctx),
+            TextBlock::new().text("Luna 监工").into(),
+            ToggleSwitch::new()
+                .is_on(
+                    state
+                        .workflow()
+                        .map_or(state.probe_supervision, |w| w.luna_supervision),
+                )
+                .on_toggled(ctx.callback(|v| Msg::Scheduling(Action::Supervision(v))))
+                .into(),
         ]));
+        blocks.push(secondary(
+            "开启时需有同一工作流的在线监工；关闭仍保留预算、模型池和恢复保护。",
+        ));
         if let Some(w) = state.workflow() {
             blocks.push(line("工作流名称", w.name.clone(), Action::Name, ctx));
             blocks.push(line(
@@ -1139,12 +1566,9 @@ fn inspector(state: &State, _theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 ctx,
             ));
         }
-        blocks.push(row(vec![
-            button("顺序串联", || Action::Chain, ctx),
-            button("清空连线", || Action::Unlink, ctx),
-        ]));
     }
-    if let Some(w) = state.workflow()
+    if state.show_node_details
+        && let Some(w) = state.workflow()
         && let Some(n) = state.node.and_then(|i| w.nodes.get(i))
     {
         blocks.push(
@@ -1241,6 +1665,7 @@ fn inspector(state: &State, _theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 ctx,
             ),
         ]));
+        let mut advanced = Vec::new();
         for (label, key) in [
             ("任务类型", "kind"),
             ("节点提示词", "prompt"),
@@ -1265,20 +1690,25 @@ fn inspector(state: &State, _theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                     str::to_owned,
                 )
             });
-            blocks.push(line(
-                label,
-                value,
-                move |v| Action::Param(key.into(), v),
-                ctx,
-            ));
+            let view = line(label, value, move |v| Action::Param(key.into(), v), ctx);
+            if key == "kind" || key == "prompt" {
+                blocks.push(view);
+            } else {
+                advanced.push(view);
+            }
         }
-        blocks.push(line(
+        advanced.push(line(
             "高级节点参数 JSON",
             state.task_editor.clone(),
             Action::TaskEditor,
             ctx,
         ));
-        blocks.push(button("应用高级参数", || Action::ApplyTaskEditor, ctx));
+        advanced.push(button("应用高级参数", || Action::ApplyTaskEditor, ctx));
+        blocks.push(section(
+            "高级调用参数",
+            "输出容量、超时、重试和精确 JSON 设置。",
+            advanced,
+        ));
     }
     ScrollViewer::new()
         .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
@@ -1324,6 +1754,288 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
     let family = theme.font_family.clone();
     let viewport = state.viewport.clone();
     let page = theme.page_cf;
+    let drag = state.drag.current.clone();
+    let pointer = state.pointer;
+    let hover = state.hover;
+    let flash = state.flash;
+    let animate = flash.is_some();
+    let model_title = if let Some(Drag::Model(i)) = &drag {
+        state
+            .routes()
+            .get(*i)
+            .map_or(String::new(), |r| r.model.clone())
+    } else {
+        String::new()
+    };
+    let world = (
+        (pointer.0 - 210.0 - pan.0) / zoom,
+        (pointer.1 - pan.1) / zoom,
+    );
+    let target = if pointer.0 >= 210.0 {
+        state.workflow().and_then(|w| w.hit(world.0, world.1))
+    } else {
+        None
+    };
+    let valid_target = target.is_some_and(|to| {
+        state.workflow().is_some_and(|w| match drag {
+            Some(Drag::Model(_)) => w.nodes[to].node_type == "model",
+            Some(Drag::Edge(from)) => w.can_connect(from, to).is_ok(),
+            _ => false,
+        })
+    });
+    let state_palette = state.palette * 10;
+    let draw = move |c: &windows_canvas::DrawContext<'_>| {
+        use windows_canvas::{Rect, RoundedRect, TextFormat, Vector2};
+        viewport.set((f64::from(c.width), f64::from(c.height)));
+        c.clear(bg);
+        let text = TextFormat::new(&family, 12.0)?;
+        let brush = c.create_solid_brush(ink)?;
+        let line = c.create_solid_brush(grid)?;
+        let hi = c.create_solid_brush(accent)?;
+        let fill = c.create_solid_brush(card)?;
+        let picked = c.create_solid_brush(windows_canvas::ColorF { a: 0.16, ..accent })?;
+        let good = c.create_solid_brush(windows_canvas::ColorF::from_rgba8(62, 190, 132, 255))?;
+        let bad = c.create_solid_brush(windows_canvas::ColorF::from_rgba8(235, 108, 108, 255))?;
+        if nodes.is_empty() {
+            c.draw_text(
+                "拖入模型，开始编排工作流",
+                &text,
+                &Rect::new(240.0, 52.0, c.width - 20.0, 84.0),
+                &hi,
+            );
+            c.draw_text(
+                "或使用上方添加节点，选择研究、核验与汇总等职责模板",
+                &text,
+                &Rect::new(240.0, 90.0, c.width - 20.0, 140.0),
+                &brush,
+            );
+        }
+
+        for x in (210..c.width as usize).step_by(24) {
+            c.draw_line(
+                Vector2::new(x as f32, 0.0),
+                Vector2::new(x as f32, c.height),
+                &line,
+                0.3,
+            );
+        }
+        for y in (0..c.height as usize).step_by(24) {
+            c.draw_line(
+                Vector2::new(210.0, y as f32),
+                Vector2::new(c.width, y as f32),
+                &line,
+                0.3,
+            );
+        }
+        let point = |x: f64, y: f64| {
+            Vector2::new((210.0 + pan.0 + x * zoom) as f32, (pan.1 + y * zoom) as f32)
+        };
+        for e in &edges {
+            if let (Some(a), Some(b)) = (positions.get(&e.from), positions.get(&e.to)) {
+                c.draw_line(
+                    point(a.0 + 220.0, a.1 + 56.0),
+                    point(b.0, b.1 + 56.0),
+                    &hi,
+                    2.0,
+                );
+            }
+        }
+        for (i, n) in nodes.iter().enumerate() {
+            let p = point(n.3, n.4);
+            let w = (220.0 * zoom) as f32;
+            let h = (112.0 * zoom) as f32;
+            if p.x + w < 210.0 || p.x > c.width || p.y + h < 0.0 || p.y > c.height {
+                continue;
+            }
+            let rect = Rect::new(p.x, p.y, p.x + w, p.y + h);
+            let rounded = RoundedRect::new(rect, 8.0, 8.0);
+            c.fill_rounded_rect(&rounded, &fill);
+            if selected == Some(i) {
+                c.fill_rounded_rect(&rounded, &picked);
+            }
+            c.draw_rounded_rect(
+                &rounded,
+                if selected == Some(i) || hover == Some(i) {
+                    &hi
+                } else {
+                    &line
+                },
+                if selected == Some(i) { 3.0 } else { 1.5 },
+            );
+            if let Some((active, _, start)) = flash
+                && active == i
+            {
+                let t = (start.elapsed().as_secs_f32() / 0.22).clamp(0.0, 1.0);
+                let spread = 3.0 + 10.0 * t;
+                let glow = c.create_solid_brush(windows_canvas::ColorF {
+                    a: (1.0 - t) * 0.7,
+                    ..accent
+                })?;
+                c.draw_rounded_rect(
+                    &RoundedRect::new(
+                        Rect::new(
+                            p.x - spread,
+                            p.y - spread,
+                            p.x + w + spread,
+                            p.y + h + spread,
+                        ),
+                        10.0,
+                        10.0,
+                    ),
+                    &glow,
+                    3.0,
+                );
+            }
+
+            if zoom < 0.3 {
+                continue;
+            }
+            c.draw_text(
+                &n.1,
+                &text,
+                &Rect::new(p.x + 12.0, p.y + 9.0, p.x + w - 12.0, p.y + 43.0),
+                &hi,
+            );
+            c.draw_text(
+                &n.2,
+                &text,
+                &Rect::new(p.x + 12.0, p.y + 44.0, p.x + w - 12.0, p.y + h - 8.0),
+                &brush,
+            );
+            if selected == Some(i) && zoom >= 0.6 {
+                c.draw_text(
+                    "✓ 已选中",
+                    &text,
+                    &Rect::new(p.x + 12.0, p.y + h - 28.0, p.x + w - 24.0, p.y + h - 4.0),
+                    &hi,
+                );
+            }
+            c.draw_text(
+                "●",
+                &text,
+                &Rect::new(
+                    p.x + w - 15.0,
+                    p.y + h / 2.0 - 10.0,
+                    p.x + w + 3.0,
+                    p.y + h / 2.0 + 12.0,
+                ),
+                &hi,
+            );
+        }
+        if let Some(to) = target
+            && matches!(drag, Some(Drag::Model(_) | Drag::Edge(_)))
+        {
+            let n = &nodes[to];
+            let p = point(n.3, n.4);
+            c.draw_rounded_rect(
+                &RoundedRect::new(
+                    Rect::new(
+                        p.x - 4.0,
+                        p.y - 4.0,
+                        p.x + (220.0 * zoom) as f32 + 4.0,
+                        p.y + (112.0 * zoom) as f32 + 4.0,
+                    ),
+                    10.0,
+                    10.0,
+                ),
+                if valid_target { &good } else { &bad },
+                3.0,
+            );
+        }
+        if let Some(Drag::Edge(from)) = drag
+            && let Some(n) = nodes.get(from)
+        {
+            c.draw_line(
+                point(n.3 + 220.0, n.4 + 56.0),
+                Vector2::new(pointer.0 as f32, pointer.1 as f32),
+                if target.is_some() {
+                    if valid_target { &good } else { &bad }
+                } else {
+                    &hi
+                },
+                2.5,
+            );
+        }
+        if matches!(drag, Some(Drag::Model(_))) && pointer.0 >= 210.0 {
+            let x = pointer.0 as f32;
+            let y = pointer.1 as f32;
+            let backing = c.create_solid_brush(windows_canvas::ColorF {
+                r: page.r,
+                g: page.g,
+                b: page.b,
+                a: 0.94,
+            })?;
+            let rect = RoundedRect::new(
+                Rect::new(x, y, x + 220.0 * zoom as f32, y + 112.0 * zoom as f32),
+                9.0,
+                9.0,
+            );
+            c.fill_rounded_rect(&rect, &backing);
+            c.draw_rounded_rect(
+                &rect,
+                if target.is_some() && !valid_target {
+                    &bad
+                } else {
+                    &hi
+                },
+                2.5,
+            );
+            c.draw_text(
+                &model_title,
+                &text,
+                &Rect::new(x + 12.0, y + 10.0, x + 210.0, y + 42.0),
+                &hi,
+            );
+            c.draw_text(
+                if target.is_some() {
+                    if valid_target {
+                        "松开替换此节点模型"
+                    } else {
+                        "本地节点不绑定模型"
+                    }
+                } else {
+                    "松开创建模型节点"
+                },
+                &text,
+                &Rect::new(x + 12.0, y + 46.0, x + 210.0, y + 82.0),
+                &brush,
+            );
+        }
+        let opaque = c.create_solid_brush(windows_canvas::ColorF {
+            r: bg.r * bg.a + page.r * (1.0 - bg.a),
+            g: bg.g * bg.a + page.g * (1.0 - bg.a),
+            b: bg.b * bg.a + page.b * (1.0 - bg.a),
+            a: 1.0,
+        })?;
+        c.fill_rect(&Rect::new(0.0, 0.0, 210.0, c.height), &opaque);
+        c.draw_text(
+            "模型库 · 拖入节点框",
+            &text,
+            &Rect::new(8.0, 8.0, 200.0, 36.0),
+            &hi,
+        );
+        for (i, title) in palette.iter().enumerate() {
+            let y = 42.0 + i as f32 * 42.0;
+            if matches!(drag,Some(Drag::Model(active)) if active==state_palette+i) {
+                c.fill_rounded_rect(
+                    &RoundedRect::new(Rect::new(4.0, y - 3.0, 205.0, y + 38.0), 6.0, 6.0),
+                    &picked,
+                );
+                c.draw_rounded_rect(
+                    &RoundedRect::new(Rect::new(4.0, y - 3.0, 205.0, y + 38.0), 6.0, 6.0),
+                    &hi,
+                    1.5,
+                );
+            }
+            c.draw_text(title, &text, &Rect::new(8.0, y, 202.0, y + 38.0), &brush);
+        }
+        Ok(())
+    };
+    let painting = if animate {
+        windows_canvas::animated_canvas(draw)
+    } else {
+        windows_canvas::canvas_invalidated(&state.inv, draw)
+    };
     Border::new()
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .capture_pointer_on_press(true)
@@ -1332,101 +2044,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         .on_pointer_released(ctx.callback(|p| Msg::Scheduling(Action::Release(p))))
         .on_pointer_capture_lost(ctx.callback(|_| Msg::Scheduling(Action::CaptureLost)))
         .on_pointer_canceled(ctx.callback(|_| Msg::Scheduling(Action::StopDrag)))
-        .content(windows_canvas::canvas_invalidated(&state.inv, move |c| {
-            use windows_canvas::{Rect, RoundedRect, TextFormat, Vector2};
-            viewport.set((f64::from(c.width), f64::from(c.height)));
-            c.clear(bg);
-            let text = TextFormat::new(&family, 12.0)?;
-            let brush = c.create_solid_brush(ink)?;
-            let line = c.create_solid_brush(grid)?;
-            let hi = c.create_solid_brush(accent)?;
-            let fill = c.create_solid_brush(card)?;
-            for x in (210..c.width as usize).step_by(24) {
-                c.draw_line(
-                    Vector2::new(x as f32, 0.0),
-                    Vector2::new(x as f32, c.height),
-                    &line,
-                    0.3,
-                );
-            }
-            for y in (0..c.height as usize).step_by(24) {
-                c.draw_line(
-                    Vector2::new(210.0, y as f32),
-                    Vector2::new(c.width, y as f32),
-                    &line,
-                    0.3,
-                );
-            }
-            let point = |x: f64, y: f64| {
-                Vector2::new((210.0 + pan.0 + x * zoom) as f32, (pan.1 + y * zoom) as f32)
-            };
-            for e in &edges {
-                if let (Some(a), Some(b)) = (positions.get(&e.from), positions.get(&e.to)) {
-                    c.draw_line(
-                        point(a.0 + 220.0, a.1 + 56.0),
-                        point(b.0, b.1 + 56.0),
-                        &hi,
-                        2.0,
-                    );
-                }
-            }
-            for (i, n) in nodes.iter().enumerate() {
-                let p = point(n.3, n.4);
-                let w = (220.0 * zoom) as f32;
-                let h = (112.0 * zoom) as f32;
-                if p.x + w < 210.0 || p.x > c.width || p.y + h < 0.0 || p.y > c.height {
-                    continue;
-                }
-                let rect = Rect::new(p.x, p.y, p.x + w, p.y + h);
-                let rounded = RoundedRect::new(rect, 8.0, 8.0);
-                c.fill_rounded_rect(&rounded, &fill);
-                c.draw_rounded_rect(&rounded, if selected == Some(i) { &hi } else { &line }, 2.0);
-                if zoom < 0.3 {
-                    continue;
-                }
-                c.draw_text(
-                    &n.1,
-                    &text,
-                    &Rect::new(p.x + 12.0, p.y + 9.0, p.x + w - 12.0, p.y + 43.0),
-                    &hi,
-                );
-                c.draw_text(
-                    &n.2,
-                    &text,
-                    &Rect::new(p.x + 12.0, p.y + 44.0, p.x + w - 12.0, p.y + h - 8.0),
-                    &brush,
-                );
-                c.draw_text(
-                    "●",
-                    &text,
-                    &Rect::new(
-                        p.x + w - 15.0,
-                        p.y + h / 2.0 - 10.0,
-                        p.x + w + 3.0,
-                        p.y + h / 2.0 + 12.0,
-                    ),
-                    &hi,
-                );
-            }
-            let opaque = c.create_solid_brush(windows_canvas::ColorF {
-                r: bg.r * bg.a + page.r * (1.0 - bg.a),
-                g: bg.g * bg.a + page.g * (1.0 - bg.a),
-                b: bg.b * bg.a + page.b * (1.0 - bg.a),
-                a: 1.0,
-            })?;
-            c.fill_rect(&Rect::new(0.0, 0.0, 210.0, c.height), &opaque);
-            c.draw_text(
-                "模型库 · 拖入节点框",
-                &text,
-                &Rect::new(8.0, 8.0, 200.0, 36.0),
-                &hi,
-            );
-            for (i, title) in palette.iter().enumerate() {
-                let y = 42.0 + i as f32 * 42.0;
-                c.draw_text(title, &text, &Rect::new(8.0, y, 202.0, y + 38.0), &brush);
-            }
-            Ok(())
-        }))
+        .content(painting)
 }
 
 #[cfg(test)]
@@ -1461,5 +2079,41 @@ mod gesture_tests {
         assert!(matches!(gesture.movement(), Some(Drag::Edge(1))));
         gesture.lost();
         assert!(matches!(gesture.release(), Some(Drag::Edge(1))));
+    }
+    #[test]
+    fn primary_run_explains_empty_unsaved_and_unsupervised_workflows() {
+        let mut state = super::State {
+            loaded: true,
+            ..Default::default()
+        };
+        assert!(state.run_disabled_reason().unwrap().contains("添加节点"));
+        let mut workflow = globaltokentracker_core::scheduler::Workflow::new("fixture".into());
+        workflow
+            .add_route(
+                &globaltokentracker_core::scheduler::Route {
+                    route_id: "fixture-route".into(),
+                    ..Default::default()
+                },
+                10.0,
+                10.0,
+            )
+            .unwrap();
+        state.draft.workflows.push(workflow);
+        state.dirty = true;
+        assert!(state.run_disabled_reason().unwrap().contains("保存"));
+        state.dirty = false;
+        assert!(state.run_disabled_reason().unwrap().contains("Luna"));
+        state.draft.workflows[0].luna_supervision = false;
+        assert!(state.run_disabled_reason().is_none());
+        state.reposition(0, 10.0, 10.0);
+        assert!(
+            !state.dirty,
+            "selecting without moving must not create unsaved changes"
+        );
+        state.reposition(0, 12.0, 10.0);
+        assert!(state.dirty);
+        state.dirty = false;
+        state.detail = Some(serde_json::json!({"state":"running"}));
+        assert!(state.run_disabled_reason().unwrap().contains("运行"));
     }
 }
