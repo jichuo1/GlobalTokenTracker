@@ -52,6 +52,8 @@ pub struct Theme {
     pub card_border: Brush,
     pub divider: Brush,
     pub page_bg: Option<Brush>,
+    /// Opaque page color for canvas regions that must occlude other drawing.
+    pub page_cf: ColorF,
     /// Direct2D copies of key colors — hex config values map exactly; named
     /// theme brushes fall back to Fluent constants below (theme brushes have
     /// no RGB at this layer).
@@ -266,6 +268,14 @@ impl Theme {
                 .page_bg
                 .as_deref()
                 .map(|s| brush_of(Some(s), Brush::Theme(ThemeBrush::SolidBackground))),
+            page_cf: colorf_of(
+                cfg.page_bg.as_deref(),
+                if light {
+                    ColorF::from_rgba8(0xF3, 0xF3, 0xF3, 0xFF)
+                } else {
+                    ColorF::from_rgba8(0x20, 0x20, 0x20, 0xFF)
+                },
+            ),
             accent_cf,
             subtle_cf: colorf_of(
                 cfg.subtle.as_deref(),

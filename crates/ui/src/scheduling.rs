@@ -100,6 +100,8 @@ pub struct State {
     run_id: String,
     detail: Option<Value>,
     report_detail: Option<Value>,
+    detail_text: String,
+    report_text: String,
     inv: windows_canvas::Invalidator,
     templates: Vec<model::Template>,
     probe_supervision: bool,
@@ -140,6 +142,8 @@ impl Default for State {
             run_id: String::new(),
             detail: None,
             report_detail: None,
+            detail_text: String::new(),
+            report_text: String::new(),
             inv: windows_canvas::Invalidator::new(),
             templates: model::templates().unwrap_or_default(),
             probe_supervision: true,
@@ -319,13 +323,14 @@ impl State {
                         }
                     }
                         Ok(value) => {
-                            if value.get("results").is_some(){self.report_detail=Some(value);return;}
+                            if value.get("results").is_some(){self.report_text=bounded_pretty(&value);self.report_detail=Some(value);return;}
                         if let Some(id) = value["run_id"].as_str() {
                             self.run_id = id.into();
                         }
                         self.notice = value["state"].as_str().unwrap_or("已返回").into();
                         let active =
                             matches!(value["state"].as_str(), Some("running" | "cancelling"));
+                        self.detail_text = bounded_pretty(&value);
                         self.detail = Some(value);
                         if active && !self.run_id.is_empty() {
                             let id = self.run_id.clone();
@@ -575,6 +580,26 @@ impl State {
     }
 }
 
+fn bounded_pretty(value: &Value) -> String {
+    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    if text.chars().count() > 24000 {
+        text.chars().take(24000).collect::<String>() + "\n[界面摘录；完整报告请按作业 ID 分页回收]"
+    } else {
+        text
+    }
+}
+fn label_actions(label: String, actions: Vec<View>) -> View {
+    Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .column_spacing(12.0)
+        .children((
+            TextBlock::new()
+                .text(label)
+                .text_wrapping(TextWrapping::Wrap),
+            Border::new().grid_column(1).content(row(actions)),
+        ))
+}
+
 fn button(label: &str, action: impl Fn() -> Action + 'static, ctx: &ViewContext<Shell>) -> View {
     Button::new()
         .on_click(ctx.callback(move |_| Msg::Scheduling(action())))
@@ -625,7 +650,7 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
             || Action::Save,
             ctx,
         ),
-        button("放弃修改并重载", || Action::Reload, ctx),
+        button("重载设置", || Action::Reload, ctx),
     ]));
     blocks.push(row(vec![
         TextBlock::new().text("允许模型调度").into(),
@@ -769,19 +794,13 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 r.connectivity,
                 r.last_error.as_deref().unwrap_or("—")
             );
-            blocks.push(row(vec![
-                TextBlock::new()
-                    .text(status)
-                    .width(550.0)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .into(),
-                button("加入 / 续期", move || Action::Pool(id.clone()), ctx),
-                button(
-                    "生成连通性检测",
-                    move || Action::Check(probe_id.clone()),
-                    ctx,
-                ),
-            ]));
+            blocks.push(label_actions(
+                status,
+                vec![
+                    button("入池 / 续期", move || Action::Pool(id.clone()), ctx),
+                    button("检测", move || Action::Check(probe_id.clone()), ctx),
+                ],
+            ));
         }
         blocks.push(row(vec![
             button("上一组模型", || Action::Palette(-1), ctx),
@@ -794,7 +813,7 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 .into(),
             button("下一组模型", || Action::Palette(1), ctx),
         ]));
-        blocks.push(TextBlock::new().text("扫描只读取模型目录；生成检测会产生少量用量，需要在线监工并遵守共享探针预算。列表可见不代表已验证可用。").text_wrapping(TextWrapping::Wrap).into());
+        blocks.push(TextBlock::new().text("扫描只读取模型目录；生成检测会产生少量用量，监工可按工作流选择，遵守共享探针预算。列表可见不代表已验证可用。").text_wrapping(TextWrapping::Wrap).into());
         blocks.push(w::section_header(theme, Symbol::List, "限时模型池"));
         for (i, p) in state.draft.pool.iter().enumerate() {
             let name = state
@@ -805,23 +824,22 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 .map_or(p.route_id.as_str(), |r| r.model.as_str());
             let left = p.expires_at.saturating_sub(model::now_ms()) / 60000;
             let id = p.route_id.clone();
-            blocks.push(row(vec![
-                TextBlock::new()
-                    .text(format!(
-                        "{} · {name} · {}",
-                        i + 1,
-                        if left == 0 {
-                            "已到期".into()
-                        } else {
-                            format!("剩余 {left} 分钟")
-                        }
-                    ))
-                    .width(500.0)
-                    .into(),
-                button("↑", move || Action::MovePool(i, -1), ctx),
-                button("↓", move || Action::MovePool(i, 1), ctx),
-                button("移出", move || Action::RemovePool(id.clone()), ctx),
-            ]));
+            blocks.push(label_actions(
+                format!(
+                    "{} · {name} · {}",
+                    i + 1,
+                    if left == 0 {
+                        "已到期".into()
+                    } else {
+                        format!("剩余 {left} 分钟")
+                    }
+                ),
+                vec![
+                    button("↑", move || Action::MovePool(i, -1), ctx),
+                    button("↓", move || Action::MovePool(i, 1), ctx),
+                    button("移出", move || Action::RemovePool(id.clone()), ctx),
+                ],
+            ));
         }
         return blocks;
     }
@@ -888,13 +906,15 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
         TextBox::new()
             .placeholder_text("搜索模型")
             .text(&state.query)
-            .width(160.0)
+            .width(130.0)
             .on_text_changed(ctx.callback(|v| Msg::Scheduling(Action::Query(v))))
             .into(),
+        button("‹", || Action::Palette(-1), ctx),
+        button("›", || Action::Palette(1), ctx),
         ComboBox::new()
             .items_source(state.templates.iter().map(|t| t.title.as_str()))
             .selected_index(Some(state.template_index))
-            .width(150.0)
+            .width(130.0)
             .on_selection_changed(ctx.callback(|v| Msg::Scheduling(Action::PickTemplate(v))))
             .into(),
         button(
@@ -1035,15 +1055,15 @@ fn run_panel(state: &State, ctx: &ViewContext<Shell>) -> View {
         }
         blocks.push(
             TextBlock::new()
-                .text(serde_json::to_string_pretty(detail).unwrap_or_default())
+                .text(state.detail_text.clone())
                 .text_wrapping(TextWrapping::Wrap)
                 .into(),
         );
     }
-    if let Some(report) = &state.report_detail {
+    if state.report_detail.is_some() {
         blocks.push(
             TextBlock::new()
-                .text(serde_json::to_string_pretty(report).unwrap_or_default())
+                .text(state.report_text.clone())
                 .text_wrapping(TextWrapping::Wrap)
                 .into(),
         );
@@ -1103,6 +1123,8 @@ fn inspector(state: &State, _theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                             |r| format!("{} / {} ({})", r.source, r.model, r.effort)
                         )
                 ))
+                .text_wrapping(TextWrapping::Wrap)
+                .max_width(280.0)
                 .into(),
         );
         blocks.push(line("节点名称", n.title.clone(), Action::NodeTitle, ctx));
@@ -1247,6 +1269,8 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 .collect()
         })
         .unwrap_or_default();
+    let positions: std::collections::HashMap<String, (f64, f64)> =
+        nodes.iter().map(|n| (n.0.clone(), (n.3, n.4))).collect();
     let edges = state
         .workflow()
         .map(|w| w.edges.clone())
@@ -1261,6 +1285,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
     );
     let family = theme.font_family.clone();
     let viewport = state.viewport.clone();
+    let page = theme.page_cf;
     Border::new()
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .capture_pointer_on_press(true)
@@ -1297,13 +1322,10 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 Vector2::new((210.0 + pan.0 + x * zoom) as f32, (pan.1 + y * zoom) as f32)
             };
             for e in &edges {
-                if let (Some(a), Some(b)) = (
-                    nodes.iter().find(|n| n.0 == e.from),
-                    nodes.iter().find(|n| n.0 == e.to),
-                ) {
+                if let (Some(a), Some(b)) = (positions.get(&e.from), positions.get(&e.to)) {
                     c.draw_line(
-                        point(a.3 + 220.0, a.4 + 56.0),
-                        point(b.3, b.4 + 56.0),
+                        point(a.0 + 220.0, a.1 + 56.0),
+                        point(b.0, b.1 + 56.0),
                         &hi,
                         2.0,
                     );
@@ -1313,10 +1335,16 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 let p = point(n.3, n.4);
                 let w = (220.0 * zoom) as f32;
                 let h = (112.0 * zoom) as f32;
+                if p.x + w < 210.0 || p.x > c.width || p.y + h < 0.0 || p.y > c.height {
+                    continue;
+                }
                 let rect = Rect::new(p.x, p.y, p.x + w, p.y + h);
                 let rounded = RoundedRect::new(rect, 8.0, 8.0);
                 c.fill_rounded_rect(&rounded, &fill);
                 c.draw_rounded_rect(&rounded, if selected == Some(i) { &hi } else { &line }, 2.0);
+                if zoom < 0.3 {
+                    continue;
+                }
                 c.draw_text(
                     &n.1,
                     &text,
@@ -1341,7 +1369,12 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                     &hi,
                 );
             }
-            let opaque = c.create_solid_brush(windows_canvas::ColorF { a: 1.0, ..bg })?;
+            let opaque = c.create_solid_brush(windows_canvas::ColorF {
+                r: bg.r * bg.a + page.r * (1.0 - bg.a),
+                g: bg.g * bg.a + page.g * (1.0 - bg.a),
+                b: bg.b * bg.a + page.b * (1.0 - bg.a),
+                a: 1.0,
+            })?;
             c.fill_rect(&Rect::new(0.0, 0.0, 210.0, c.height), &opaque);
             c.draw_text(
                 "模型库 · 拖入节点框",

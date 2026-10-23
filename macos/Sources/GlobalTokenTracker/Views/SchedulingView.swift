@@ -196,7 +196,7 @@ struct SchedulingView: View {
                 HStack { TextField("搜索模型 / 来源", text: $query); Stepper("有效期 \(minutes) 分钟", value: $minutes, in: 1...10080) }
                 Text("目录可见不代表生成可用。检测会产生少量用量，监工可选，并遵守共享探针预算。")
                     .font(.caption).foregroundStyle(.secondary)
-                LazyVStack(alignment: .leading) {
+                ScrollView { LazyVStack(alignment: .leading) {
                     ForEach(filtered) { route in
                         HStack {
                             Text("\(route.source) / \(route.model)").draggable(route.id)
@@ -206,7 +206,7 @@ struct SchedulingView: View {
                             Button("生成检测") { request(params: .object(["action": .string("check"), "route_id": .string(route.id), "workflow_id": .string(workflowId), "luna_supervision": .bool(graph?.lunaSupervision ?? probeSupervision)])) }.disabled(busy)
                         }.padding(5)
                     }
-                }.frame(maxHeight: 280)
+                }}.frame(height: 280)
                 Divider()
                 Text("限时模型池").font(.headline)
                 ForEach(Array(settings.pool.enumerated()), id: \.element.id) { index, entry in
@@ -321,7 +321,7 @@ struct SchedulingView: View {
                     let grid=Color.secondary.opacity(0.15)
                     for x in stride(from:pan.x.truncatingRemainder(dividingBy:24),to:size.width,by:24) {var p=Path();p.move(to:CGPoint(x:x,y:0));p.addLine(to:CGPoint(x:x,y:size.height));context.stroke(p,with:.color(grid),lineWidth:0.5)}
                     for y in stride(from:pan.y.truncatingRemainder(dividingBy:24),to:size.height,by:24) {var p=Path();p.move(to:CGPoint(x:0,y:y));p.addLine(to:CGPoint(x:size.width,y:y));context.stroke(p,with:.color(grid),lineWidth:0.5)}
-                    if let g=graph {for e in g.edges {if let a=g.nodes.first(where:{$0.id==e.from}),let b=g.nodes.first(where:{$0.id==e.to}) {
+                    if let g=graph {let points=Dictionary(uniqueKeysWithValues:g.nodes.map {($0.id,$0)});for e in g.edges {if let a=points[e.from],let b=points[e.to] {
                         var p=Path();p.move(to:CGPoint(x:pan.x+(a.x+220)*zoom,y:pan.y+(a.y+56)*zoom));p.addLine(to:CGPoint(x:pan.x+b.x*zoom,y:pan.y+(b.y+56)*zoom));context.stroke(p,with:.color(.accentColor),lineWidth:2)
                     }}}
                 }.allowsHitTesting(false)
