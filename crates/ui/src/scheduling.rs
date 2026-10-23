@@ -14,6 +14,7 @@ pub enum Action {
     Check(String),
     Received(Result<Value, String>),
     StopDrag,
+    CaptureLost,
     Enabled(bool),
     Directed(bool),
     Source(String, bool),
@@ -78,6 +79,40 @@ enum Drag {
     Pan(f64, f64),
 }
 
+#[derive(Default)]
+struct Gesture {
+    current: Option<Drag>,
+    capture_lost: bool,
+}
+
+impl Gesture {
+    fn begin(&mut self, drag: Drag) {
+        self.current = Some(drag);
+        self.capture_lost = false;
+    }
+    fn cancel(&mut self) {
+        self.current = None;
+        self.capture_lost = false;
+    }
+    fn lost(&mut self) {
+        self.capture_lost = true;
+    }
+    fn movement(&mut self) -> Option<Drag> {
+        if self.capture_lost {
+            self.cancel();
+            None
+        } else {
+            self.current.clone()
+        }
+    }
+    fn release(&mut self) -> Option<Drag> {
+        // WinUI releases capture before enqueuing PointerReleased. Keep the
+        // drop until that queued release; a move or cancellation cancels loss.
+        self.capture_lost = false;
+        self.current.take()
+    }
+}
+
 pub struct State {
     pub draft: Settings,
     snapshot: Snapshot,
@@ -91,7 +126,7 @@ pub struct State {
     ttl: String,
     selected: usize,
     node: Option<usize>,
-    drag: Option<Drag>,
+    drag: Gesture,
     pan: (f64, f64),
     zoom: f64,
     palette: usize,
@@ -133,7 +168,7 @@ impl Default for State {
             ttl: "120".into(),
             selected: 0,
             node: None,
-            drag: None,
+            drag: Gesture::default(),
             pan: (30.0, 40.0),
             zoom: 1.0,
             palette: 0,
@@ -261,11 +296,12 @@ impl State {
                 json!({"action":"check","route_id":id,"workflow_id":self.workflow_id,"luna_supervision":self.workflow().map_or(self.probe_supervision,|w|w.luna_supervision)}),
                 ctx,
             ),
-            Action::StopDrag => self.drag = None,
+            Action::StopDrag => self.drag.cancel(),
+            Action::CaptureLost => self.drag.lost(),
             Action::PickTemplate(v) => {if let Some(i)=v {self.template_index=i.min(self.templates.len().saturating_sub(1));}},
             Action::ToggleParams => self.show_params = !self.show_params,
             Action::ToggleRun => self.show_run = !self.show_run,
-            Action::TogglePan => { self.pan_tool = !self.pan_tool; self.drag = None; },
+            Action::TogglePan => { self.pan_tool = !self.pan_tool; self.drag.cancel(); },
             Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
             Action::CloseInspector => {self.show_params=false;self.node=None;},
             Action::AddFallback(id) => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)) && n.node_type=="model" && id!=n.route_id && !n.fallback_routes.contains(&id) && n.fallback_routes.len()<8 {n.fallback_routes.push(id);self.dirty=true;}}
@@ -469,11 +505,11 @@ impl State {
             Action::Zoom(delta) => { let (width,height)=self.viewport.get(); let anchor=((width-210.0)/2.0,height/2.0);let world=((anchor.0-self.pan.0)/self.zoom,(anchor.1-self.pan.1)/self.zoom);self.zoom=(self.zoom+delta).clamp(0.1,1.8);self.pan=(anchor.0-world.0*self.zoom,anchor.1-world.1*self.zoom); },
             Action::Press(p) => {
                 if p.is_right_button_pressed || p.is_middle_button_pressed || (self.pan_tool && p.x >= 210.0) {
-                    self.drag = Some(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
+                    self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
                 } else if p.x < 200.0 && p.y >= 42.0 {
                     let i = self.palette * 10 + ((p.y - 42.0) / 42.0) as usize;
                     if i < self.routes().len() {
-                        self.drag = Some(Drag::Model(i));
+                        self.drag.begin(Drag::Model(i));
                     }
                 } else {
                     let (x, y) = self.point(p);
@@ -486,14 +522,14 @@ impl State {
                                 Drag::Node(i, x - n.x, y - n.y)
                             };
                             self.node = Some(i);
-                            self.drag = Some(drag);
-                        } else if p.x >= 210.0 { self.drag = Some(Drag::Pan(p.x-self.pan.0,p.y-self.pan.1)); }
+                            self.drag.begin(drag);
+                        } else if p.x >= 210.0 { self.drag.begin(Drag::Pan(p.x-self.pan.0,p.y-self.pan.1)); }
                 }
             }
             Action::Move(p) => {
-                if self.drag.is_none(){return;}
+                if self.drag.current.is_none(){return;}
                 let (x, y) = self.point(p);
-                match self.drag.clone() {
+                match self.drag.movement() {
                     Some(Drag::Node(i, dx, dy)) => {
                         if let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i)) {
                             n.x = (x - dx).clamp(-10000.0, 10000.0);
@@ -507,10 +543,11 @@ impl State {
             }
             Action::Release(p) => {
                 let (x, y) = self.point(p);
-                match self.drag.take() {
+                match self.drag.release() {
                     Some(Drag::Node(i,dx,dy)) => {if let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)){n.x=(x-dx).clamp(-10000.0,10000.0);n.y=(y-dy).clamp(-10000.0,10000.0);self.dirty=true;}},
                     Some(Drag::Pan(dx,dy)) => self.pan=(p.x-dx,p.y-dy),
                     Some(Drag::Model(index)) => {
+                        if p.x < 210.0 || p.y < 0.0 || p.y > self.viewport.get().1 || p.x > self.viewport.get().0 { return; }
                         if let Some(route) = self.routes().get(index).map(|r| (*r).clone()) {
                             if p.x >= 210.0 {
                                 if self.workflow().is_none() {
@@ -523,6 +560,7 @@ impl State {
                                 let hit = self.workflow().and_then(|w| w.hit(x, y));
                                 if let Some(w) = self.workflow_mut() {
                                     if let Some(i) = hit {
+                                        if w.nodes[i].node_type!="model" { self.error=Some("本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板".into()); return; }
                                         w.nodes[i].route_id.clone_from(&route.route_id);
                                         self.node = Some(i);
                                     } else {
@@ -1292,7 +1330,8 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         .on_pointer_pressed(ctx.callback(|p| Msg::Scheduling(Action::Press(p))))
         .on_pointer_moved(ctx.callback(|p: PointerEventInfo| Msg::Scheduling(Action::Move(p))))
         .on_pointer_released(ctx.callback(|p| Msg::Scheduling(Action::Release(p))))
-        .on_pointer_capture_lost(ctx.callback(|_| Msg::Scheduling(Action::StopDrag)))
+        .on_pointer_capture_lost(ctx.callback(|_| Msg::Scheduling(Action::CaptureLost)))
+        .on_pointer_canceled(ctx.callback(|_| Msg::Scheduling(Action::StopDrag)))
         .content(windows_canvas::canvas_invalidated(&state.inv, move |c| {
             use windows_canvas::{Rect, RoundedRect, TextFormat, Vector2};
             viewport.set((f64::from(c.width), f64::from(c.height)));
@@ -1388,4 +1427,39 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             }
             Ok(())
         }))
+}
+
+#[cfg(test)]
+mod gesture_tests {
+    use super::{Drag, Gesture};
+
+    #[test]
+    fn winui_capture_loss_before_release_preserves_exactly_one_model_drop() {
+        let mut gesture = Gesture::default();
+        gesture.begin(Drag::Model(4));
+        gesture.lost();
+        assert!(matches!(gesture.release(), Some(Drag::Model(4))));
+        assert!(gesture.release().is_none());
+    }
+    #[test]
+    fn pointer_cancellation_or_movement_after_capture_loss_prevents_a_stale_drop() {
+        let mut gesture = Gesture::default();
+        gesture.begin(Drag::Model(4));
+        gesture.lost();
+        assert!(gesture.movement().is_none());
+        assert!(gesture.release().is_none());
+        gesture.begin(Drag::Model(5));
+        gesture.cancel();
+        assert!(gesture.release().is_none());
+    }
+    #[test]
+    fn fresh_press_after_capture_loss_replaces_old_drag_and_edges_survive_normal_release() {
+        let mut gesture = Gesture::default();
+        gesture.begin(Drag::Model(4));
+        gesture.lost();
+        gesture.begin(Drag::Edge(1));
+        assert!(matches!(gesture.movement(), Some(Drag::Edge(1))));
+        gesture.lost();
+        assert!(matches!(gesture.release(), Some(Drag::Edge(1))));
+    }
 }
