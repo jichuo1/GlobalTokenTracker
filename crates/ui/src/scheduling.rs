@@ -772,6 +772,7 @@ fn secondary(text: impl Into<String>) -> View {
 }
 fn button(label: &str, action: impl Fn() -> Action + 'static, ctx: &ViewContext<Shell>) -> View {
     Button::new()
+        .min_height(36.0)
         .on_click(ctx.callback(move |_| Msg::Scheduling(action())))
         .content(label)
         .tooltip(help_for(label))
@@ -796,6 +797,7 @@ fn command(
 }
 fn menu(label: &str, description: &str, id: &'static str, ctx: &ViewContext<Shell>) -> View {
     Button::new()
+        .min_height(36.0)
         .on_click(ctx.callback(move |_| Msg::Scheduling(Action::ToggleMenu(id))))
         .content(format!("{label} ▾"))
         .tooltip(description)
@@ -1027,7 +1029,14 @@ fn row(children: Vec<View>) -> View {
     StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(8.0)
-        .keyed_children(crate::pages::keyed(children))
+        .keyed_children(children.into_iter().enumerate().map(|(i, child)| {
+            KeyedView::new(
+                i as u64,
+                Border::new()
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(child),
+            )
+        }))
 }
 
 pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<View> {
@@ -1265,11 +1274,13 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
     let mut actions = vec![
         Button::new()
             .style(ButtonStyle::Accent)
+            .min_height(36.0)
             .is_enabled(reason.is_none())
             .on_click(ctx.callback(|_| Msg::Scheduling(Action::Run)))
             .content("▶ 运行工作流")
             .tooltip(reason.unwrap_or(help_for("运行工作流"))),
         Button::new()
+            .min_height(36.0)
             .is_enabled(state.dirty && !state.busy)
             .on_click(ctx.callback(|_| Msg::Scheduling(Action::Save)))
             .content("保存修改")
@@ -1281,18 +1292,29 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
     actions.push(more_menu(state, ctx));
     let head = Grid::new()
         .columns([GridLength::STAR, GridLength::Auto])
+        .rows([GridLength::Auto, GridLength::Auto])
         .column_spacing(16.0)
+        .row_spacing(6.0)
         .children((
-            StackPanel::new().spacing(4.0).children((
-                ComboBox::new()
-                    .placeholder_text("选择或添加工作流")
-                    .items_source(state.draft.workflows.iter().map(|w| w.name.as_str()))
-                    .selected_index((!state.draft.workflows.is_empty()).then_some(state.selected))
-                    .max_width(255.0)
-                    .on_selection_changed(ctx.callback(|v: Option<usize>| {
-                        Msg::Scheduling(v.map_or(Action::StopDrag, Action::Select))
-                    })),
-                secondary(format!(
+            ComboBox::new()
+                .placeholder_text("选择或添加工作流")
+                .items_source(state.draft.workflows.iter().map(|w| w.name.as_str()))
+                .selected_index((!state.draft.workflows.is_empty()).then_some(state.selected))
+                .min_height(36.0)
+                .max_width(300.0)
+                .horizontal_alignment(HorizontalAlignment::Left)
+                .on_selection_changed(ctx.callback(|v: Option<usize>| {
+                    Msg::Scheduling(v.map_or(Action::StopDrag, Action::Select))
+                })),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(row(actions)),
+            TextBlock::new()
+                .grid_row(1)
+                .grid_column_span(2)
+                .margin(Thickness::new(8.0, 0.0, 0.0, 0.0))
+                .text(format!(
                     "{} · {} 个节点",
                     if state.busy {
                         "处理中"
@@ -1302,12 +1324,10 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
                         "已同步"
                     },
                     state.workflow().map_or(0, |w| w.nodes.len())
-                )),
-            )),
-            Border::new()
-                .grid_column(1)
-                .vertical_alignment(VerticalAlignment::Center)
-                .content(row(actions)),
+                ))
+                .font_size(12.0)
+                .foreground(theme.subtle)
+                .text_wrapping(TextWrapping::Wrap),
         ));
     let view = menu(
         "视图与帮助",
@@ -1322,12 +1342,34 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
                 TextBox::new()
                     .placeholder_text("搜索模型库")
                     .text(&state.query)
-                    .width(140.0)
+                    .width(200.0)
+                    .min_height(36.0)
                     .on_text_changed(ctx.callback(|v| Msg::Scheduling(Action::Query(v))))
                     .tooltip("按模型或来源名称筛选左侧列表。"),
-                button("‹", || Action::Palette(-1), ctx),
-                button("›", || Action::Palette(1), ctx),
-                secondary(format!("第 {} 页", state.palette + 1)),
+                Button::new()
+                    .width(36.0)
+                    .height(36.0)
+                    .is_enabled(state.palette > 0)
+                    .on_click(ctx.callback(|_| Msg::Scheduling(Action::Palette(-1))))
+                    .content("‹")
+                    .tooltip("上一页模型"),
+                Button::new()
+                    .width(36.0)
+                    .height(36.0)
+                    .is_enabled((state.palette + 1) * 10 < state.routes().len())
+                    .on_click(ctx.callback(|_| Msg::Scheduling(Action::Palette(1))))
+                    .content("›")
+                    .tooltip("下一页模型"),
+                TextBlock::new()
+                    .text(format!(
+                        "{} / {} 页",
+                        state.palette + 1,
+                        state.routes().len().saturating_sub(1) / 10 + 1
+                    ))
+                    .font_size(12.0)
+                    .foreground(theme.subtle)
+                    .min_width(64.0)
+                    .into(),
             ]),
             Border::new().grid_column(1).content(row(vec![
                 menu("＋ 添加节点", help_for("添加节点"), "add", ctx),
@@ -1354,35 +1396,47 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
     let selected = state
         .node
         .and_then(|i| state.workflow().and_then(|w| w.nodes.get(i)));
-    let mut context = vec![
-        TextBlock::new()
-            .text(selected.map_or_else(
-                || {
-                    reason
-                        .unwrap_or("从左侧拖入模型，或添加职责模板开始编排。")
-                        .to_owned()
-                },
-                |n| format!("已选中：{} · 拖动移动，右端口连接下游", n.title),
-            ))
-            .foreground(if selected.is_some() {
-                theme.accent
-            } else {
-                theme.subtle
-            })
-            .text_wrapping(TextWrapping::Wrap)
-            .into(),
-    ];
-    if selected.is_some() {
-        context.push(button("编辑节点", || Action::EditNode, ctx));
-        context.push(button("取消选择", || Action::ClearSelection, ctx));
-    }
-    let status = StackPanel::new().spacing(4.0).children((
+    let info = if let Some(node) = selected {
+        StackPanel::new().spacing(4.0).children((
+            TextBlock::new()
+                .text(format!("已选中：{}", node.title))
+                .font_size(14.0)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .foreground(theme.accent)
+                .text_wrapping(TextWrapping::Wrap),
+            secondary("拖动节点主体移动 · 从右端口连接下游"),
+        ))
+    } else {
+        secondary(reason.unwrap_or("从左侧拖入模型，或添加职责模板开始编排。"))
+    };
+    let actions = if selected.is_some() {
+        vec![
+            button("编辑节点", || Action::EditNode, ctx),
+            button("取消选择", || Action::ClearSelection, ctx),
+        ]
+    } else {
+        vec![]
+    };
+    let context = Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .column_spacing(16.0)
+        .min_height(40.0)
+        .children((
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(info),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(row(actions)),
+        ));
+    let status = StackPanel::new().spacing(6.0).children((
         TextBlock::new()
             .text(state.error.as_deref().unwrap_or(""))
             .foreground(theme.danger)
             .text_wrapping(TextWrapping::Wrap)
             .max_height(if state.error.is_some() { 44.0 } else { 0.0 }),
-        row(context),
+        context,
     ));
     let main = Grid::new()
         .rows([

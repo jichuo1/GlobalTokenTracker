@@ -155,15 +155,15 @@ struct SchedulingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            HStack(alignment:.center,spacing:10) {
                 if tab == "workflow" { workflowPicker } else { Text(tab == "sources" ? "来源与模型池":"调用配置").font(.title2.bold()) }
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
-                Text(dirty ? "未保存":"已同步").font(.caption).foregroundStyle(.secondary)
                 if tab == "workflow" { executionButtons }
                 Button("保存修改") {save()}.disabled(busy || !dirty).help("保存节点和配置；保存本身不会调用模型。")
                 moreMenu
-            }
+            }.frame(minHeight:32)
+            Text("\(dirty ? "有未保存修改":"已同步") · \(graph?.nodes.count ?? 0) 个节点").font(.caption).foregroundStyle(.secondary).padding(.leading,6)
             Picker("调度视图", selection: $tab) {
                 Text("工作流").tag("workflow"); Text("来源与模型池").tag("sources"); Text("调用配置").tag("profiles")
             }.pickerStyle(.segmented).frame(maxWidth: 600)
@@ -261,12 +261,10 @@ struct SchedulingView: View {
                 graphCanvas.frame(minWidth: 200, minHeight: 180)
                 if showInspector { inspectorPanel }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack {
+            HStack(alignment:.center,spacing:16) {
                 if let i=nodeIndex,let node=graph?.nodes[i] {
-                    Text("已选中：\(node.title)").foregroundStyle(Color.accentColor)
-                    Spacer()
-                    Button("编辑节点") {workflowSettings=false;showInspector=true}.help("查看当前节点的职责、提示词和参数。")
-                    Button("取消选择") {nodeId=nil;showInspector=false}
+                    VStack(alignment:.leading,spacing:4) {Text("已选中：\(node.title)").font(.body.weight(.semibold)).foregroundStyle(Color.accentColor);Text("拖动节点主体移动 · 从右端口连接下游").font(.caption).foregroundStyle(.secondary)}.frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
+                    HStack(spacing:8) {Button("编辑节点") {workflowSettings=false;showInspector=true}.help("查看当前节点的职责、提示词和参数。");Button("取消选择") {nodeId=nil;showInspector=false}}.layoutPriority(1)
                 } else {Text(runReason ?? "从左侧拖入模型，或添加职责模板开始编排。").font(.caption).foregroundStyle(.secondary)}
             }
             if showRun { runPanel.frame(height: 200) }
