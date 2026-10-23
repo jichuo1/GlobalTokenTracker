@@ -17,7 +17,7 @@ from .hook_guard import public_url
 from .activity import ActivityWatch
 from .models import WEB_TOOLS, WorkerFailure, redact, number
 from .processes import background_options, hidden_console_command, owned_process_command
-from .usage import clean_usage
+from .usage import clean_usage, positive_usage
 
 _slot_condition = threading.Condition()
 _busy_slots = set()
@@ -66,14 +66,16 @@ def classify_error(value):
     lower = " ".join(signals(value)).lower()
     # Explicit billing signals outrank a generic native authentication wrapper.
     if any(x in lower for x in ["no left credit", "insufficient credit", "insufficient balance", "quota exceeded", "quota exhausted",
-                               "quota_exceeded", "quota_exhausted", "insufficient_quota", "credit_balance_exhausted", "resource_exhausted", "余额不足", "额度耗尽"]):
+                               "quota_exceeded", "quota_exhausted", "insufficient_quota", "credit_balance_exhausted", "resource_exhausted", "credit balance is too low", "you've hit your limit", "usage limit reached", "余额不足", "额度耗尽"]):
         return WorkerFailure("quota_exhausted", scope="provider", retry_after_s=900)
     if re.search(r"\b429\b", lower) or any(x in lower for x in ["rate_limit", "rate limit", "too many requests"]):
         return WorkerFailure("rate_limited", scope="provider", retry_after_s=45)
-    if re.search(r"\b(?:401|403)\b", lower) or any(x in lower for x in ["provider_not_configured", "authentication", "unauthenticated", "auth_failed", "unauthorized", "invalid_api_key", "invalid api key", "model_request_auth_missing"]):
+    if re.search(r"\b(?:401|403)\b", lower) or any(x in lower for x in ["provider_not_configured", "authentication", "unauthenticated", "auth_failed", "unauthorized", "invalid_api_key", "invalid api key", "model_request_auth_missing", "not logged in", "please run /login", "oauth token has expired"]):
         return WorkerFailure("auth_failed", scope="provider", retry_after_s=900)
-    if any(x in lower for x in ["invalid_model_selection", "model_not_found", "unknown model", "not recognized", "model is not available"]):
+    if any(x in lower for x in ["invalid_model_selection", "model_not_found", "unknown model", "invalid model name", "not recognized", "model is not available"]):
         return WorkerFailure("model_unavailable", retry_after_s=300)
+    if any(x in lower for x in ["unknown option", "unrecognized argument", "unrecognized option", "unexpected argument", "invalid option", "cannot be launched inside another claude code session"]):
+        return WorkerFailure("native_configuration_error", scope="source", retry_after_s=300)
     if "context" in lower and any(x in lower for x in ["exceed", "too long", "limit"]):
         return WorkerFailure("context_exceeded", retry_after_s=0)
     if "permission" in lower or "denied" in lower:
@@ -123,11 +125,14 @@ class ExecutionContext:
                                    activity=self.activity)
         context.last_usage = self.last_usage
         context.max_protocol_frame_bytes = self.protocol_frame_bytes()
+        context.protocol_frame_limit = getattr(self, "protocol_frame_limit", 16777216)
+        context.max_protocol_buffer_bytes = getattr(self, "max_protocol_buffer_bytes", 67108864)
         return context
 
     def protocol_frame_bytes(self):
         value = number(getattr(self, "max_protocol_frame_bytes", None), 2 * 1024 * 1024)
-        return int(max(2 * 1024 * 1024, min(16 * 1024 * 1024, value)))
+        ceiling = min(134217728, getattr(self, "protocol_frame_limit", 16777216))
+        return int(max(2 * 1024 * 1024, min(ceiling, value)))
 
     def report_activity(self, kind, *, key="", version=None, amount=0):
         if self.cancel.is_set():
@@ -161,7 +166,7 @@ class ExecutionContext:
         if not usage and isinstance(result, dict):
             usage = result.get("usage")
         if isinstance(usage, dict):
-            self.last_usage.update(clean_usage(usage))
+            self.last_usage.update(positive_usage(usage))
         kind = event.get("type") or event.get("event")
         if not isinstance(kind, str):
             kind = ""
@@ -174,7 +179,7 @@ class ExecutionContext:
                 if not native_usage and isinstance(nested_message, dict):
                     native_usage = nested_message.get("usage")
                 if isinstance(native_usage, dict):
-                    self.last_usage.update(clean_usage(native_usage))
+                    self.last_usage.update(positive_usage(native_usage))
                 delta = nested.get("delta", {})
                 if isinstance(delta, dict):
                     ident = str(nested.get("index", "0"))
@@ -218,7 +223,7 @@ class ExecutionContext:
                     self.report_content("reasoning", key + ":reasoning", payload.get("reasoning") or payload.get("reasoningDelta"),
                                         delta="delta" in params or "reasoningDelta" in payload, version=sequence)
                 if isinstance(params.get("usage"), dict):
-                    self.last_usage.update(clean_usage(params["usage"]))
+                    self.last_usage.update(positive_usage(params["usage"]))
         if kind in {"result", "final"} or isinstance(event.get("result"), dict):
             body = result if isinstance(result, dict) and result else event
             self.report_content("output", stream + ":final", body.get("response") or body.get("text") or
@@ -243,7 +248,7 @@ class ProcessChannel:
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         env=env, **background_options(),
                                         start_new_session=os.name != "nt", bufsize=0)
-        self.lines = queue.Queue(maxsize=max(2, min(256, 64 * 1024 * 1024 // frame_limit)))
+        self.lines = queue.Queue(maxsize=max(1, min(256, getattr(context, "max_protocol_buffer_bytes", 67108864) // frame_limit)))
         self.stderr = bytearray()
         self.closed = threading.Event()
         self.writer = None
@@ -352,7 +357,23 @@ class ProcessChannel:
             self.writer.join(timeout=.05)
         check()
         if errors:
-            raise classify_error(self.stderr.decode(errors="replace")) from None
+            raise self.failure() from None
+
+    def failure(self):
+        # stdout EOF and stderr are delivered by different reader threads.
+        # Briefly drain diagnostics, while preserving cancellation/deadlines.
+        end = time.monotonic() + .2
+        while self.readers[1].is_alive() and time.monotonic() < end:
+            self.context.check()
+            self.readers[1].join(timeout=.02)
+        failure = classify_error(self.stderr.decode(errors="replace"))
+        if failure.code == "native_configuration_error":
+            failure.metering["generation_not_started"] = True
+        failure.details["stderr_chars"] = len(self.stderr)
+        code = self.process.poll()
+        if code is not None:
+            failure.details["native_exit_code"] = code
+        return failure
 
     def read(self):
         while True:
@@ -361,10 +382,10 @@ class ProcessChannel:
                 line = self.lines.get(timeout=.1)
             except queue.Empty:
                 if self.process.poll() is not None:
-                    raise classify_error(self.stderr.decode(errors="replace"))
+                    raise self.failure()
                 continue
             if line is None:
-                raise classify_error(self.stderr.decode(errors="replace"))
+                raise self.failure()
             if isinstance(line, WorkerFailure):
                 raise line
             try:
@@ -434,6 +455,7 @@ def truncation_failure(requested, text, usage=None, metering=None):
 
 
 def zcode(route, prompt, task, context):
+    options = route.runtime.get("gtt_call_options", {})
     env = os.environ.copy()
     env.update({"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": route.runtime["builtin_config"],
                 "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": route.runtime["provider_config"],
@@ -441,6 +463,7 @@ def zcode(route, prompt, task, context):
     transport = ProcessChannel(route.runtime["command"], context, env)
     operation = "gtt-" + context.workspace.name
     last_usage = {}
+    answered = False
     selection = {"providerId": route.provider, "modelId": route.model}
     if route.effort:
         selection["options"] = {"reasoningLevel": route.effort}
@@ -451,24 +474,38 @@ def zcode(route, prompt, task, context):
             "querySource": "main_turn"}
         if task.max_output_tokens is not None:
             params["maxOutputTokens"] = task.max_output_tokens
+        if options.get("zcode_payload") == "messages":
+            params["messages"] = [{"role": "user", "content": params.pop("prompt")}]
         transport.send({"id": "generate", "method": "workspace/generateText", "params": params})
         while True:
             message = transport.read()
             if message.get("id") == "generate":
+                answered = True
                 if "error" in message:
                     raise classify_error(message["error"])
                 result = message.get("result", {})
-                last_usage = result.get("usage", {})
-                if result.get("selection") != selection:
+                if not isinstance(result, dict):
+                    raise WorkerFailure("native_protocol_mismatch", scope="source", details={"contract_reason":"unexpected_native_frame_root"})
+                last_usage = positive_usage(result.get("usage", {}))
+                actual = result.get("selection")
+                compatible = (isinstance(actual, dict) and actual.get("providerId") == route.provider and actual.get("modelId") == route.model and
+                    (not route.effort or isinstance(actual.get("options"), dict) and actual["options"].get("reasoningLevel") == route.effort))
+                if (options.get("selection_validation", "exact") == "exact" and actual != selection) or not compatible:
                     raise WorkerFailure("model_selection_mismatch")
                 if result.get("toolCalls"):
                     raise WorkerFailure("unexpected_tool_call")
-                if result.get("finishReason") == "length":
+                if result.get("finishReason") in {"length", "max_tokens", "max_output_tokens"}:
                     raise truncation_failure(task.max_output_tokens, result.get("text", ""), result.get("usage"))
-                return {"text": result.get("text", ""), "usage": result.get("usage", {}), "actual_selection": result.get("selection"), "tool_calls": [], "observed_urls": []}
+                actual_selection = dict(selection)
+                native_options = actual.get("options", {})
+                if isinstance(native_options, dict) and isinstance(native_options.get("maxOutputTokens"), int) and not isinstance(native_options["maxOutputTokens"], bool) and 0 < native_options["maxOutputTokens"] <= 16777216:
+                    actual_selection["options"] = dict(selection.get("options", {})) | {"maxOutputTokens": native_options["maxOutputTokens"]}
+                return {"text": result.get("text", ""), "usage": last_usage, "actual_selection": actual_selection, "tool_calls": [], "observed_urls": []}
             if message.get("method") and message.get("id"):
                 transport.send({"id": message["id"], "error": {"code": -32601, "message": "Coordinator permits no tool/client action"}})
     except WorkerFailure as failure:
+        if not failure.metering.get("generation_not_started") and ((not answered and failure.code in {"timeout","provider_request_failed","native_connection_failed"}) or failure.code=="native_protocol_mismatch"):
+            failure.metering["unknown_paid_outcome"] = True
         if failure.usage is None and (last_usage or context.last_usage):
             failure.usage = last_usage or context.last_usage
         raise

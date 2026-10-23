@@ -1,0 +1,154 @@
+[
+  {
+    "id": "input",
+    "title": "输入材料",
+    "node_type": "input",
+    "role": "提供本次工作流的输入材料与范围。",
+    "tags": [
+      "输入"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "提供输入材料。"
+    }
+  },
+  {
+    "id": "research",
+    "title": "研究员",
+    "node_type": "model",
+    "role": "查找相关证据，区分事实、推断和盲区，提出必要的补充信息需求。",
+    "tags": [
+      "研究",
+      "证据"
+    ],
+    "task": {
+      "kind": "research",
+      "prompt": "围绕输入问题研究并给出有来源的结论和不确定性。",
+      "needs_web": true
+    }
+  },
+  {
+    "id": "extract",
+    "title": "资料提取员",
+    "node_type": "model",
+    "role": "按指定范围逐项提取事实，保留来源锚点与缺失项。",
+    "tags": [
+      "提取"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "从输入材料提取关键事实与证据，保留缺失和不确定项。"
+    }
+  },
+  {
+    "id": "review",
+    "title": "代码评审员",
+    "node_type": "model",
+    "role": "检查代码正确性、兼容性和具体回归风险，只报告有依据的问题。",
+    "tags": [
+      "代码",
+      "评审"
+    ],
+    "task": {
+      "kind": "code_review",
+      "prompt": "评审给定代码，指出具体问题、触发条件与验证方法。",
+      "max_output_tokens": 32768
+    }
+  },
+  {
+    "id": "logic",
+    "title": "逻辑检查员",
+    "node_type": "model",
+    "role": "核查前提、状态转移、边界条件、并发和计量的一致性。",
+    "tags": [
+      "逻辑",
+      "边界"
+    ],
+    "task": {
+      "kind": "logic_check",
+      "prompt": "核查输入方案的逻辑，列出反例与关键验证边界。",
+      "max_output_tokens": 32768
+    }
+  },
+  {
+    "id": "critic",
+    "title": "独立交叉核验员",
+    "node_type": "model",
+    "role": "独立比较上游报告和原始材料，标记冲突与证据不足，不以多数意见替代证据。",
+    "tags": [
+      "核验",
+      "反证"
+    ],
+    "task": {
+      "kind": "cross_check",
+      "prompt": "交叉核验上游报告与原材料，给出一致点、冲突及待验证项。",
+      "max_output_tokens": 32768
+    }
+  },
+  {
+    "id": "support",
+    "title": "信息支撑员",
+    "node_type": "model",
+    "role": "逐项处理上下文中的未解决信息请求，分别提供可核查的证据与准确请求 ID；仍无证据时保留请求。",
+    "tags": [
+      "补充信息",
+      "证据"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "读取 unresolved_information_requests，按准确 ID 返回 information_support:[{request_id,summary,evidence}]；证据不足则报告 information_requests，不能猜测。"
+    }
+  },
+  {
+    "id": "summary",
+    "title": "汇总编辑员",
+    "node_type": "model",
+    "role": "汇总已经核实的结果，保留来源与分歧，明确不能确定的边界。",
+    "tags": [
+      "汇总"
+    ],
+    "task": {
+      "kind": "summarize",
+      "prompt": "汇总上游证据，保留来源、冲突及验收边界。"
+    }
+  },
+  {
+    "id": "merge",
+    "title": "证据合并",
+    "node_type": "merge",
+    "role": "去重合并上游证据引用，不生成新的模型结论。",
+    "tags": [
+      "合并"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "合并证据引用。"
+    }
+  },
+  {
+    "id": "gate",
+    "title": "完成性检查",
+    "node_type": "gate",
+    "role": "检查上游是否全部成功并有至少一份模型报告；不判断语义正确性。",
+    "tags": [
+      "门禁"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "检查结构性完成条件。"
+    }
+  },
+  {
+    "id": "output",
+    "title": "结果输出",
+    "node_type": "output",
+    "role": "收集已完成节点的报告引用和状态，保留完整结果的作业编号。",
+    "tags": [
+      "输出"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "输出已完成的结果引用。"
+    }
+  }
+]

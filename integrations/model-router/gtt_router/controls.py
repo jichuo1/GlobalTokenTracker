@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 
 FILE_NAME = "external-interface.json"
-BLOCK_CODES = {"external_interface_disabled", "external_interface_settings_invalid", "luna_supervisor_required"}
+BLOCK_CODES = {"external_interface_disabled", "external_interface_settings_invalid", "luna_supervisor_required",
+               "scheduling_disabled", "scheduling_settings_invalid", "source_dispatch_disabled", "route_not_selected", "directed_pool_expired", "directed_pool_empty", "workflow_cancelled"}
 
 
 class DispatchBlocked(ValueError):

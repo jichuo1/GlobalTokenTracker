@@ -40,6 +40,8 @@ EFFORT_ORDER = {"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhig
 class OpenCodeServer:
     def __init__(self, source, context, output_tokens=8192):
         self.context = context
+        self.options = source.get("gtt_call_options", {})
+        self.agent_steps = self.options.get("agent_steps", AGENT_STEPS)
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))
             port = reserved.getsockname()[1]
@@ -54,7 +56,7 @@ class OpenCodeServer:
             env.pop("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", None)
         overlay = {"autoupdate": False, "permission": TOOL_PERMISSIONS,
                    "mcp": {name: {"enabled": False} for name in source.get("mcp_names", [])},
-                   "agent": {AGENT: {"mode": "primary", "steps": AGENT_STEPS, "permission": TOOL_PERMISSIONS,
+                   "agent": {AGENT: {"mode": "primary", "steps": self.agent_steps, "permission": TOOL_PERMISSIONS,
                                      "prompt": "Use only the caller's supplied material. Return the requested JSON. No tools or delegation.",
                                      "options": {"maxOutputTokens": output_tokens}}}}
         if output_tokens is None:
@@ -69,7 +71,7 @@ class OpenCodeServer:
         self.context.check()
         req = urllib.request.Request(self.base + path, data=json.dumps(body).encode() if body is not None else None, headers=self.headers)
         try:
-            with self.opener.open(req, timeout=max(.1, min(2, self.context.deadline - time.monotonic()))) as reply:
+            with self.opener.open(req, timeout=max(.1, min(self.options.get("http_timeout_s", 2), self.context.deadline - time.monotonic()))) as reply:
                 data = reply.read(limit + 1)
             self.context.check()
             if len(data) > limit:
@@ -77,7 +79,8 @@ class OpenCodeServer:
             return json.loads(data) if data else None
         except urllib.error.HTTPError as error:
             # Error bodies can contain provider credentials; classify in memory only.
-            raise classify_error(error.read(16000).decode("utf-8", "replace")) from None
+            failure = classify_error({"http_status": error.code, "error": error.read(16000).decode("utf-8", "replace")})
+            raise failure from None
         except (ValueError, OSError, urllib.error.URLError):
             raise WorkerFailure("native_connection_failed", scope="source", retry_after_s=30) from None
 
@@ -97,7 +100,7 @@ class OpenCodeServer:
     def verify_permissions(self):
         agents = self.request("/agent", limit=1048576)
         own = next((a for a in agents if a.get("name") == AGENT), None)
-        if not own or own.get("mode") != "primary" or own.get("steps") != AGENT_STEPS:
+        if not own or own.get("mode") != "primary" or own.get("steps") != self.agent_steps:
             raise WorkerFailure("native_permission_contract_failed", scope="source")
         rules = own.get("permission", [])
         for tool in TOOL_PERMISSIONS:
@@ -159,6 +162,24 @@ def discover_opencode(source):
 
 
 def opencode(route, prompt, task, context):
+    issuance = {"started": False}
+    try:
+        return _opencode(route, prompt, task, context, issuance)
+    except WorkerFailure as failure:
+        if not issuance["started"]:
+            failure.metering["generation_not_started"] = True
+            failure.scope = "source"
+        elif failure.code in {"timeout","native_connection_failed"}:
+            failure.metering["unknown_paid_outcome"] = True
+        raise
+    except OSError:
+        raise WorkerFailure("native_configuration_error" if not issuance["started"] else "native_connection_failed",
+            scope="source", metering={"generation_not_started": not issuance["started"]}) from None
+    except (TypeError, ValueError, AttributeError, KeyError):
+        raise WorkerFailure("native_protocol_mismatch",scope="source",metering={"generation_not_started":not issuance["started"],"unknown_paid_outcome":issuance["started"]}) from None
+
+
+def _opencode(route, prompt, task, context, issuance):
     with native_slot(route, context) as slot:
         with opencode_server(route.runtime, slot, task.max_output_tokens) as server:
             session = server.request("/session", {"title": "GTT bounded auxiliary task",
@@ -173,12 +194,14 @@ def opencode(route, prompt, task, context):
                     "tools": tools, "parts": [{"type": "text", "text": prompt}]}
             if route.effort:
                 body["variant"] = route.effort
+            # From this point an HTTP failure may mean an accepted paid request.
+            issuance["started"] = True
             server.request("/session/" + session_id + "/prompt_async", body, limit=65536)
             last_usage, last_metering = {}, {}
             while True:
                 try:
                     slot.check()
-                    messages = server.request("/session/" + session_id + "/message?limit=8", limit=16777216 if getattr(task, "_research_group", False) else slot.protocol_frame_bytes())
+                    messages = server.request("/session/" + session_id + "/message?limit=" + str(server.options.get("message_limit", 8)), limit=max(16777216, slot.protocol_frame_bytes()) if getattr(task, "_research_group", False) else slot.protocol_frame_bytes())
                 except WorkerFailure as failure:
                     # Pending responses may already report billable reasoning.
                     # Cancellation/idle timeout must retain that observed usage.
@@ -235,7 +258,7 @@ def opencode(route, prompt, task, context):
                             "usage": usage if total > 0 else {}, "native_usage": tokens, **metering,
                             "actual_selection": {"provider": info["providerID"], "model": info["modelID"], "effort": route.effort},
                             "tool_calls": [], "observed_urls": []}
-                slot.cancel.wait(.15)
+                slot.cancel.wait(server.options.get("poll_interval_s", .15))
 
 
 def print_agent(route, prompt, task, context):
@@ -245,20 +268,25 @@ def print_agent(route, prompt, task, context):
         if task.max_output_tokens is not None:
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(task.max_output_tokens)
         settings = {"disableAllHooks": True}
+        options = route.runtime.get("gtt_call_options", {})
         args = route.runtime["command"] + ["--print", "--input-format", "text", "--output-format", "stream-json", "--verbose",
                                            "--tools", "", "--disallowedTools", "*", "--strict-mcp-config",
-                                           "--mcp-config", '{"mcpServers":{}}', "--no-session-persistence", "--max-turns", "1",
+                                           "--mcp-config", '{"mcpServers":{}}', "--no-session-persistence", "--max-turns", str(options.get("max_turns", 1)),
                                            "--permission-mode", "plan", "--model", route.model, "--settings", json.dumps(settings),
                                            "--system-prompt", "You are a bounded text-only auxiliary worker. Use only supplied material. Return the caller's JSON contract. No tools or delegation."]
         if route.adapter == "claude_cli":
             # stream-json alone returns whole messages. This documented native
             # flag exposes the actual text/thinking deltas for idle monitoring.
             # Other print clients must explicitly confirm support first.
-            args += ["--safe-mode", "--include-partial-messages"]
+            if options.get("safe_mode", True):
+                args += ["--safe-mode"]
+            if options.get("partial_messages", True):
+                args += ["--include-partial-messages"]
         if route.effort:
             args += ["--effort", route.effort]
         transport = ProcessChannel(args, slot, env)
         last_usage = {}
+        result_seen = False
         try:
             transport.send_text(prompt)
             observed_model = None
@@ -271,13 +299,14 @@ def print_agent(route, prompt, task, context):
                         raise WorkerFailure("unexpected_tool_call")
                 if event.get("type") != "result":
                     continue
+                result_seen = True
                 usage = clean_usage(event.get("usage", {}))
                 last_usage = usage
                 if event.get("subtype") in {"error_max_turns", "error_max_output_tokens"}:
                     from .adapters import truncation_failure
                     raise truncation_failure(task.max_output_tokens, event.get("result", ""), usage)
                 if event.get("is_error"):
-                    failure = classify_error(event.get("result") or event.get("errors") or event.get("subtype"))
+                    failure = classify_error({"message": event.get("result"), "errors": event.get("errors"), "type": event.get("subtype")})
                     failure.usage = usage
                     raise failure
                 if event.get("subtype") not in {None, "success"}:
@@ -300,6 +329,8 @@ def print_agent(route, prompt, task, context):
                         "actual_selection": {"model": actual_model or route.model, "effort": route.effort},
                         "tool_calls": [], "observed_urls": []}
         except WorkerFailure as failure:
+            if not result_seen and not failure.metering.get("generation_not_started") and failure.code in {"timeout","native_connection_failed","provider_request_failed"}:
+                failure.metering["unknown_paid_outcome"] = True
             if failure.usage is None and (last_usage or slot.last_usage):
                 failure.usage = last_usage or slot.last_usage
             raise

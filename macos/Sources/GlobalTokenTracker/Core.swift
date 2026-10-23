@@ -101,6 +101,10 @@ enum Core {
         return try await detached(priority: .utility) { try call { gtt_external_interface(arg) } }
     }
 
+    nonisolated static func scheduling(_ request: String) async throws -> SchedulerJSON {
+        try await detached(priority: .utility) { try call { request.withCString { gtt_scheduler($0) } } }
+    }
+
     nonisolated static func fxStatus() async throws -> FxStatus {
         try await detached(priority: .utility) { try call { gtt_fx_status() } }
     }

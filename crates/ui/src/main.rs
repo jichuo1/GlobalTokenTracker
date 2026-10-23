@@ -16,6 +16,7 @@ mod gpu_slide;
 mod heat;
 mod i18n;
 mod pages;
+mod scheduling;
 mod theme;
 mod tray;
 mod trend;
@@ -115,11 +116,13 @@ pub enum Page {
     Quota,
     Devices,
     Sources,
+    Scheduling,
     Prices,
     Settings,
 }
 
 pub struct Shell {
+    scheduler: scheduling::State,
     snap: Option<Snapshot>,
     /// Sources / prices tables — independent of `snap`, see `PageData`.
     sources: Option<Vec<SourceHealth>>,
@@ -281,6 +284,7 @@ pub enum MenuKind {
 }
 
 pub enum Msg {
+    Scheduling(scheduling::Action),
     Loaded(LoadOutcome),
     Failed(String),
     Tick(u64),
@@ -824,10 +828,22 @@ impl Component for Shell {
             Ok("quota") => Page::Quota,
             Ok("devices") => Page::Devices,
             Ok("sources") => Page::Sources,
+            Ok("scheduling") => Page::Scheduling,
             Ok("prices") => Page::Prices,
             Ok("settings") => Page::Settings,
             _ => Page::Overview,
         };
+        if page == Page::Scheduling {
+            context.spawn_background(|_| {
+                Msg::Scheduling(scheduling::Action::Received(
+                    globaltokentracker_core::scheduler::call(
+                        "router_scheduling",
+                        serde_json::json!({}),
+                    )
+                    .map_err(|e| e.to_string()),
+                ))
+            });
+        }
         // force_prices=true: one refresh attempt on every launch (per spec:
         // 每次打开软件自动获取一次), off the UI thread. Subsequent scans only
         // refresh when >12h stale.
@@ -902,6 +918,7 @@ impl Component for Shell {
             ..Default::default()
         };
         Self {
+            scheduler: scheduling::State::default(),
             snap: None,
             sources: None,
             prices: None,
@@ -982,6 +999,7 @@ impl Component for Shell {
 
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
+            Msg::Scheduling(action) => self.scheduler.update(action, context),
             Msg::Loaded(outcome) => {
                 let is_real_scan = match &outcome {
                     LoadOutcome::Fresh(s) => s.scanned,
@@ -1942,6 +1960,7 @@ impl Component for Shell {
                     Some("配额" | "Quota" | "quota") => Page::Quota,
                     Some("设备" | "Devices" | "devices") => Page::Devices,
                     Some("数据源" | "Sources" | "sources") => Page::Sources,
+                    Some("调度" | "Scheduling" | "scheduling") => Page::Scheduling,
                     Some("价格" | "Prices" | "prices") => Page::Prices,
                     Some("设置" | "Settings" | "settings") => Page::Settings,
                     Some("总览" | "Overview" | "overview") => Page::Overview,
@@ -1961,6 +1980,9 @@ impl Component for Shell {
                     match self.page {
                         Page::Devices => self.load_devices(context),
                         Page::Settings => self.load_viewers(context),
+                        Page::Scheduling => {
+                            self.scheduler.update(scheduling::Action::Load, context);
+                        }
                         _ => {}
                     }
                 }
@@ -2231,14 +2253,13 @@ impl Component for Shell {
                 .text(label)
                 .is_selected(self.page == page)
         };
-        // Nav floats on row 0 centered across the full window width — the
-        // TitleBar.Content slot centers within the area that excludes the
-        // caption buttons, which reads as left-shifted.
+        // Navigation lives in its own client row below the native caption
+        // area. Pointer gestures here must never drag or maximize the window.
         let nav = SelectorBar::new()
             .on_selected_text_changed(context.callback(Msg::Nav))
             .horizontal_alignment(HorizontalAlignment::Center)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_row(0)
+            .grid_row(1)
             .collection_slot(
                 SelectorBarSlot::Items,
                 [
@@ -2248,14 +2269,13 @@ impl Component for Shell {
                     KeyedView::new("quota", item(t!("配额"), Page::Quota)),
                     KeyedView::new("devices", item(t!("设备"), Page::Devices)),
                     KeyedView::new("sources", item(t!("数据源"), Page::Sources)),
+                    KeyedView::new("scheduling", item(t!("调度"), Page::Scheduling)),
                     KeyedView::new("prices", item(t!("价格"), Page::Prices)),
                     KeyedView::new("settings", item(t!("设置"), Page::Settings)),
                 ],
             );
-        // Brand mark pinned to the caption area's left edge. It renders in
-        // the root Grid's row 0, on top of the TitleBar (TitleBar.Content is
-        // centered by design and LeftHeader is not bound in this framework
-        // version — so the nav keeps the Content slot and the brand floats).
+        // The top strip is reserved for branding, native window controls and
+        // window dragging. Page navigation is outside this entire strip.
         let brand = StackPanel::new()
             .orientation(Orientation::Horizontal)
             .spacing(10.0)
@@ -2309,7 +2329,7 @@ impl Component for Shell {
             ));
         }
         chrome_rows.push(KeyedView::new("filters", chrome));
-        let chrome = StackPanel::new().grid_row(1).keyed_children(chrome_rows);
+        let chrome = StackPanel::new().grid_row(2).keyed_children(chrome_rows);
         // Dropdown overlay renders last so its card floats above the page;
         // closed → an empty background-less Border (XAML skips hit-testing
         // null-background elements, so it never swallows clicks).
@@ -2317,7 +2337,7 @@ impl Component for Shell {
             (Page::Overview | Page::Speed | Page::Detail, Some(s), Some(kind)) => {
                 dropdown_overlay(s, theme, &chrome_state, kind, context)
             }
-            _ => Border::new().grid_row(2).into(),
+            _ => Border::new().grid_row(3).into(),
         };
         // Close prompt: quit vs hide-to-tray, with a remember checkbox.
         // The secondary button is disabled when no tray icon exists (hiding
@@ -2376,15 +2396,28 @@ impl Component for Shell {
             KeyedView::new(
                 "titlebar",
                 TitleBar::new()
-                    .preferred_height(WindowTitleBarHeight::Tall)
+                    .preferred_height(WindowTitleBarHeight::Standard)
                     .grid_row(0),
             ),
-            KeyedView::new("nav", nav),
+            KeyedView::new(
+                "nav",
+                Border::new()
+                    .grid_row(1)
+                    .min_height(44.0)
+                    .border_brush(theme.divider)
+                    .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+                    .content(
+                        ScrollViewer::new()
+                            .horizontal_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                            .vertical_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+                            .content(nav),
+                    ),
+            ),
             KeyedView::new("brand", brand),
             KeyedView::new(
                 "pagehost",
                 Border::new()
-                    .grid_row(2)
+                    .grid_row(3)
                     .background(
                         theme
                             .page_bg
@@ -2401,7 +2434,7 @@ impl Component for Shell {
             root.push(KeyedView::new(
                 "backdrop",
                 Border::new()
-                    .grid_row(1)
+                    .grid_row(2)
                     .grid_row_span(2)
                     .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
                     .on_pointer_pressed(context.callback(|_: PointerEventInfo| Msg::CloseMenu)),
@@ -2434,7 +2467,12 @@ impl Component for Shell {
                 ),
         ));
         Grid::new()
-            .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
+            .rows([
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::STAR,
+            ])
             .keyed_children(root)
     }
 }
@@ -2547,6 +2585,7 @@ impl Shell {
                 },
             ),
             Page::Sources => sources_page(self.sources.as_deref(), theme),
+            Page::Scheduling => scheduling::page(&self.scheduler, theme, context),
             Page::Prices => prices_page(
                 self.prices.as_ref(),
                 theme,
@@ -2606,7 +2645,14 @@ impl Shell {
         if page == self.page {
             self.block_count.set(blocks.len());
         }
-        pages::frame_page(
+        let frame = if page == Page::Scheduling && self.scheduler.is_workspace() {
+            pages::canvas_frame_page
+        } else if page == Page::Scheduling {
+            pages::bounded_frame_page
+        } else {
+            pages::frame_page
+        };
+        frame(
             &self.theme,
             self.page_gap(page),
             blocks,
@@ -3121,9 +3167,20 @@ fn ensure_single_instance() -> Option<SingleInstanceGuard> {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
-    let name: Vec<u16> = "Local\\GlobalTokenTracker_SingleInstance_Mutex\0"
-        .encode_utf16()
-        .collect();
+    let test_instance = if cfg!(debug_assertions) {
+        std::env::var("GTT_UI_TEST_INSTANCE").ok().filter(|s| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+    } else {
+        None
+    };
+    let mutex_name = test_instance.map_or_else(
+        || "Local\\GlobalTokenTracker_SingleInstance_Mutex".to_owned(),
+        |id| format!("Local\\GlobalTokenTracker_Test_{id}"),
+    );
+    let name: Vec<u16> = format!("{mutex_name}\0").encode_utf16().collect();
 
     unsafe {
         let handle = CreateMutexW(std::ptr::null(), 1, name.as_ptr());

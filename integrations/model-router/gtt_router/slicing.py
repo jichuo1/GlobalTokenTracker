@@ -15,7 +15,8 @@ def requested_output(task, prompt_chars=None):
     # Small jobs retain established defaults. Bigger excerpts reserve reasoning
     # headroom without assuming that all native output capacity will be used.
     scale = max(1, math.sqrt(max(1, size) / 8000))
-    return min(MAX_OUTPUT_TOKENS, max(getattr(task, "_output_target", 0), math.ceil(base * scale / 8192) * 8192))
+    cap = getattr(task, "_runtime_limits", {}).get("max_output_tokens", MAX_OUTPUT_TOKENS)
+    return min(cap, max(getattr(task, "_output_target", 0), math.ceil(base * scale / 8192) * 8192))
 
 
 def output_budget(task, route, prompt_chars=None):
@@ -23,6 +24,7 @@ def output_budget(task, route, prompt_chars=None):
     effective = route.output_ceiling(None if task.output_mode == "native" else requested)
     if effective is None:
         effective = requested  # unknown capacity is not unlimited capacity
+    effective = min(effective, getattr(task, "_runtime_limits", {}).get("max_output_tokens", MAX_OUTPUT_TOKENS))
     if route.context_window:
         size = len(task.prompt) + len(task.context) if prompt_chars is None else prompt_chars
         effective = min(effective, route.context_window - math.ceil(size / 2))
@@ -141,7 +143,7 @@ class SliceQueue:
         record["state"] = "failed"
         code = (result or {}).get("error", {}).get("code", "missing_result")
         record["error"] = code
-        if code == "timeout":
+        if code == "timeout" or result.get("unknown_paid_outcome") is True:
             record["state"] = "unknown"  # paid native outcome may be unavailable
             return
         details = (result or {}).get("error", {}).get("details", {})

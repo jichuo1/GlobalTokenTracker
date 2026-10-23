@@ -1,6 +1,7 @@
 """Sparse idle-time generation probes; do not permanently blacklist a source."""
 
 from pathlib import Path
+import copy
 import threading
 import time
 import uuid
@@ -9,8 +10,9 @@ from .adapters import ExecutionContext, validate_result
 from .bridge import quota_for
 from .models import Task, WorkerFailure, now_ms
 from .controls import BLOCK_CODES, DispatchBlocked
+from .store import SOURCE_CONTRACT_ERRORS
 
-CONNECTIVITY_ERRORS = {"auth_failed", "quota_exhausted", "rate_limited", "timeout", "provider_request_failed", "adapter_error", "model_unavailable"}
+CONNECTIVITY_ERRORS = {"auth_failed", "quota_exhausted", "rate_limited", "timeout", "provider_request_failed", "adapter_error", "model_unavailable", *SOURCE_CONTRACT_ERRORS}
 
 
 class RecoveryController:
@@ -20,9 +22,15 @@ class RecoveryController:
         self.stopping = threading.Event()
         self.active_cancel = None
         self.thread = None
-        if self.settings.get("enabled", False):
-            self.thread = threading.Thread(target=self._run, name="gtt-recovery", daemon=True)
-            self.thread.start()
+        self.configuration_lock = threading.Lock()
+        self.configure(self.settings)
+
+    def configure(self, settings):
+        with self.configuration_lock:
+            self.settings = settings
+            if self.settings.get("enabled", False) and self.thread is None and not self.stopping.is_set():
+                self.thread = threading.Thread(target=self._run, name="gtt-recovery", daemon=True)
+                self.thread.start()
 
     def _run(self):
         while not self.stopping.wait(self.settings.get("poll_s", 60)):
@@ -47,25 +55,30 @@ class RecoveryController:
     def _keys(self, route):
         return ["route:" + route.id, "provider:" + route.failure_domain, "source:" + route.source]
 
-    def recheck(self, route_id, workflow_id="default"):
+    def recheck(self, route_id, workflow_id="default", *, supervision_required=True):
         if not isinstance(route_id, str) or not route_id or len(route_id) > 200:
             raise ValueError("route_id must be a bounded route identity")
         # Explicit requests bypass old cooldowns, never capacity or probe budgets.
         if not isinstance(workflow_id, str) or not workflow_id or len(workflow_id) > 200:
             raise ValueError("workflow_id must be a bounded workflow identity")
-        return self.tick(route_id=route_id, workflow_id=workflow_id)
+        if not isinstance(supervision_required, bool):
+            raise ValueError("supervision_required must be a boolean")
+        return self.tick(route_id=route_id, workflow_id=workflow_id, supervision_required=supervision_required)
 
-    def tick(self, route_id=None, workflow_id=None):
+    def tick(self, route_id=None, workflow_id=None, supervision_required=True):
         service = self.service
+        profile = service.call_profile()
         with service.capacity:
             try:
                 service.require_external_interface()
+                service.require_scheduling()
                 if workflow_id is None:
                     supervisors = service._active_supervisors()
                     if not supervisors:
                         raise DispatchBlocked("luna_supervisor_required")
                     workflow_id = supervisors[0]["workflow_id"]
-                service.require_supervisor(workflow_id)
+                if supervision_required or route_id is None:
+                    service.require_supervisor(workflow_id)
             except DispatchBlocked as failure:
                 return {"checked": False, "reason": failure.code}
             workers = [a for a in service._active_codex() if a.get("role") != "supervisor"]
@@ -77,6 +90,10 @@ class RecoveryController:
         service.ensure_catalog()
         candidates = []
         for route in service.catalog.routes:
+            try:
+                service.require_scheduling(route)
+            except DispatchBlocked:
+                continue
             if route_id is not None and route.id != route_id:
                 continue
             if not route.auth_hint or not route.enabled:
@@ -112,7 +129,8 @@ class RecoveryController:
         timeout = max(self.settings.get("probe_timeout_s", 30), min(120, (service.store.health("route:" + route.id).get("latency_ms") or 20000) / 1000 * 1.5))
         if route_id is not None:
             timeout = max(60, timeout)
-        task = Task(kind="extract", prompt=prompt, max_output_tokens=route.output_ceiling(4096), deadline_s=timeout, workflow_id=workflow_id)
+        task = Task(kind="extract", prompt=prompt, max_output_tokens=min(route.output_ceiling(4096),profile["limits"]["max_output_tokens"]), deadline_s=timeout, workflow_id=workflow_id)
+        task._workflow_supervision_opt_out = not supervision_required
         directory = service.state_dir / "recovery-probes" / uuid.uuid4().hex
         context = ExecutionContext(cancel, time.monotonic() + timeout, directory)
         charged = 0
@@ -132,9 +150,11 @@ class RecoveryController:
             if route.adapter == "antigravity_cli":
                 route.runtime.setdefault("pool_root", str(service.state_dir / "native-worker-slots"))
             context.check()
-            service.require_dispatch(workflow_id, runtime=True)
+            service.require_dispatch(workflow_id, runtime=True, route=route, task=task)
             started = True
-            raw = adapter(route, prompt, task, context)
+            execution_route = copy.copy(route)
+            execution_route.runtime = dict(route.runtime) | {"gtt_call_options":profile["source_options"].get(route.source,{})}
+            raw = adapter(execution_route, prompt, task, context)
             from .service import reported_tokens
             measured = reported_tokens(raw.get("usage"))
             charged = estimate if measured is None else measured
@@ -151,6 +171,9 @@ class RecoveryController:
             if failure.code in BLOCK_CODES and not started:
                 return {"checked": False, "reason": failure.code}
             from .service import reported_tokens
+            if failure.metering.get("generation_not_started") is True:
+                started, charged = False, 0
+                metering = {"generation_not_started": True, "token_measurement": "not_started"}
             if failure.usage:
                 measured = reported_tokens(failure.usage)
                 charged = measured if measured is not None else estimate
@@ -159,7 +182,7 @@ class RecoveryController:
                 service.store.defer_probe(keys, 60)
                 record_probe(False, "yielded_to_foreground", charged if metering["token_measurement"] == "reported" else (estimate if started else 0))
                 return {"checked": False, "reason": "yielded_to_foreground"}
-            if failure.code not in {"auth_failed", "model_unavailable", "quota_exhausted"} and not charged and metering["token_measurement"] != "reported":
+            if failure.code not in {"auth_failed", "model_unavailable", "quota_exhausted"} and not charged and metering["token_measurement"] not in {"reported", "not_started"}:
                 charged = estimate
             state = service.store.health("route:" + route.id)
             exponent = min(state["probe_failures"], 5)

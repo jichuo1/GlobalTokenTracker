@@ -1,6 +1,6 @@
 ---
 name: gtt-coordinator
-description: Coordinate bounded research, extraction, local code reviews, logic checks, and long-running research groups across configured coding tools through GTT's model router; prefer external workers, avoid overlap with Codex subagents, and use explicit caller-side Luna handoffs when needed. Use for substantial tasks that benefit from independent supporting evidence, not trivial edits or final deployment decisions.
+description: Coordinate bounded tasks and visual workflows through GTT's model router. Respect directed route pools, configurable call profiles and the workflow's optional Luna setting. Ordinary/group calls keep real Luna supervision by default. Prefer external workers and avoid duplicate work.
 ---
 
 # GTT 协同调度
@@ -9,13 +9,18 @@ description: Coordinate bounded research, extraction, local code reviews, logic 
 
 ## 分配与 token 效率
 
+普通任务默认 `timeout_mode=activity`，原 `deadline_s` 是首次响应期待窗。真实正文、推理增量、工具阶段或原生状态变化可继续执行；随后按 `idle_s + stall_grace_s` 判断停滞，总执行仍受默认3600秒的 `hard_deadline_s` 限制。用户给定硬截止时用 `timeout_mode=hard`。进程存活、重复心跳、空帧和轮询时间戳不能续期。当前ZCode RPC仅返回最终结果，无法可靠观察思考进度；按材料规模配置 `ttft_s`，不要伪造活动。组总截止和token预算仍是硬边界。
+
 - 在等待构建、读取主线代码或实现之前，识别真正能并行的辅助问题。优先外部软件；外部同类路线满额时先转其他外部来源，再考虑本地 Luna。不要为了“多模型”重复已经清楚的工作。
 - 首次调用 `router_inventory` 使用默认紧凑输出。通过 `router_plan` 看能力、速度、额度、截止时间和选择理由；模型名、模型列表或成功算术探针不能证明评审能力。
 - 默认 `routing_strategy=auto` 按任务类型选路；确有取舍时可设 quality/speed/reliability/token_efficiency。策略只改变合格路线间的偏好，不能绕过质量、额度或能力门槛。token_efficiency 只采用至少三次同类实际用量，并按材料规模修正；缺少数据是 unknown，不代表低消耗，更不代表低价格。
 - 普通任务保留 `allow_fallback=true`，尝试数应覆盖成员、互证与至少一次合格补位；`preferred_route` 作为偏好，不固定唯一来源。只有明确做单路线诊断或用户要求严格选定来源时，才关闭回退并只试一次。查看 plan/submit 的 warnings，不能忽略回退被关闭或没有补位次数的提示；显式调用方约束仍被服务尊重。
 - 快速资料收集用 `research` 且 `needs_web=true`；只整理已提供材料用 `extract`/`summarize`。有逻辑要求的局部代码用 `code_review`/`logic_check`，给出源码片段、具体疑点、基准提交和验收条件。实现长程任务仍留在主线。
-- 仅传必要片段，通常先控制在数千字符；逻辑检查、局部评审与交叉核对默认总输出上限 32768 tokens、截止时间 600 秒，检索/提取/整理默认 8192 tokens、180 秒。总输出包含隐藏思考，最终报告通常压到 5000 字符以内。高难度任务可显式提高到 65536 tokens，并按需设置最长 900 秒；上限是余量，按实际返回用量计量。简单整理可显式降低预算。用 `context_label` 和 `base_revision` 识别材料，禁止传完整私有仓库、整个主线程历史、凭证文件或真实密钥。外部提交需要处在用户当前任务授权范围内；新目的地、发布或外部写入仍需要对应授权。
-- 未指定 `token_budget` 时，调度器按输入、输出上限、并发与交叉核对计算默认总预算，最高 200000 tokens；显式总预算优先。通过 `router_plan` 检查 requested/effective_output_tokens 和模型明确上报的 output_limit。模型上限较低时会按实际能力收紧；大上下文、多路并发若仍超出总预算，应拆成独立小任务。不要在截断后反复用同一小上限重试。
+- 仅传必要片段，通常先控制在数千字符；小材料逻辑任务从32768 tokens / 600秒开始，检索/提取/整理从8192 / 180开始。总输出包含隐藏思考，报告通常压到5000字符以内。高负载任务可结合切片与实际模型容量显式增加输出至524288，并按材料规模配置首次响应窗；上限是余量，按实际用量计量。简单整理可降低预算。用context_label/base_revision标识材料，禁止传完整私有仓库、整个线程历史、凭证文件或密钥。外部提交须属于当前授权范围；新目的地、发布或外部写入仍需对应授权。
+- 未指定 `token_budget` 时，按输入、输出、并发与互证计算默认预算，常规默认最高200000；显式大输出/native可扩大，普通任务硬上限4000000。显式总预算优先。普通显式输出允许至524288，默认fixed；未指定输出默认adaptive，按材料规模留思考余量。native是采用目录原生输出上限的显式选择，未知容量仍有界。通过plan检查requested/effective与output_limit及上下文余量，不把512k目录上限当实际生成证据。
+- 明确length截断且正文为零时，先检查实际输出余量；adaptive可在原总预算和尝试次数内提高下一次上限，fixed不会超过调用方显式值。不要反复用同一不足上限重试，也不要仅凭零正文缩片。logical_fixed_output_below_reasoning_default提示固定逻辑预算偏低；output_recovery_unavailable表示没有合格的更大容量。部分JSON不能当完整报告，网页来源门槛仍须核对。
+- 计划/提交返回resident_protocol_mismatch时，核对实际安装副本和常驻服务，而非重提任务；当前客户端要求runtime_contract_version=2。共享服务切换须遵循用户维护授权，保留配置/账本/认证，并在空闲窗口刷新客户端。源码更新不能证明运行版本已切换。
+- 真正长正文需显式report_max_chars（默认120000，最多4194304），以同步提示词、解析和传输容量；仍要求完整JSON与严格complete=true。0.3.1通过report_capacity_v1声明此能力，旧任务协议2保持兼容；旧服务收到新字段前会返回resident_feature_missing。collect的大报告裁剪不是模型生成截断，完整结果保留本机状态库。显式queue_wait_s优先于旧external_queue_grace_s接力默认，仍受共享容量与总截止约束。
 - 默认预算另留一次换源余量；允许回退且仍有尝试次数时，单次执行会留出总截止时间的一部分用于接力。较长评审材料会按同类任务历史输入规模修正 ETA，出现 `large_excerpt_consider_split_or_research_group` 时按问题/代码边界拆分，或转研究组；不要机械复制完整文件，也不擅自截断用户指定材料。
 - 使用同一个 `workflow_id`。`work_key` 写“具体问题+用途”，例如 `comment-url:protocol-research` 与 `comment-url:code-review`。同用途不要重复提交；实现与独立评审应使用不同键。
 - 拆分检索角度，不把同一提示词机械复制给多个模型。`fanout=2` 默认附带一次交叉检查；只有不需要互证时才关闭 `verify`。共同引用同一网页不算两个独立来源，模型投票不能消除无证据结论。
@@ -33,15 +38,39 @@ description: Coordinate bounded research, extraction, local code reviews, logic 
 
 ## 分组研究
 
+高消耗任务结合独立 `price_weight`、`prefer_free` 与 `prefer_new_models` 选路：明确零价和低价模型优先承担批量采集/整理，负责人仍须达到质量门槛。价格来自原生目录或准确route配置，过期/未知价格不当作免费，订阅权益和实际账单另列。同provider的明确家族和版本队列支持新版本偏好；新版本不继承旧版本榜单成绩，先做真实生成及适合其职责的回归，保留可用旧版作替代。round scope可覆盖这三个字段，不改软件全局选定模型。
+
 需要多个阶段、来源互证或高消耗研究时，使用 `router_group_plan`/`router_group_submit`，给出 `topic`、必要 `context`、稳定 workflow/work_key，并说明是否需要网页证据。每组自适应 3–8 个角色，含一名高质量负责人；采集优先速度，分析/检查保留智力门槛，多组共享并发和计量。默认最多三个组执行，主线预留一个全局槽位。模型清单和榜单只是路由依据，不能当成果验收。
 
-组默认累计预算 50000000 tokens，包含思考、正文、失败尝试的可观测用量与保守估算。每轮不加 GTT 人工 token 上限，原生模型上下文/输出范围和协议容量仍有效。默认 12 轮/6 小时，可显式设置至 64 轮/7 天；上限不等于实际消费。通过 `router_group_collect` 分页回收关键材料，主线保留独立核对、统筹、发散与最终质量验收。
+组默认累计预算50000000 tokens，包含思考、正文、失败尝试的可观测用量与保守估算。单次默认adaptive按角色和片大小分配，native显式采用原生输出上限，未知容量仍有界；没有固定每轮总配额。默认12轮/6小时，可设至64轮/7天；上限不等于实际消费。
+
+大材料默认slice_mode=adaptive，目标12000字符、最小2000、最大32000；max_slices默认64可至256，含缩片父记录与支撑记录。角色席位与工作项数分开，max_parallel只约束本组队列，不提高共享容量。根据独立代码/问题边界使用context_range，机器按段落/行切片只提供可追溯片段，不保证语法或跨片语义独立。成功片不重放；未知付费结果只有调用方明确retry_unknown_slices=true才允许重试，并保留原计量。
+
+成员应主动报告盲区research_leads与缺证information_requests，说明问题、原因、材料范围或原报告ID。授权材料/报告的定向支撑可提前补位，最多自动两层；网页/泛化补查由负责人用context_range、evidence_workers及有界next_tasks规划。未解决信息请求不能提交完整终审。负责人在guided探索中继续验证有价值的线索，最多默认2轮、组预算15%，范围扩大的建议报回Codex。不得为了保持活动编造线索。用collect/events回收请求、支撑出处和研究建议，主线仍须独立核对。
+
+信息支撑用information_request_ids绑定worker:index问题编号，support_requests会携带原问题与原因；多问题不能仅凭worker关联全部关闭。分裂支撑须覆盖完整指定范围。探索成员单独记账，负责人复核及后续主线任务沿组总预算；scope_capacity_full、context_exceeded、预算不足和work_already_covered不得通过新Luna任务绕过。合组前处理待执行/未知片和未解决请求，保留原组显式并发与探索限制。
+
+0.3.2的聚合任务最多绑定32份已完成报告及8个精确问题，报告摘录共享14000字符容量，不能把excerpt_only当完整报告；更大集合需分层汇总。定向支撑只回答support_requests，不重复全组审计。信息交付闭合有information_response事件与information_status，仍须独立核验答案。完成的worker活动快照按attempt冻结；纯活动日志约30秒采样，状态/预算/失败及问题变化立即记录，当前进度以supervisor快照为准。大事件保留有界省略标识并推进cursor，不让旧快照卡住事件回收。
+
+角色消息正文超过600字符会标summary_excerpt_only并提供原事件ID，不能把裁剪的案例索引或证据当全文。重启续跑先加载路线目录，再复用缓存结果；slice计数表示当前轮队列，旧轮证据在完整results中保留，不能把新轮0成功误报为旧成果丢失。EOF不完整JSON的大切片可补位缩片，原生stop仍不证明完整；研究组提取最多16条finding，需要更多记录时分组保留，不因条数提示遗漏案例。
 
 负责人可要求补查、替换失败/低质量模型、申请扩展或交回 Codex。预算扩展需 Codex核对理由并显式 `router_group_extend(approved=true)`，最多 100000000；增减席位需 `router_group_adjust_seats(approved=true)`，仍在3–8范围。模型输出不会自动批准这两类变更。处理成员 `codex_fallback` 时，沿已有真实子代理能力补位、同步 lease，核对后通过 `router_complete_codex` 回报；组仍须负责人和 Codex终审，不把Luna名字当能力证明。
 
 重启保留报告和已计量消耗并标 interrupted；只有明确的 `router_group_resume` 继续，不自动重放未知/已付费调用。不完整成员证据不能直接验收。组报告进入 `submit_codex` 后，由 Codex核对再用 `router_group_complete(accepted=true)` 标记完成；未解决问题保持待审或续研。若当前连接尚未出现组工具，使用已安装 `router.py call --method ... --params-file ...`，新MCP连接可发现新工具，不重新启动另一层Codex。
 
 ## 与 Codex 子代理共用调度
+
+普通任务、研究组、续研和默认恢复探测仍使用真实 Luna 监工。可视工作流的 `luna_supervision` 是用户可选项；尊重用户已保存或明确授权的关闭选择，通过 `router_workflow_submit` 执行该工作流，无需为它创建监工，也不能伪造登记。手动检测可通过 `router_scheduling(action="check", luna_supervision=false)` 显式关闭本次监工，其他共享门槛与探针预算保留。自动后台恢复仍要求真实在线监工。启用监工时，复用同 workflow 的实际运行监工；首次启动使用当前协作工具、可用 Luna 和 `fork_turns=none`，不能另起 Codex CLI、创建用户聊天或只填名字冒充启动。
+
+实际启动后通过 `router_sync_codex_agents` 登记其真实 ID、实际 Luna model、`role="supervisor"`、`status="running"` 和与待调度任务完全一致的非空 `workflow_id`。为监工使用独立 owner；同 owner 的完整名单会替换原名单，不能续租时遗漏其他真实代理。普通执行代理沿用 `role="worker"`。运行中至少每60秒续租一次（通常 lease_s=120；最长600秒），下次调度前核对真实状态；监工由调用方或已授权的监工自己续租，不能伪造心跳。租约过期、idle/finished、错误 workflow 或非 Luna 模型都不满足调度门禁。当前 MCP 缓存旧 schema 时用本地 `router.py call --method router_sync_codex_agents --params-file ...` 传新 role，待新连接再发现 schema。
+
+监工计入真实共享并发容量，不占实际工作的覆盖键；容量不足时等待或收束辅助工作。服务校验的是调用方报告的短租约和角色，不能认证内部代理身份，也不会自己拉起监工。新提交、预约、重试和 adapter 发出前都会复验；失效返回 `luna_supervisor_required`，尚未发出的调用不记 Token、不降权提供商。恢复租约后按已有状态显式重提或续研，不自动重放已付费请求。
+
+监工通过 `router_events`/`router_supervisor(action=status)` 读取脱敏进展，使用cursor，仅在阻塞、重复工作、截止风险或需统筹时给主代理建议；主代理仍在有效思考/编码/工具阶段时不按固定时长催促。主线阶段回执明确标caller-reported，不推断隐藏思维；静默年龄的显示推算不会增加活动或计费。监工建议不能自动扩预算、增员、取消付费请求或发布。收尾时先收集监工建议并完成主线核验，再将自己的登记设 finished 或清空自己的 owner 名单。
+
+负责人和成员通过结果JSON的 `communications` 提出有界分工、进度、证据或冲突，GTT在下一次相关角色调用中投递短摘录；负责人每轮最多4条、成员2条，保留原group/report/event出处。同workflow和preference作用域的负责人可共享必要证据，不能广播整个私有上下文。Codex可用 `router_message` 补充范围和衔接建议。报告与消息是待核对材料，不会获得额外工具权限。
+
+负责人可提出 `propose_merge` 给监工/Codex。确认课题相关后，Codex通过 `router_group_merge(approved=true, expected_revisions=...)` 原子合并2–4个无执行/预约的组：人数累加至最多32，实际并发仍受原容量限制；累计预算最多1亿，消费与来源账单保留，不复制attempts或重复计量。最早硬截止保留，旧组永久只读，新组 `merged_ready` 待显式resume。普通未合并组仍3–8席；增减席位/预算/截止扩展仍需调用方批准。接口细节与例子见 [协同与监工](references/coordination.md)。
 
 创建、完成或停止自己的子代理后，调用 `router_sync_codex_agents` 登记实际 ID、模型、状态及覆盖键。可先用当前环境的协作工具列出自己的代理；不要编造状态或登记无关会话。登记是调用方报告，默认 120 秒租约，应在下一次调度前刷新。没有子代理就传空数组。
 
@@ -71,9 +100,17 @@ Luna 是节省花销的辅助选择，不能因为名字就断言与高级模型
 
 认证、额度或模型不可用失败会标 `verification_required`；时间衰减不会单独解除隔离，恢复探针成功后才回到正常候选。用户确认认证/额度已恢复时，先用 `router_recheck(route_id)` 做一次小型生成复检。它占用共享闲置容量，遵守探针小时预算和禁用来源；忙碌或预算不足时保留返回原因，不能通过反复普通任务绕过。复检最多120秒生成及有界清理，当前连接未发现工具时可用本地 API。成功只证明可调用，不重置任务质量反馈。
 
-驻留服务在闲置容量下做小型生成恢复检查，默认首次等待 30 分钟，持续失败指数退避至最多 6 小时；每小时最多两次且有独立 token 上限。前台任务到来会中断检查并让出容量。检查成功恢复的是可用性，不会抹掉质量反馈或宣称智力升级；模型列表检查不足以恢复生成可用性。可以在本地 recovery 配置关闭或限制检查，不通过聊天传递凭证。
+驻留服务仅在外部协同接口开启、有有效 Luna 监工且有闲置容量时做小型生成恢复检查；无监工时不进行后台生成。手动 `router_recheck` 传与监工一致的 workflow_id（默认 default）。默认首次等待 30 分钟，持续失败指数退避至最多 6 小时；每小时最多两次且有独立 token 上限。前台任务到来会中断检查并让出容量。检查成功恢复的是可用性，不会抹掉质量反馈或宣称智力升级；模型列表检查不足以恢复生成可用性。可以在本地 recovery 配置关闭或限制检查，不通过聊天传递凭证。
+
+## 外部协同接口开关
+
+GTT 设置里的「外部协同接口」同时控制原生协同观察（capabilities/snapshot/refresh）与全部模型调度 MCP/API 入口。关闭后停止新模型请求，包括排队、重试、续研和恢复探测；已发出的请求允许完成并按真实用量记账，GTT 本地用量统计继续工作。开关独立保存在 GTT 数据目录 `external-interface.json`，不写进凭证配置；指定其他账本不能绕过全局关闭，SQLite 兼容回退也不能绕过。缺失文件沿用旧版开启状态，损坏配置按关闭处理并显示错误。遇到 `external_interface_disabled` 或 `external_interface_settings_invalid` 时停止外部协同，不自动改文件或重新打开开关。
 
 ## 扩展与参考
+
+0.4.0 的可视调度与配置档见 [定向工作流](references/visual-workflows.md)。先读取 `router_scheduling`，遵守来源开关、定向池有效期和 `effective_profile`，不绕过用户选定模型。`allowed_routes` 是有顺序的硬池，空列表禁止所有路线，不能通过 Codex 回退逃出池。节点可配置职责、类型、备用路线与调用参数，11 个职责模板包括不生成模型内容的输入、合并、门禁和输出节点。
+
+工作流提交使用稳定 `request_id`；网络返回不明确时先查同一请求与运行状态。未知节点不自动重放；明确接受重复付费风险后才使用新请求 ID 和 `acknowledge_unknown_risk=true`。输出、等待、重试、并发、预算和协议容量以配置档及模型原生能力共同约束，schema 的实现范围不等于当前已启用上限。默认 512k 输出策略保持，修改配置不构成大输出能力验收。
 
 需要新增执行源、额度含义或榜单字段时，读取 [references/integration.md](references/integration.md)。只扩展本地已授权的适配器配置，不修改现有项目或全局的模型、权限、凭证或登录状态。协调器有自己的 Antigravity 项目，网页读取及缓存读取权限只作用于该项目，工具门禁进一步限制到本次成功抓取的缓存文件。
 

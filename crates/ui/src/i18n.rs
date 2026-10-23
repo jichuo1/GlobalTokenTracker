@@ -106,6 +106,7 @@ pub fn en(zh: &str) -> &str {
         "明细" => "Details",
         "配额" => "Quota",
         "数据源" => "Sources",
+        "调度" => "Scheduling",
         "价格" => "Prices",
         "价目表（$/1M tokens）" => "Price list ($/1M tokens)",
         "设置" => "Settings",

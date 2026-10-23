@@ -10,10 +10,15 @@ import uuid
 from .models import now_ms
 from .usage import project_attempt
 
+REPEATED_CONNECTIVITY_ERRORS = {"timeout", "provider_request_failed", "adapter_error"}
+SOURCE_CONTRACT_ERRORS = {"native_protocol_mismatch", "native_configuration_error"}
+VERIFICATION_ERRORS = {"auth_failed", "quota_exhausted", "model_unavailable", *SOURCE_CONTRACT_ERRORS}
+
 
 class StateStore:
     def __init__(self, path):
         path = Path(path)
+        self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.conn = sqlite3.connect(path, check_same_thread=False)
@@ -49,9 +54,12 @@ class StateStore:
                 self.conn.execute("ALTER TABLE health ADD COLUMN " + name + " " + declaration)
         if "verification_required" not in columns:
             self.conn.execute("UPDATE health SET verification_required=1 WHERE last_error IN ('auth_failed','quota_exhausted','model_unavailable')")
+        # Upgrade legacy failed routes without replaying any paid request. A
+        # decayed score is not evidence that a repeatedly broken route works.
+        self.conn.execute("UPDATE health SET verification_required=1 WHERE last_error IN ('native_protocol_mismatch','native_configuration_error') OR (key LIKE 'route:%' AND failure_streak>=3 AND last_error IN ('timeout','provider_request_failed','adapter_error'))")
         # Legacy connectivity failures get a delayed check, never an immediate
         # burst of billable requests when a new server version starts.
-        self.conn.execute("UPDATE health SET next_probe_at=? WHERE next_probe_at=0 AND last_error IN ('auth_failed','quota_exhausted','rate_limited','timeout','provider_request_failed','adapter_error')", (now_ms() + 1800000,))
+        self.conn.execute("UPDATE health SET next_probe_at=? WHERE next_probe_at=0 AND last_error IN ('auth_failed','quota_exhausted','rate_limited','timeout','provider_request_failed','adapter_error','model_unavailable','native_protocol_mismatch','native_configuration_error')", (now_ms() + 1800000,))
         self.conn.execute("UPDATE jobs SET state='interrupted',updated_at=? WHERE state IN ('queued','running','cancelling','needs_codex')", (now_ms(),))
         self.conn.commit()
         # Replay is idempotent and runs only on coordinator startup, never in
@@ -242,12 +250,13 @@ class StateStore:
 
     def failure(self, key, code, cooldown_s, penalty_step=.16, recovery_delay_s=1800):
         with self.lock:
+            prior_streak = self.health(key)["failure_streak"]
             penalty = min(.8, self.availability(key)["recent_penalty"] + penalty_step)
             self.conn.execute("INSERT INTO health(key,failures,cooldown_until,last_error) VALUES(?,1,?,?) ON CONFLICT(key) DO UPDATE SET failures=failures+1,cooldown_until=MAX(cooldown_until,excluded.cooldown_until),last_error=excluded.last_error",
                               (key, now_ms() + int(cooldown_s * 1000), code))
             self.conn.execute("UPDATE health SET penalty=?,penalty_updated_at=?,failure_streak=failure_streak+1,next_probe_at=? WHERE key=?",
                               (penalty, now_ms(), now_ms() + int(max(cooldown_s, recovery_delay_s) * 1000), key))
-            if code in {"auth_failed", "quota_exhausted", "model_unavailable"}:
+            if code in VERIFICATION_ERRORS or (key.startswith("route:") and code in REPEATED_CONNECTIVITY_ERRORS and prior_streak >= 2):
                 self.conn.execute("UPDATE health SET verification_required=1 WHERE key=?", (key,))
             self.conn.commit()
 

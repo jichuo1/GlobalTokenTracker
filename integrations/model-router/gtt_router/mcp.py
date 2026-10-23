@@ -8,6 +8,7 @@ from .models import TASK_KINDS, MAX_OUTPUT_TOKENS, MAX_TASK_TOKENS, DEFAULT_REPO
 from .group_contract import GROUP_SCHEMA
 from .preferences import SCHEMA as PREFERENCE_SCHEMA
 from . import __version__
+from .profiles import ABS_LIMITS
 
 
 TASK_SCHEMA = {
@@ -20,32 +21,33 @@ TASK_SCHEMA = {
                              "description": "Soft ranking preference only; never bypasses quality, quota, verified recovery, capability, budget or deadline gates"},
         "prompt": {"type": "string", "description": "Bounded task, not an entire repository or conversation"},
         "context": {"type": "string", "description": "Only necessary redacted source excerpts or evidence"},
-        "deadline_s": {"type": "number", "minimum": 5, "maximum": 900},
+        "deadline_s": {"type": "number", "minimum": 5, "maximum": ABS_LIMITS["max_deadline_s"]},
         "timeout_mode": {"type": "string", "enum": ["activity", "hard"], "default": "activity"},
-        "hard_deadline_s": {"type": "number", "minimum": 5, "maximum": 86400, "default": 3600},
-        "ttft_s": {"type": ["number", "null"], "minimum": 1, "maximum": 3600},
-        "idle_s": {"type": "number", "minimum": 1, "maximum": 3600, "default": 180},
+        "hard_deadline_s": {"type": "number", "minimum": 5, "maximum": ABS_LIMITS["max_hard_deadline_s"], "default": 3600},
+        "ttft_s": {"type": ["number", "null"], "minimum": 1, "maximum": ABS_LIMITS["max_ttft_s"]},
+        "idle_s": {"type": "number", "minimum": 1, "maximum": ABS_LIMITS["max_idle_s"], "default": 180},
         "stall_grace_s": {"type": "number", "minimum": 0, "maximum": 300, "default": 15},
         "price_weight": {"type": "number", "minimum": 0, "maximum": 100, "default": 30},
         "prefer_free": {"type": "boolean", "default": True},
         "prefer_new_models": {"type": "boolean", "default": True},
         "output_mode": {"type": "string", "enum": ["fixed", "adaptive", "native"],
                         "description": "Adaptive scales reasoning with excerpt size; explicit max_output_tokens defaults to fixed. Native opts into the reported model ceiling."},
-        "queue_wait_s": {"type": "number", "minimum": 0, "maximum": 3600, "default": 120},
-        "report_max_chars": {"type": "integer", "minimum": 1000, "maximum": MAX_REPORT_CHARS, "default": DEFAULT_REPORT_CHARS,
+        "queue_wait_s": {"type": "number", "minimum": 0, "maximum": ABS_LIMITS["max_queue_wait_s"], "default": 120},
+        "report_max_chars": {"type": "integer", "minimum": 1000, "maximum": ABS_LIMITS["max_report_chars"], "default": DEFAULT_REPORT_CHARS,
                              "description": "Explicit final JSON report capacity; large reports still require complete evidence and bounded collection."},
-        "fanout": {"type": "integer", "minimum": 1, "maximum": 4},
+        "fanout": {"type": "integer", "minimum": 1, "maximum": ABS_LIMITS["max_fanout"]},
         "verify": {"type": "boolean", "description": "Independent reports followed by a discrepancy check; defaults true for fanout>1"},
         "needs_web": {"type": "boolean"}, "min_quality": {"type": "number", "minimum": 0, "maximum": 100},
-        "max_attempts": {"type": "integer", "minimum": 1, "maximum": 16, "default": 6},
-        "max_output_tokens": {"type": "integer", "minimum": 256, "maximum": MAX_OUTPUT_TOKENS,
+        "max_attempts": {"type": "integer", "minimum": 1, "maximum": ABS_LIMITS["max_attempts"], "default": 6},
+        "max_output_tokens": {"type": "integer", "minimum": 256, "maximum": ABS_LIMITS["max_output_tokens"],
                               "description": "Total generation ceiling including hidden reasoning; logical tasks default to 32768, other tasks to 8192"},
         "priority": {"type": "integer", "minimum": 0, "maximum": 100},
         "preferred_route": {"type": "string"}, "allow_fallback": {"type": "boolean", "default": True,
             "description": "Keep true for ordinary work; false is an explicit single-route diagnostic constraint, with no automatic replacement"},
+        "allowed_routes":{"type":["array","null"],"maxItems":128,"items":{"type":"string"},"description":"Optional ordered hard route pool; an empty list forbids all routes. Codex fallback cannot escape it."},
         "base_revision": {"type": "string"}, "context_label": {"type": "string"},
         "workflow_id": {"type": "string"}, "work_key": {"type": "string", "description": "Explicit goal+purpose key to suppress duplicated work"},
-        "token_budget": {"type": "integer", "minimum": 1000, "maximum": MAX_TASK_TOKENS,
+        "token_budget": {"type": "integer", "minimum": 1000, "maximum": ABS_LIMITS["max_task_tokens"],
                          "description": "Shared job ceiling including retries. Defaults stay capped at 200000; explicit large output/native mode can scale to 4000000."},
         "focus_urls": {"type": "array", "maxItems": 4, "items": {"type": "string"}, "description": "Known authoritative URLs; avoids broad searches when sources are already known"},
         "focus_terms": {"type": "array", "maxItems": 8, "items": {"type": "string"}, "description": "Keywords for a bounded fetched-page excerpt"},
@@ -66,6 +68,16 @@ REFS = {"type": "array", "maxItems": 4, "items": {"type": "object", "additionalP
                    "url": {"type": "string", "maxLength": 600}, "anchor": {"type": "string", "maxLength": 300}}}}
 MESSAGE_KIND = {"type": "string", "enum": ["assignment", "evidence", "conflict", "progress", "suggestion", "merge_proposal"]}
 TOOLS = [
+    tool("router_scheduling", "Read/edit user dispatch switches, expiring ordered model pool and saved DAGs. Refresh scans native catalogs only; check uses the existing bounded generation probe and real Luna gate. Save requires the current revision.",
+         {"action": {"type": "string", "enum": ["get", "save", "refresh", "check"]}, "value": {"type": "object"},
+          "expected_revision": {"type": "integer", "minimum": 0}, "route_id": ID, "workflow_id": ID, "luna_supervision": {"type": "boolean", "default": True}}),
+    tool("router_workflow_plan", "Validate a saved visual DAG and inspect every exact node route without generation.",
+         {"definition": {"type": "object"}, "workflow_id": ID}, ["definition"], True),
+    tool("router_workflow_submit", "Execute an explicitly selected bounded visual DAG. Exact node routes, dependency success, shared budgets/capacity and real Luna supervision remain mandatory; unknown paid nodes are not replayed.",
+         {"definition": {"type": "object"}, "input_text": {"type": "string", "maxLength": ABS_LIMITS["max_workflow_input_chars"]}, "workflow_id": ID,
+          "request_id":ID,"acknowledge_unknown_risk":{"type":"boolean","default":False}}, ["definition"]),
+    tool("router_workflow_status", "Read a durable visual DAG run and its evidence. Interrupted/unknown nodes require caller review.", {"run_id": ID}, ["run_id"], True),
+    tool("router_workflow_cancel", "Cancel only this visual workflow's pending nodes and owned jobs.", {"run_id": ID}, ["run_id"]),
     tool("router_inventory", "List discovered external model routes, native-call health, and redacted GTT quota signals. Default output is compact; model listing alone is not a generation probe.", {"refresh": {"type": "boolean"}, "detailed": {"type": "boolean"}}, read_only=True),
     tool("router_plan", "Explain external-first route choices before sending a bounded task; respects quality, deadline, quota, concurrency, and caller-reported Codex coverage.", {"task": TASK_SCHEMA}, ["task"], True),
     tool("router_recheck", "Run one small generation check after authentication/quota recovery. Requires the external interface switch and a leased Luna supervisor in workflow_id (default: default); respects fresh quota, shared idle capacity and probe budgets.", {"route_id": ID, "workflow_id": ID}, ["route_id"]),
