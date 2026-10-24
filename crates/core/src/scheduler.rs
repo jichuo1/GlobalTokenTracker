@@ -258,6 +258,36 @@ impl Workflow {
         Ok(self.nodes.len() - 1)
     }
 
+    /// 母节点：工作流入口，即 Codex 协调的接口。不绑定模型、仅向下游
+    /// 分发；可以同时存在多个。映射到路由器的 "input" 节点类型——上游
+    /// 集合为空即自动完成，按拓扑向下游传递。
+    pub fn add_master(&mut self, x: f64, y: f64) -> Result<usize> {
+        if self.nodes.len() >= 256 {
+            bail!("最多 256 个节点，实际执行还受配置档约束");
+        }
+        let mut sequence = self.nodes.len() + 1;
+        while self
+            .nodes
+            .iter()
+            .any(|n| n.id == format!("node-{sequence}"))
+        {
+            sequence += 1;
+        }
+        self.nodes.push(Node {
+            id: format!("node-{sequence}"),
+            title: "母节点 · Codex 接口".into(),
+            route_id: String::new(),
+            node_type: "input".into(),
+            role: "工作流入口：按拓扑向下游分发任务与输入材料。".into(),
+            fallback_routes: Vec::new(),
+            tags: vec!["母节点".into()],
+            x: x.clamp(-10_000.0, 10_000.0),
+            y: y.clamp(-10_000.0, 10_000.0),
+            task: json!({"kind":"extract","prompt":"提供输入材料。"}),
+        });
+        Ok(self.nodes.len() - 1)
+    }
+
     /// Read-only connection preview; never clones prompts or edits the graph.
     pub fn can_connect(&self, from: usize, to: usize) -> Result<()> {
         self.order()?;
@@ -268,6 +298,9 @@ impl Workflow {
             || self.edges.iter().any(|e| e.from == *a && e.to == *b)
         {
             bail!("连线重复、连接自身或超出范围");
+        }
+        if self.nodes.get(to).is_some_and(|n| n.node_type == "input") {
+            bail!("母节点是工作流入口，不接受上游连线");
         }
         let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for edge in &self.edges {
@@ -302,6 +335,14 @@ impl Workflow {
         }
         let node = self.nodes.remove(index);
         self.edges.retain(|e| e.from != node.id && e.to != node.id);
+    }
+
+    /// Removes every edge touching the node; the node itself stays.
+    pub fn disconnect(&mut self, index: usize) {
+        if let Some(node) = self.nodes.get(index) {
+            let id = node.id.clone();
+            self.edges.retain(|e| e.from != id && e.to != id);
+        }
     }
 
     /// The same rectangles are used by Direct2D painting and pointer hit tests.

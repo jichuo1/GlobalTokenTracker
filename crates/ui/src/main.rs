@@ -350,8 +350,8 @@ pub enum Msg {
     /// Pointer pressed outside an open picker (click-away backdrop / a
     /// filter-strip label) — light-dismiss.
     CloseMenu,
-    /// Quota group header clicked — fold/unfold the app's quota windows.
-    ToggleQuotaGroup(String),
+    /// Quota group expanded/collapsed (app key, new expanded state).
+    SetQuotaGroup(String, bool),
     /// Width-ruler observer: overview grids should use this many columns.
     SetOverviewCols(usize),
     /// Table-card ruler: virtualized rows must span this many DIPs.
@@ -1373,8 +1373,13 @@ impl Component for Shell {
                     Some(kind)
                 };
             }
-            Msg::ToggleQuotaGroup(app) => {
-                if !self.quota_collapsed.remove(&app) {
+            Msg::SetQuotaGroup(app, expanded) => {
+                // The Expander reports the state it moved to; mirroring it
+                // verbatim keeps the control and the store from disagreeing
+                // when a click lands mid-animation.
+                if expanded {
+                    self.quota_collapsed.remove(&app);
+                } else {
                     self.quota_collapsed.insert(app);
                 }
             }
@@ -2622,12 +2627,13 @@ impl Shell {
         }
     }
 
-    /// Top-level block spacing — Overview/Settings use the section gap,
-    /// the list pages pack tighter (10 DIP, their historical rhythm).
+    /// Top-level block spacing — card-composed pages use the section gap, the
+    /// list pages the base gap. Both come from the theme so a skin or a font
+    /// change rescales the rhythm (the list pages used a hardcoded 10).
     fn page_gap(&self, page: Page) -> f64 {
         match page {
             Page::Overview | Page::Speed | Page::Settings | Page::Devices => self.theme.section_gap,
-            _ => 10.0,
+            _ => self.theme.gap,
         }
     }
 

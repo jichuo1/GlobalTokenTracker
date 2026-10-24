@@ -5,6 +5,31 @@ use globaltokentracker_core::scheduler::{self as model, Route, Settings, Snapsho
 use serde_json::{Value, json};
 use windows_reactor::*;
 
+/// Sub-pages, in SelectorBar order: (state id, label).
+const TABS: [(&str, &str); 3] = [
+    ("workflow", "工作流画布"),
+    ("sources", "来源与模型池"),
+    ("profiles", "调用配置"),
+];
+
+// MenuFlyout labels. Native menu items report only their label, so the same
+// constants build the menus and resolve the pick in `State::menu_action`.
+const M_PLAN: &str = "运行前预检";
+const M_PARAMS: &str = "工作流设置";
+const M_LOAD: &str = "刷新状态";
+const M_RESCAN: &str = "重新扫描来源";
+const M_START: &str = "启动协调器服务";
+const M_RELOAD: &str = "放弃修改并重载";
+const M_MASTER: &str = "母节点 · Codex 接口";
+const M_FIT: &str = "适应全图";
+const M_ZOOM_IN: &str = "放大";
+const M_ZOOM_OUT: &str = "缩小";
+const M_ZOOM_RESET: &str = "实际大小（100%）";
+const M_PAN_ON: &str = "平移工具";
+const M_PAN_OFF: &str = "退出平移工具";
+const M_RUN_SHOW: &str = "显示输入与结果";
+const M_RUN_HIDE: &str = "隐藏输入与结果";
+
 pub enum Action {
     Load,
     Refresh,
@@ -17,7 +42,12 @@ pub enum Action {
     CaptureLost,
     EditNode,
     Menu(Box<Action>),
-    ToggleMenu(&'static str),
+    /// A native MenuFlyout item was picked; the label is resolved against the
+    /// current state (see `State::menu_action`) so the callback stays a ZST
+    /// and the flyout is not rebuilt on every render.
+    MenuPick(String),
+    /// SelectorBar reports the selected item's text, not its key.
+    TabNamed(String),
     CloseMenu,
     ClearSelection,
     ClearFlash(u64),
@@ -35,6 +65,8 @@ pub enum Action {
     Budget(String),
     Parallel(String),
     Supervision(bool),
+    AddMaster,
+    DisconnectNode,
     AddTemplate(usize),
     ApplyTemplate(usize),
     Role(String),
@@ -45,9 +77,10 @@ pub enum Action {
     ProfileEditor(String),
     ApplyProfile,
     Tab(&'static str),
+    Section(&'static str, bool),
     Plan,
     PickTemplate(Option<usize>),
-    ToggleParams,
+    ShowParams,
     ToggleRun,
     TogglePan,
     Fit,
@@ -157,6 +190,10 @@ pub struct State {
     flash: Option<(usize, u64, std::time::Instant)>,
     flash_sequence: u64,
     open_menu: Option<&'static str>,
+    /// Canvas-space anchor (pointer position) for the node context menu.
+    menu_at: (f64, f64),
+    /// Inspector sections the user unfolded (collapsed by default).
+    expanded: std::collections::BTreeSet<&'static str>,
     show_run: bool,
     pan_tool: bool,
     viewport: std::rc::Rc<std::cell::Cell<(f64, f64)>>,
@@ -205,12 +242,14 @@ impl Default for State {
             flash: None,
             flash_sequence: 0,
             open_menu: None,
+            expanded: std::collections::BTreeSet::new(),
             show_run: false,
             pan_tool: false,
             viewport: std::rc::Rc::new(std::cell::Cell::new((800.0, 500.0))),
             submit_key: String::new(),
             submit_signature: String::new(),
             acknowledge: false,
+            menu_at: (0.0, 0.0),
         }
     }
 }
@@ -319,6 +358,36 @@ impl State {
             })
             .collect()
     }
+    /// Model-palette rows per page: the strip draws 42-DIP rows under a fixed
+    /// 42-DIP header, so the page grows with the canvas height instead of
+    /// stranding the lower half of a tall window. Floor 10 keeps the shared
+    /// page index inside the sources table's (10-row) range; the viewport
+    /// reports 0 until the first canvas frame, which also lands on 10.
+    /// Resolves a picked MenuFlyout label to the action it stands for. Labels
+    /// that depend on state (toggles) are matched in both spellings, so a pick
+    /// that lands just after a re-render still resolves.
+    fn menu_action(&self, label: &str) -> Option<Action> {
+        Some(match label {
+            M_PLAN => Action::Plan,
+            M_PARAMS => Action::ShowParams,
+            M_LOAD => Action::Load,
+            M_RESCAN => Action::Refresh,
+            M_START => Action::Start,
+            M_RELOAD => Action::Reload,
+            M_MASTER => Action::AddMaster,
+            M_FIT => Action::Fit,
+            M_ZOOM_IN => Action::Zoom(0.1),
+            M_ZOOM_OUT => Action::Zoom(-0.1),
+            M_ZOOM_RESET => Action::Zoom(1.0 - self.zoom),
+            M_PAN_ON | M_PAN_OFF => Action::TogglePan,
+            M_RUN_SHOW | M_RUN_HIDE => Action::ToggleRun,
+            _ => Action::AddTemplate(self.templates.iter().position(|t| t.title == label)?),
+        })
+    }
+    fn palette_page_size(&self) -> usize {
+        let rows = (self.viewport.get().1 - 50.0) / 42.0;
+        (rows.floor().max(0.0) as usize).clamp(10, 60)
+    }
     pub fn is_workspace(&self) -> bool {
         self.tab == "workflow"
     }
@@ -388,13 +457,14 @@ impl State {
             Action::StopDrag => self.drag.cancel(),
             Action::CaptureLost => self.drag.lost(),
             Action::Menu(next) => {self.open_menu=None;self.update(*next,ctx);},
-            Action::ToggleMenu(id) => {self.open_menu=if self.open_menu==Some(id){None}else{Some(id)};},
+            Action::MenuPick(label) => {if let Some(next)=self.menu_action(&label){self.update(next,ctx);}},
+            Action::TabNamed(label) => {if let Some((id,_))=TABS.iter().find(|(_,l)|*l==label){self.open_menu=None;self.tab=id;}},
             Action::CloseMenu => self.open_menu=None,
             Action::EditNode => {self.show_node_details=true;self.show_params=false;},
             Action::ClearSelection => {self.node=None;self.show_node_details=false;self.drag.cancel();},
             Action::ClearFlash(id) => {if self.flash.as_ref().is_some_and(|f|f.1==id) {self.flash=None;}},
             Action::PickTemplate(v) => {if let Some(i)=v {self.template_index=i.min(self.templates.len().saturating_sub(1));}},
-            Action::ToggleParams => {self.tab="workflow";self.show_params = !self.show_params;self.show_node_details=false;},
+            Action::ShowParams => {self.tab="workflow";self.show_params=true;self.show_node_details=false;},
             Action::ToggleRun => {self.tab="workflow";self.show_run = !self.show_run;},
             Action::TogglePan => { self.pan_tool = !self.pan_tool; self.drag.cancel(); },
             Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
@@ -403,7 +473,8 @@ impl State {
             Action::ClearFallback => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)){n.fallback_routes.clear();self.dirty=true;}}
             Action::Acknowledge(v) => self.acknowledge=v,
             Action::Collect(id) => self.request("router_collect",json!({"job_id":id,"max_chars":12000}),ctx),
-            Action::Tab(tab) => self.tab=tab,
+            Action::Tab(tab) => {self.open_menu=None;self.tab=tab;},
+            Action::Section(id, open) => { if open { self.expanded.insert(id); } else { self.expanded.remove(&id); } }
             Action::CallPreset(i) => { if let Some(p)=self.snapshot.call_presets.get(i){self.draft.call_profile=p["value"].clone();self.profile_editor=serde_json::to_string_pretty(&self.draft.call_profile).unwrap_or_default();self.dirty=true;} }
             Action::ProfileEditor(v) => self.profile_editor=v,
             Action::ApplyProfile => match serde_json::from_str::<Value>(&self.profile_editor){Ok(v) if v.is_object()=>{self.draft.call_profile=v;self.dirty=true;},_=>self.error=Some("调用配置需要合法的 JSON 对象".into())},
@@ -567,6 +638,37 @@ impl State {
                         self.dirty = true;
                     }
             }
+            Action::AddMaster => {
+                // Drop-in entry point at the canvas center; the workflow is
+                // created on demand, mirroring a first model drop.
+                if self.workflow().is_none() {
+                    self.draft.workflows.push(Workflow::new(format!(
+                        "workflow-{}",
+                        model::now_ms()
+                    )));
+                    self.selected = self.draft.workflows.len() - 1;
+                }
+                let (width, height) = self.viewport.get();
+                let x = ((width - 210.0) / 2.0 - self.pan.0) / self.zoom;
+                let y = (height / 2.0 - self.pan.1) / self.zoom;
+                if let Some(w) = self.workflow_mut() {
+                    match w.add_master(x, y) {
+                        Ok(i) => {
+                            self.node = Some(i);
+                            self.dirty = true;
+                            self.pulse(ctx);
+                        }
+                        Err(e) => self.error = Some(e.to_string()),
+                    }
+                }
+            }
+            Action::DisconnectNode => {
+                if let Some(i) = self.node
+                    && let Some(w) = self.workflow_mut() {
+                        w.disconnect(i);
+                        self.dirty = true;
+                    }
+            }
             Action::MoveNode(delta) => {
                 if let Some(i) = self.node
                     && let Some(w) = self.workflow_mut() {
@@ -591,7 +693,7 @@ impl State {
                 }
             }
             Action::Palette(delta) => {
-                let pages = self.routes().len().saturating_sub(1) / 10;
+                let pages = self.routes().len().saturating_sub(1) / self.palette_page_size();
                 self.palette = self
                     .palette
                     .saturating_add_signed(delta as isize)
@@ -600,12 +702,34 @@ impl State {
             Action::Zoom(delta) => { let (width,height)=self.viewport.get(); let anchor=((width-210.0)/2.0,height/2.0);let world=((anchor.0-self.pan.0)/self.zoom,(anchor.1-self.pan.1)/self.zoom);self.zoom=(self.zoom+delta).clamp(0.1,1.8);self.pan=(anchor.0-world.0*self.zoom,anchor.1-world.1*self.zoom); },
             Action::Press(p) => {
                 self.pointer=(p.x,p.y);self.error=None;
-                if p.is_right_button_pressed || p.is_middle_button_pressed || (self.pan_tool && p.x >= 210.0) {
+                if p.is_right_button_pressed && p.x >= 210.0 {
+                    // Right-press on a node opens the floating quick menu;
+                    // on empty canvas it still pans.
+                    let (x, y) = self.point(p);
+                    if let Some(w) = self.workflow()
+                        && let Some(i) = w.hit(x, y)
+                    {
+                        self.node = Some(i);
+                        self.menu_at = (p.x, p.y);
+                        self.open_menu = Some("node");
+                    } else {
+                        self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
+                    }
+                } else if p.is_middle_button_pressed || (self.pan_tool && p.x >= 210.0) {
                     self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
                 } else if p.x < 200.0 && p.y >= 42.0 {
-                    let i = self.palette * 10 + ((p.y - 42.0) / 42.0) as usize;
-                    if i < self.routes().len() {
-                        self.drag.begin(Drag::Model(i));
+                    // Only rows the page actually draws start a drag: the old
+                    // unclamped index grabbed the NEXT page's first model when
+                    // the click landed in the empty strip below the rows.
+                    let page_size = self.palette_page_size();
+                    let row = ((p.y - 42.0) / 42.0) as usize;
+                    let drawn = self
+                        .routes()
+                        .len()
+                        .saturating_sub(self.palette * page_size)
+                        .min(page_size);
+                    if row < drawn {
+                        self.drag.begin(Drag::Model(self.palette * page_size + row));
                     }
                 } else {
                     let (x, y) = self.point(p);
@@ -641,6 +765,10 @@ impl State {
                     Some(Drag::Model(index)) => {
                         if p.x < 210.0 || p.y < 0.0 || p.y > self.viewport.get().1 || p.x > self.viewport.get().0 { return; }
                         if let Some(route) = self.routes().get(index).map(|r| (*r).clone()) {
+                            // The flash acknowledges a model landing on the
+                            // canvas — not selection (every click-release used
+                            // to pulse through the shared tail below).
+                            let mut landed = false;
                             if p.x >= 210.0 {
                                 if self.workflow().is_none() {
                                     self.draft.workflows.push(Workflow::new(format!(
@@ -655,15 +783,19 @@ impl State {
                                         if w.nodes[i].node_type!="model" { self.error=Some("本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板".into()); return; }
                                         w.nodes[i].route_id.clone_from(&route.route_id);
                                         self.node = Some(i);
+                                        landed = true;
                                     } else {
                                         match w.add_route(&route, x, y) {
-                                            Ok(i) => self.node = Some(i),
+                                            Ok(i) => { self.node = Some(i); landed = true; }
                                             Err(e) => self.error = Some(e.to_string()),
                                         }
                                     }
                                 }
                             }
                             self.add_pool(route.route_id);
+                            if landed {
+                                self.pulse(ctx);
+                            }
                         }
                     }
                     Some(Drag::Edge(from)) => {
@@ -678,7 +810,6 @@ impl State {
                     }
                     _ => {}
                 }
-                self.pulse(ctx);
             }
             Action::WorkflowId(v) => self.workflow_id = v,
             Action::Input(v) => self.input = v,
@@ -720,15 +851,162 @@ fn bounded_pretty(value: &Value) -> String {
         text
     }
 }
+/// Compact glyph button for table action columns — the column header carries
+/// the meaning, so the row repeats a small glyph instead of a sentence (and
+/// instead of the 20 DIP SymbolIcon, which made the buttons read as slabs).
+fn glyph_button(
+    theme: &Theme,
+    glyph: &str,
+    tip: &str,
+    action: impl Fn() -> Action + 'static,
+    ctx: &ViewContext<Shell>,
+) -> View {
+    let b: View = Button::new()
+        .min_width(28.0)
+        .min_height(28.0)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_click(ctx.callback(move |_| Msg::Scheduling(action())))
+        .content(
+            TextBlock::new()
+                .text(glyph)
+                .font_size(theme.body_size + 1.0)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .vertical_alignment(VerticalAlignment::Center),
+        );
+    if tip.trim().is_empty() {
+        b
+    } else {
+        b.tooltip(tip)
+    }
+}
+
+/// Compact text button for table footers and toolbars.
+fn small_button(
+    label: &str,
+    tip: &str,
+    action: impl Fn() -> Action + 'static,
+    ctx: &ViewContext<Shell>,
+) -> View {
+    let b: View = Button::new()
+        .min_height(32.0)
+        .on_click(ctx.callback(move |_| Msg::Scheduling(action())))
+        .content(label);
+    if tip.trim().is_empty() {
+        b
+    } else {
+        b.tooltip(tip)
+    }
+}
+
+/// Vertical stack with keyed children (same as `pages::vstack`).
+fn vstack(spacing: f64, children: Vec<View>) -> View {
+    StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(spacing)
+        .keyed_children(crate::pages::keyed(children))
+}
+
+/// Puts `v` at its cell's right edge. Horizontal alignment alone does not move
+/// a control whose desired width exceeds the column (it pins left and
+/// overflows), so the slack goes into a star spacer column instead — the
+/// control's Auto column always ends flush with the cell's right edge.
+fn right_cell(col: i32, v: impl Into<View>) -> View {
+    Border::new()
+        .grid_column(col)
+        .vertical_alignment(VerticalAlignment::Center)
+        .content(
+            Grid::new()
+                .columns([GridLength::STAR, GridLength::Auto])
+                .column_spacing(8.0)
+                .children([
+                    Border::new().grid_column(0).into(),
+                    Border::new()
+                        .grid_column(1)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .content(v.into()),
+                ]),
+        )
+}
+
+/// A table cell that centers on its row; `align` places the content inside the
+/// cell (Stretch fills it).
+fn tcell_at(col: i32, align: HorizontalAlignment, v: impl Into<View>) -> View {
+    Border::new()
+        .grid_column(col)
+        .vertical_alignment(VerticalAlignment::Center)
+        .content(Border::new().horizontal_alignment(align).content(v.into()))
+}
+
+/// A table cell that centers on its row and fills the column.
+fn tcell(col: i32, v: impl Into<View>) -> View {
+    tcell_at(col, HorizontalAlignment::Stretch, v)
+}
+
+/// Cell at (col, row) for grids with more than one row.
+fn rcell(col: i32, row: i32, v: impl Into<View>) -> View {
+    Border::new()
+        .grid_column(col)
+        .grid_row(row)
+        .vertical_alignment(VerticalAlignment::Center)
+        .content(v.into())
+}
+
+/// Header row of a card-wide table; `cols` must match the body rows and each
+/// label carries the alignment of the column it titles (so a centered icon
+/// column has a centered caption, a right-aligned switch column a right one).
+fn table_head(
+    theme: &Theme,
+    cols: Vec<GridLength>,
+    labels: Vec<(&str, HorizontalAlignment)>,
+) -> View {
+    let cells: Vec<View> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(i, (l, align))| {
+            tcell_at(
+                i as i32,
+                align,
+                TextBlock::new()
+                    .text(l)
+                    .font_size(theme.label_size)
+                    .foreground(theme.subtle),
+            )
+        })
+        .collect();
+    w::ruled_row(
+        theme,
+        Grid::new()
+            .columns(cols)
+            .column_spacing(12.0)
+            .keyed_children(crate::pages::keyed(cells)),
+    )
+}
+
+/// One body row: cells on the same columns as `table_head`, hairline under.
+fn table_row(theme: &Theme, cols: Vec<GridLength>, cells: Vec<View>) -> View {
+    w::ruled_row(
+        theme,
+        Grid::new()
+            .columns(cols)
+            .column_spacing(12.0)
+            .keyed_children(crate::pages::keyed(cells)),
+    )
+}
+
 fn label_actions(label: String, actions: Vec<View>) -> View {
     Grid::new()
         .columns([GridLength::STAR, GridLength::Auto])
         .column_spacing(12.0)
         .children((
-            TextBlock::new()
-                .text(label)
-                .text_wrapping(TextWrapping::Wrap),
-            Border::new().grid_column(1).content(row(actions)),
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    TextBlock::new()
+                        .text(label)
+                        .text_wrapping(TextWrapping::Wrap),
+                ),
+            right_cell(1, row(actions)),
         ))
 }
 
@@ -754,7 +1032,7 @@ fn help_for(label: &str) -> &'static str {
         "适应全图" | "适应" => "缩放和平移视口，使全部节点进入可见区域。",
         "编辑节点" => "打开当前选中节点的职责、提示词、标签和高级参数。",
         "输入与结果" => "填写本次输入，查看运行状态和节点报告。",
-        "添加节点" => "选择职责模板；也可以直接从左侧模型库拖入。",
+        "添加节点" => "选择母节点或职责模板；也可以直接从左侧模型库拖入。",
         "套用" => "将所选职责模板应用到当前节点，可继续修改职责和提示词。",
         "清空备用路线" => "仅移除本节点的备用模型，不影响原模型池。",
         "顺序串联" => "按节点顺序重建依赖链，将独立分支改为串行执行。",
@@ -771,204 +1049,257 @@ fn secondary(text: impl Into<String>) -> View {
         .into()
 }
 fn button(label: &str, action: impl Fn() -> Action + 'static, ctx: &ViewContext<Shell>) -> View {
-    Button::new()
+    // Stretch: inside a grid cell or a vertical stack the button fills its
+    // column, so neighbouring buttons share edges (horizontal rows ignore it).
+    let b: View = Button::new()
         .min_height(36.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .on_click(ctx.callback(move |_| Msg::Scheduling(action())))
-        .content(label)
-        .tooltip(help_for(label))
+        .content(label);
+    match help_for(label) {
+        "" => b,
+        tip => b.tooltip(tip),
+    }
 }
+/// One row of the node context sheet: icon column + label, styled like a
+/// WinUI MenuFlyoutItem (Subtle button, 36 DIP, left-aligned). The long
+/// description moves into the tooltip/automation name instead of a second
+/// line on every row.
 fn command(
+    icon: Symbol,
     label: &str,
     description: &str,
     action: impl Fn() -> Action + 'static,
-    enabled: bool,
     ctx: &ViewContext<Shell>,
 ) -> View {
     Button::new()
-        .is_enabled(enabled)
-        .min_height(58.0)
+        .style(ButtonStyle::Subtle)
+        .min_height(36.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .horizontal_content_alignment(HorizontalAlignment::Stretch)
         .vertical_content_alignment(VerticalAlignment::Center)
         .automation_name(format!("{label}。{description}"))
         .on_click(ctx.callback(move |_| Msg::Scheduling(Action::Menu(Box::new(action())))))
         .content(
-            Border::new().padding(Thickness::xy(4.0, 3.0)).content(
-                StackPanel::new().spacing(3.0).children((
-                    TextBlock::new()
-                        .text(label)
-                        .font_weight(FontWeight::SEMI_BOLD)
-                        .text_wrapping(TextWrapping::Wrap),
-                    secondary(description),
+            Grid::new()
+                .columns([GridLength::Pixel(20.0), GridLength::STAR])
+                .column_spacing(12.0)
+                .children((
+                    Border::new()
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .content(SymbolIcon::new().symbol(icon)),
+                    Border::new()
+                        .grid_column(1)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .content(TextBlock::new().text(label)),
                 )),
-            ),
         )
-}
-fn menu(label: &str, description: &str, id: &'static str, ctx: &ViewContext<Shell>) -> View {
-    Button::new()
-        .min_height(36.0)
-        .on_click(ctx.callback(move |_| Msg::Scheduling(Action::ToggleMenu(id))))
-        .content(format!("{label} ▾"))
         .tooltip(description)
 }
-fn more_menu(_state: &State, ctx: &ViewContext<Shell>) -> View {
-    menu("更多", "预检、设置、模型池和服务管理。", "more", ctx)
+
+/// Native WinUI DropDownButton + MenuFlyout. The system owns placement,
+/// light-dismiss, keyboard navigation and the open/close animation — the old
+/// in-page sheets reimplemented all of that and only ever opened at one spot.
+/// `None` entries are separators.
+fn drop_menu(label: &str, entries: Vec<Option<(&str, bool)>>, ctx: &ViewContext<Shell>) -> View {
+    let items = entries.into_iter().enumerate().map(|(i, e)| match e {
+        None => MenuItem::separator(format!("sep-{i}")),
+        Some((l, true)) => MenuItem::item(l, l),
+        Some((l, false)) => MenuItem::disabled(l, l),
+    });
+    DropDownButton::new()
+        .min_height(36.0)
+        .content(TextBlock::new().text(label))
+        .menu(Menu::new(
+            items,
+            ctx.callback(|label: String| Msg::Scheduling(Action::MenuPick(label))),
+        ))
 }
-fn more_items(state: &State, ctx: &ViewContext<Shell>) -> Vec<View> {
-    vec![
-        command(
-            "运行前预检",
-            help_for("运行前预检"),
-            || Action::Plan,
-            !state.busy && state.workflow().is_some(),
-            ctx,
-        ),
-        command(
-            "工作流设置",
-            help_for("工作流设置"),
-            || Action::ToggleParams,
-            true,
-            ctx,
-        ),
-        command(
-            "来源与模型池",
-            help_for("来源与模型池"),
-            || Action::Tab("sources"),
-            true,
-            ctx,
-        ),
-        command(
-            "调用配置",
-            help_for("调用配置"),
-            || Action::Tab("profiles"),
-            true,
-            ctx,
-        ),
-        command(
-            "输入与结果",
-            help_for("输入与结果"),
-            || Action::ToggleRun,
-            true,
-            ctx,
-        ),
-        secondary("服务管理"),
-        command(
-            "刷新状态",
-            help_for("刷新状态"),
-            || Action::Load,
-            !state.busy,
-            ctx,
-        ),
-        command(
-            "重新扫描来源",
-            help_for("重新扫描来源"),
-            || Action::Refresh,
-            !state.busy,
-            ctx,
-        ),
-        command(
-            "启动服务",
-            help_for("启动服务"),
-            || Action::Start,
-            !state.busy,
-            ctx,
-        ),
-        command(
-            "重载设置",
-            help_for("重载设置"),
-            || Action::Reload,
-            !state.busy,
-            ctx,
-        ),
-    ]
+
+fn more_menu(state: &State, ctx: &ViewContext<Shell>) -> View {
+    let idle = !state.busy;
+    drop_menu(
+        "更多",
+        vec![
+            Some((M_PLAN, idle && state.workflow().is_some())),
+            Some((M_PARAMS, true)),
+            None,
+            Some((M_LOAD, idle)),
+            Some((M_RESCAN, idle)),
+            Some((M_START, idle)),
+            None,
+            Some((M_RELOAD, idle && state.dirty)),
+        ],
+        ctx,
+    )
 }
-fn view_items(state: &State, ctx: &ViewContext<Shell>) -> Vec<View> {
-    vec![
-        command("适应全图", help_for("适应全图"), || Action::Fit, true, ctx),
-        command(
-            if state.pan_tool {
-                "退出平移工具"
-            } else {
-                "平移工具"
-            },
-            "开启后可从任意节点位置拖动整个画布；空白处始终可直接拖动。",
-            || Action::TogglePan,
-            true,
-            ctx,
-        ),
-        row(vec![
-            button("−", || Action::Zoom(-0.1), ctx),
-            secondary(format!("{:.0}%", state.zoom * 100.0)),
-            button("+", || Action::Zoom(0.1), ctx),
-        ]),
-        command(
-            "输入与结果",
-            help_for("输入与结果"),
-            || Action::ToggleRun,
-            true,
-            ctx,
-        ),
-        secondary("操作指南"),
-        secondary(
-            "拖左侧模型：创建节点；拖入模型节点：替换绑定。拖节点主体：移动；从右端口拖到下游：连线。蓝色外框和底部名称表示已选中，点击编辑节点查看参数。",
-        ),
-        secondary("连线决定依赖；独立分支可并行。预检不生成内容，运行会按已保存配置占用预算。"),
-    ]
-}
-fn menu_panel(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
-    let items = match state.open_menu {
-        Some("add") => state
+
+fn add_menu(state: &State, ctx: &ViewContext<Shell>) -> View {
+    let mut entries = vec![Some((M_MASTER, true)), None];
+    entries.extend(
+        state
             .templates
             .iter()
-            .enumerate()
-            .map(|(i, t)| command(&t.title, &t.role, move || Action::AddTemplate(i), true, ctx))
-            .collect(),
-        Some("view") => view_items(state, ctx),
-        _ => more_items(state, ctx),
-    };
-    Border::new()
-        .background(
-            theme
-                .page_bg
-                .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground)),
-        )
-        .border_brush(theme.divider)
-        .border_thickness(Thickness::uniform(1.0))
-        .corner_radius(CornerRadius::uniform(8.0))
-        .padding(Thickness::uniform(14.0))
-        .width(320.0)
-        .content(
-            StackPanel::new().spacing(10.0).children((
-                Grid::new()
-                    .columns([GridLength::STAR, GridLength::Auto])
-                    .column_spacing(12.0)
-                    .children((
-                        TextBlock::new()
-                            .text(match state.open_menu {
-                                Some("add") => "选择职责模板",
-                                Some("view") => "视图与操作说明",
-                                _ => "更多操作",
-                            })
-                            .font_size(16.0)
-                            .text_wrapping(TextWrapping::Wrap)
-                            .vertical_alignment(VerticalAlignment::Center),
-                        Border::new()
-                            .grid_column(1)
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .content(button("收起", || Action::CloseMenu, ctx)),
-                    )),
-                ScrollViewer::new()
-                    .max_height(380.0)
-                    .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
-                    .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
-                    .content(
-                        StackPanel::new()
-                            .margin(Thickness::new(0.0, 0.0, 12.0, 0.0))
-                            .spacing(7.0)
-                            .keyed_children(crate::pages::keyed(items)),
-                    ),
+            .map(|t| Some((t.title.as_str(), true))),
+    );
+    drop_menu("＋ 添加节点", entries, ctx)
+}
+
+fn view_menu(state: &State, ctx: &ViewContext<Shell>) -> View {
+    drop_menu(
+        "视图",
+        vec![
+            Some((M_FIT, true)),
+            Some((M_ZOOM_IN, state.zoom < 1.79)),
+            Some((M_ZOOM_OUT, state.zoom > 0.11)),
+            Some((M_ZOOM_RESET, (state.zoom - 1.0).abs() > 0.001)),
+            None,
+            Some((if state.pan_tool { M_PAN_OFF } else { M_PAN_ON }, true)),
+            Some((
+                if state.show_run {
+                    M_RUN_HIDE
+                } else {
+                    M_RUN_SHOW
+                },
+                true,
             )),
-        )
+        ],
+        ctx,
+    )
+}
+
+/// "?" button whose native Flyout carries the canvas guide: short labelled
+/// lines on a two-column grid instead of a paragraph squeezed into a sheet.
+fn help_button(theme: &Theme) -> View {
+    let lines = [
+        (
+            "拖入模型",
+            "从左侧模型库拖到空白处创建节点；拖到模型节点上替换绑定。",
+        ),
+        ("移动", "拖动节点主体；空白处拖动平移画布。"),
+        ("连线", "从节点右侧端口拖到下游节点，箭头指向下游。"),
+        ("节点菜单", "右键节点：编辑、断开连线、删除。"),
+        (
+            "运行",
+            "连线决定依赖，独立分支并行。预检不生成内容；运行按已保存配置占用预算。",
+        ),
+    ];
+    let mut cells: Vec<View> = Vec::new();
+    for (i, (k, v)) in lines.iter().enumerate() {
+        cells.push(rcell(
+            0,
+            i as i32,
+            TextBlock::new().text(*k).font_weight(FontWeight::SEMI_BOLD),
+        ));
+        cells.push(rcell(
+            1,
+            i as i32,
+            TextBlock::new()
+                .text(*v)
+                .foreground(theme.subtle)
+                .text_wrapping(TextWrapping::Wrap),
+        ));
+    }
+    let guide = Border::new().width(340.0).content(
+        StackPanel::new().spacing(10.0).children((
+            TextBlock::new()
+                .text("画布操作说明")
+                .font_size(theme.h2_size)
+                .font_weight(FontWeight::SEMI_BOLD),
+            Grid::new()
+                .columns([GridLength::Auto, GridLength::STAR])
+                .rows(lines.iter().map(|_| GridLength::Auto))
+                .column_spacing(12.0)
+                .row_spacing(8.0)
+                .keyed_children(crate::pages::keyed(cells)),
+        )),
+    );
+    Button::new()
+        .min_width(36.0)
+        .min_height(36.0)
+        .automation_name("画布操作说明")
+        .content(SymbolIcon::new().symbol(Symbol::Help))
+        .flyout_with(Flyout::rich(guide).placement(FlyoutPlacement::BottomEdgeAlignedRight))
+}
+
+/// Width of the node context sheet: menu-sized, not panel-sized.
+const NODE_MENU_W: f64 = 240.0;
+
+/// Right-click sheet for a canvas node. The canvas is a custom surface, so
+/// this one stays an in-page layer; it is styled as a MenuFlyout (subtle
+/// rows, icon column, hairline separator) to match the native menus.
+fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
+    let title = state
+        .node
+        .and_then(|i| state.workflow().and_then(|w| w.nodes.get(i)))
+        .map_or_else(|| "节点操作".to_owned(), |n| n.title.clone());
+    let items: Vec<View> = vec![
+        Border::new()
+            .padding(Thickness::new(11.0, 4.0, 8.0, 4.0))
+            .content(
+                TextBlock::new()
+                    .text(title)
+                    .font_size(theme.label_size)
+                    .foreground(theme.subtle)
+                    .text_trimming(TextTrimming::CharacterEllipsis),
+            ),
+        command(
+            Symbol::Edit,
+            "编辑节点",
+            help_for("编辑节点"),
+            || Action::EditNode,
+            ctx,
+        ),
+        command(
+            Symbol::DisconnectDrive,
+            "断开连线",
+            "移除与该节点相关的全部上下游连线，保留节点。",
+            || Action::DisconnectNode,
+            ctx,
+        ),
+        Border::new()
+            .height(1.0)
+            .margin(Thickness::xy(0.0, 4.0))
+            .background(theme.divider)
+            .into(),
+        command(
+            Symbol::Delete,
+            "删除节点",
+            "从工作流移除该节点及其全部连线。",
+            || Action::RemoveNode,
+            ctx,
+        ),
+        command(
+            Symbol::ClearSelection,
+            "取消选择",
+            "清除当前选中，保留节点与连线。",
+            || Action::ClearSelection,
+            ctx,
+        ),
+    ];
+    let base = theme
+        .page_bg
+        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
+    Grid::new()
+        .width(NODE_MENU_W)
+        .exit_transition(ExitTransition::fade(std::time::Duration::from_millis(120)))
+        .children([
+            Border::new()
+                .background(base)
+                .corner_radius(CornerRadius::uniform(theme.radius))
+                .into(),
+            Border::new()
+                .background(theme.card_bg)
+                .border_brush(theme.card_border)
+                .border_thickness(Thickness::uniform(1.0))
+                .corner_radius(CornerRadius::uniform(theme.radius))
+                .padding(Thickness::uniform(4.0))
+                .content(
+                    StackPanel::new()
+                        .spacing(2.0)
+                        .keyed_children(crate::pages::keyed(items)),
+                ),
+        ])
 }
 fn field_help(label: &str) -> &'static str {
     match label {
@@ -1002,8 +1333,8 @@ fn line(
     action: impl Fn(String) -> Action + 'static,
     ctx: &ViewContext<Shell>,
 ) -> View {
-    StackPanel::new().spacing(4.0).children((
-        TextBlock::new().text(label),
+    let mut children: Vec<View> = vec![
+        TextBlock::new().text(label).into(),
         TextBox::new()
             .accepts_return(
                 label.contains("提示词")
@@ -1012,35 +1343,71 @@ fn line(
                     || label.contains("JSON"),
             )
             .min_height(if label.contains("JSON") { 140.0 } else { 32.0 })
+            // Never a sliver: a TextBox with no width in a horizontal stack
+            // collapsed to the control's minimum.
+            .min_width(120.0)
             .text(value)
-            .on_text_changed(ctx.callback(move |v| Msg::Scheduling(action(v)))),
-        TextBlock::new()
-            .text(field_help(label))
-            .font_size(12.0)
-            .text_wrapping(TextWrapping::Wrap)
-            .opacity(0.72)
-            .max_height(if field_help(label).is_empty() {
-                0.0
-            } else {
-                90.0
-            }),
-    ))
+            .on_text_changed(ctx.callback(move |v| Msg::Scheduling(action(v))))
+            .into(),
+    ];
+    // Only fields that have help render the line: a zero-height stand-in still
+    // paid the stack's 4 DIP gap on every row without a note.
+    let help = field_help(label);
+    if !help.is_empty() {
+        children.push(secondary(help));
+    }
+    StackPanel::new()
+        .spacing(4.0)
+        .keyed_children(crate::pages::keyed(children))
 }
-fn section(title: &str, description: &str, items: Vec<View>) -> View {
-    Expander::new().slots([
-        SlotView::new(
-            ExpanderSlot::Header,
-            StackPanel::new()
-                .spacing(3.0)
-                .children((TextBlock::new().text(title), secondary(description))),
-        ),
-        SlotView::new(
-            ExpanderSlot::Content,
+/// Collapsible inspector group. Deliberately not a native `Expander`: that
+/// control measures its content at the content's own width and centres it
+/// (the Quota page's rows ended up 147 DIP wide in the middle of a 1030 DIP
+/// page), which would squeeze these fields the same way.
+fn section(
+    theme: &Theme,
+    id: &'static str,
+    title: &str,
+    description: &str,
+    items: Vec<View>,
+    open: bool,
+    ctx: &ViewContext<Shell>,
+) -> View {
+    let head = Button::new()
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .horizontal_content_alignment(HorizontalAlignment::Stretch)
+        .on_click(ctx.callback(move |_| Msg::Scheduling(Action::Section(id, !open))))
+        .content(
+            Grid::new()
+                .columns([GridLength::STAR, GridLength::Auto])
+                .column_spacing(8.0)
+                .children((
+                    StackPanel::new()
+                        .spacing(3.0)
+                        .children((TextBlock::new().text(title), secondary(description))),
+                    Border::new()
+                        .grid_column(1)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .content(
+                            TextBlock::new()
+                                .text(if open { "▴" } else { "▾" })
+                                .font_size(theme.label_size)
+                                .foreground(theme.subtle)
+                                .vertical_alignment(VerticalAlignment::Center),
+                        ),
+                )),
+        );
+    let mut rows: Vec<View> = vec![head];
+    if open {
+        rows.push(
             StackPanel::new()
                 .spacing(10.0)
                 .keyed_children(crate::pages::keyed(items)),
-        ),
-    ])
+        );
+    }
+    StackPanel::new()
+        .spacing(8.0)
+        .keyed_children(crate::pages::keyed(rows))
 }
 fn row(children: Vec<View>) -> View {
     StackPanel::new()
@@ -1056,128 +1423,161 @@ fn row(children: Vec<View>) -> View {
         }))
 }
 
-pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<View> {
-    if state.tab == "workflow" {
-        return vec![workspace_view(state, theme, ctx)];
-    }
-    let mut blocks = vec![
-        Grid::new()
-            .columns([GridLength::STAR, GridLength::Auto])
-            .children((
-                StackPanel::new().spacing(4.0).children((
+/// Sub-page switcher. A SelectorBar on every sub-page (it used to be hidden in
+/// 更多 on the canvas and three ordinary buttons elsewhere, so it read as
+/// actions rather than "where am I").
+fn tab_bar(state: &State, ctx: &ViewContext<Shell>) -> View {
+    SelectorBar::new()
+        .on_selected_text_changed(
+            ctx.callback(|t: Option<String>| {
+                Msg::Scheduling(Action::TabNamed(t.unwrap_or_default()))
+            }),
+        )
+        .collection_slot(
+            SelectorBarSlot::Items,
+            TABS.iter().map(|(id, label)| {
+                KeyedView::new(
+                    *id,
+                    SelectorBarItem::new()
+                        .text(*label)
+                        .is_selected(state.tab == *id),
+                )
+            }),
+        )
+}
+
+/// Top band shared by all three sub-pages: switcher on the left; sync state,
+/// 保存修改 and 更多 on the right, at the same place whichever page is shown.
+/// 保存修改 carries the accent only while there is something to save, so the
+/// page never shows two primary buttons at once (运行 takes it otherwise).
+fn page_band(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
+    let (status, brush) = if state.busy {
+        ("处理中…", theme.subtle)
+    } else if state.dirty {
+        ("● 有未保存修改", theme.warn)
+    } else {
+        ("已同步", theme.subtle)
+    };
+    Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .column_spacing(16.0)
+        .children((
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .horizontal_alignment(HorizontalAlignment::Left)
+                .content(tab_bar(state, ctx)),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(row(vec![
                     TextBlock::new()
-                        .text(if state.tab == "profiles" {
-                            "调用配置"
-                        } else {
-                            "来源与模型池"
-                        })
-                        .font_size(20.0),
-                    secondary(if state.tab == "profiles" {
-                        "选择预设并按需覆盖；保存后作用于后续分配。"
-                    } else {
-                        "先选可用来源和模型，再回到工作流编排。"
-                    }),
-                )),
-                Border::new().grid_column(1).content(row(vec![
+                        .text(status)
+                        .font_size(theme.label_size)
+                        .foreground(brush)
+                        .margin(Thickness::new(0.0, 0.0, 4.0, 0.0))
+                        .into(),
                     Button::new()
-                        .style(ButtonStyle::Accent)
+                        .style(if state.dirty {
+                            ButtonStyle::Accent
+                        } else {
+                            ButtonStyle::Default
+                        })
+                        .min_height(36.0)
                         .is_enabled(state.dirty && !state.busy)
                         .on_click(ctx.callback(|_| Msg::Scheduling(Action::Save)))
                         .content("保存修改")
                         .tooltip(help_for("保存修改")),
                     more_menu(state, ctx),
                 ])),
-            )),
+        ))
+}
+
+/// Service errors as a WinUI InfoBar, directly under the band on every
+/// sub-page (the canvas showed them at the bottom, the other pages in a card).
+fn error_bar(state: &State) -> Option<View> {
+    state.error.as_ref().map(|error| {
+        InfoBar::new()
+            .severity(InfoBarSeverity::Error)
+            .is_open(true)
+            .is_closable(false)
+            .title("调度服务")
+            .message(error.clone())
+            .into()
+    })
+}
+
+pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<View> {
+    if state.tab == "workflow" {
+        return vec![workspace_view(state, theme, ctx)];
+    }
+    let mut blocks = vec![
+        page_band(state, theme, ctx),
+        secondary(if state.tab == "profiles" {
+            "选择预设并按需覆盖；保存后作用于后续分配。"
+        } else {
+            "先选可用来源和模型，再回到工作流画布编排。"
+        }),
     ];
-    if state.open_menu.is_some() {
-        blocks.push(menu_panel(state, theme, ctx));
-    }
-    blocks.push(row(vec![
-        TextBlock::new().text("允许模型调度").into(),
-        ToggleSwitch::new()
-            .is_on(state.draft.enabled)
-            .on_toggled(ctx.callback(|v| Msg::Scheduling(Action::Enabled(v))))
-            .into(),
-        TextBlock::new().text("定向模式 · 仅使用模型池").into(),
-        ToggleSwitch::new()
-            .is_on(state.draft.mode == "directed")
-            .on_toggled(ctx.callback(|v| Msg::Scheduling(Action::Directed(v))))
-            .into(),
-    ]));
-    blocks.push(
-        TextBlock::new()
-            .text(if state.dirty {
-                "有未保存的修改；保存后作用于新派发，已发出的请求允许完成。"
-            } else {
-                "自动模式按能力选路；定向模式按池内顺序选路，池到期后停止派发。"
-            })
-            .text_wrapping(TextWrapping::Wrap)
-            .into(),
-    );
-    if let Some(error) = &state.error {
-        blocks.push(
-            TextBlock::new()
-                .text(error)
-                .foreground(theme.danger)
-                .text_wrapping(TextWrapping::Wrap)
-                .into(),
-        );
-    }
+    blocks.extend(error_bar(state));
     if !state.notice.is_empty() {
-        blocks.push(
+        blocks.push(w::card(
+            theme,
             TextBlock::new()
                 .text(&state.notice)
+                .is_text_selection_enabled(true)
                 .text_wrapping(TextWrapping::Wrap)
                 .into(),
-        );
-    }
-    blocks.push(row(vec![
-        button("工作流画布", || Action::Tab("workflow"), ctx),
-        button("来源与模型池", || Action::Tab("sources"), ctx),
-        button("调用配置档", || Action::Tab("profiles"), ctx),
-    ]));
-    if state.tab == "profiles" {
-        blocks.push(TextBlock::new().text("选择预设后可以修改 JSON。节点显式参数优先于预设默认值，当前配置上限与模型原生上限共同生效。保存仅修改本协调器设置。").text_wrapping(TextWrapping::Wrap).into());
-        for chunk in state
-            .snapshot
-            .call_presets
-            .iter()
-            .enumerate()
-            .collect::<Vec<_>>()
-            .chunks(3)
-        {
-            blocks.push(row(chunk
-                .iter()
-                .map(|(i, p)| {
-                    let index = *i;
-                    button(
-                        p["title"].as_str().unwrap_or("预设"),
-                        move || Action::CallPreset(index),
-                        ctx,
-                    )
-                })
-                .collect()));
-        }
-        blocks.push(line(
-            "调用配置 JSON",
-            state.profile_editor.clone(),
-            Action::ProfileEditor,
-            ctx,
         ));
-        blocks.push(button("应用配置到待保存设置", || Action::ApplyProfile, ctx));
-        blocks.push(
-            TextBlock::new()
-                .text(format!(
-                    "当前生效值\n{}",
-                    serde_json::to_string_pretty(&state.snapshot.effective_profile)
-                        .unwrap_or_default()
-                ))
-                .text_wrapping(TextWrapping::Wrap)
-                .into(),
-        );
-        return blocks;
     }
+    if state.tab == "profiles" {
+        return profiles_blocks(blocks, state, theme, ctx);
+    }
+    // Scheduling switches in one card, rows on a shared label/switch grid —
+    // the old inline row put two switches at whatever x the label text ended.
+    blocks.push(w::section(
+        theme,
+        Symbol::Setting,
+        "调度开关",
+        vec![w::card(
+            theme,
+            vstack(
+                6.0,
+                vec![
+                    w::ruled_row(
+                        theme,
+                        label_actions(
+                            "允许模型调度".into(),
+                            vec![crate::pages::switch(
+                                theme,
+                                state.draft.enabled,
+                                ctx.callback(|v| Msg::Scheduling(Action::Enabled(v))),
+                            )],
+                        ),
+                    ),
+                    w::ruled_row(
+                        theme,
+                        label_actions(
+                            "定向模式 · 仅使用模型池".into(),
+                            vec![crate::pages::switch(
+                                theme,
+                                state.draft.mode == "directed",
+                                ctx.callback(|v| Msg::Scheduling(Action::Directed(v))),
+                            )],
+                        ),
+                    ),
+                    secondary(if state.dirty {
+                        "有未保存的修改；保存后作用于新派发，已发出的请求允许完成。"
+                    } else {
+                        "自动模式按能力选路；定向模式按池内顺序选路，池到期后停止派发。"
+                    }),
+                ],
+            ),
+        )],
+    ));
     if state.tab == "sources" {
+        // ---- 来源 ----
+        // One card, one table: the switch column is the same x on every row
+        // (the old loose rows staggered the toggles with the label length).
         let mut sources = std::collections::BTreeSet::new();
         for s in &state.snapshot.sources {
             if let Some(id) = s["id"].as_str() {
@@ -1187,6 +1587,15 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
         for r in &state.snapshot.routes {
             sources.insert(r.source.clone());
         }
+        let src_cols = vec![GridLength::STAR, GridLength::Pixel(110.0)];
+        let mut src_rows: Vec<View> = vec![table_head(
+            theme,
+            src_cols.clone(),
+            vec![
+                ("来源 · 模型 · 近期生成验证", HorizontalAlignment::Stretch),
+                ("允许入池", HorizontalAlignment::Right),
+            ],
+        )];
         for source in sources {
             let count = state
                 .snapshot
@@ -1201,28 +1610,111 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 .filter(|r| r.source == source && r.connectivity == "verified")
                 .count();
             let key = source.clone();
-            blocks.push(row(vec![
-                TextBlock::new()
-                    .text(format!("{source} · {count} 模型 · {good} 近期生成验证"))
-                    .width(420.0)
-                    .into(),
-                ToggleSwitch::new()
-                    .is_on(state.draft.sources.get(&source).copied().unwrap_or(true))
-                    .on_toggled(
-                        ctx.callback(move |v| Msg::Scheduling(Action::Source(key.clone(), v))),
-                    )
-                    .into(),
-            ]));
+            let on = state.draft.sources.get(&source).copied().unwrap_or(true);
+            src_rows.push(table_row(
+                theme,
+                src_cols.clone(),
+                vec![
+                    tcell(
+                        0,
+                        TextBlock::new()
+                            .text(format!("{source} · {count} 模型 · {good} 近期生成验证"))
+                            .text_wrapping(TextWrapping::Wrap),
+                    ),
+                    right_cell(
+                        1,
+                        crate::pages::switch(
+                            theme,
+                            on,
+                            ctx.callback(move |v| Msg::Scheduling(Action::Source(key.clone(), v))),
+                        ),
+                    ),
+                ],
+            ));
         }
-        blocks.push(row(vec![
-            line("搜索模型 / 来源", state.query.clone(), Action::Query, ctx),
-            line(
-                "加入池后有效期（分钟，1–10080）",
-                state.ttl.clone(),
-                Action::Ttl,
-                ctx,
+        if src_rows.len() == 1 {
+            src_rows.push(secondary("尚未发现来源。请检查协调器是否已启动。"));
+        }
+        blocks.push(w::section(
+            theme,
+            Symbol::World,
+            "来源",
+            vec![w::card(theme, vstack(0.0, src_rows))],
+        ));
+
+        // ---- 模型与来源 ----
+        let route_cols = vec![
+            GridLength::STAR,
+            GridLength::Pixel(40.0),
+            GridLength::Pixel(40.0),
+        ];
+        let mut route_rows: Vec<View> = vec![
+            // Filter fields: labels on their own row so both boxes share one
+            // baseline (side by side in a stack they butted together and each
+            // shrank to its minimum width).
+            Border::new()
+                .padding(Thickness::new(0.0, 2.0, 0.0, 10.0))
+                .content(
+                    Grid::new()
+                        // Wide enough for the range label to stay on one line:
+                        // wrapped to two lines it pushed the two boxes out of
+                        // baseline and read as broken text.
+                        .columns([GridLength::STAR, GridLength::Pixel(200.0)])
+                        .rows([GridLength::Auto, GridLength::Auto])
+                        .column_spacing(16.0)
+                        .row_spacing(6.0)
+                        .children([
+                            rcell(
+                                0,
+                                0,
+                                TextBlock::new()
+                                    .text("搜索模型 / 来源")
+                                    .vertical_alignment(VerticalAlignment::Bottom),
+                            ),
+                            rcell(
+                                1,
+                                0,
+                                TextBlock::new()
+                                    .text("有效期（分钟，1–10080）")
+                                    .vertical_alignment(VerticalAlignment::Bottom),
+                            ),
+                            rcell(
+                                0,
+                                1,
+                                TextBox::new()
+                                    .placeholder_text("按模型或来源筛选下方列表")
+                                    .min_height(32.0)
+                                    .min_width(240.0)
+                                    .text(state.query.clone())
+                                    .on_text_changed(
+                                        ctx.callback(|v: String| Msg::Scheduling(Action::Query(v))),
+                                    ),
+                            ),
+                            rcell(
+                                1,
+                                1,
+                                TextBox::new()
+                                    .min_height(32.0)
+                                    .text(state.ttl.clone())
+                                    .on_text_changed(
+                                        ctx.callback(|v: String| Msg::Scheduling(Action::Ttl(v))),
+                                    ),
+                            ),
+                        ]),
+                ),
+            table_head(
+                theme,
+                route_cols.clone(),
+                vec![
+                    (
+                        "来源 / 模型 · 连通性 · 最近错误",
+                        HorizontalAlignment::Stretch,
+                    ),
+                    ("入池", HorizontalAlignment::Center),
+                    ("检测", HorizontalAlignment::Center),
+                ],
             ),
-        ]));
+        ];
         let routes = state.routes();
         for r in routes.iter().skip(state.palette * 10).take(10) {
             let id = r.route_id.clone();
@@ -1234,27 +1726,111 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 r.connectivity,
                 r.last_error.as_deref().unwrap_or("—")
             );
-            blocks.push(label_actions(
-                status,
+            route_rows.push(table_row(
+                theme,
+                route_cols.clone(),
                 vec![
-                    button("入池 / 续期", move || Action::Pool(id.clone()), ctx),
-                    button("检测", move || Action::Check(probe_id.clone()), ctx),
+                    tcell(
+                        0,
+                        TextBlock::new()
+                            .text(status)
+                            .text_wrapping(TextWrapping::Wrap),
+                    ),
+                    tcell(
+                        1,
+                        glyph_button(
+                            theme,
+                            "＋",
+                            "入池 / 续期：加入限时模型池（已在池则续期）",
+                            {
+                                let id = id.clone();
+                                move || Action::Pool(id.clone())
+                            },
+                            ctx,
+                        ),
+                    ),
+                    tcell(
+                        2,
+                        glyph_button(
+                            theme,
+                            "↻",
+                            "生成检测：会产生少量用量",
+                            {
+                                let probe_id = probe_id.clone();
+                                move || Action::Check(probe_id.clone())
+                            },
+                            ctx,
+                        ),
+                    ),
                 ],
             ));
         }
-        blocks.push(row(vec![
-            button("上一组模型", || Action::Palette(-1), ctx),
-            TextBlock::new()
-                .text(format!(
-                    "{} / {}",
-                    state.palette + 1,
-                    routes.len().saturating_sub(1) / 10 + 1
-                ))
-                .into(),
-            button("下一组模型", || Action::Palette(1), ctx),
-        ]));
-        blocks.push(TextBlock::new().text("扫描只读取模型目录；生成检测会产生少量用量，监工可按工作流选择，遵守共享探针预算。列表可见不代表已验证可用。").text_wrapping(TextWrapping::Wrap).into());
-        blocks.push(w::section_header(theme, Symbol::List, "限时模型池"));
+        if routes.is_empty() {
+            route_rows.push(secondary("没有匹配的模型。"));
+        }
+        // Footer: the pager on one line, the policy note under it, both
+        // padded away from the last row (they used to sit flush on it).
+        route_rows.push(
+            Border::new()
+                .padding(Thickness::new(0.0, 8.0, 0.0, 0.0))
+                .content(row(vec![
+                    small_button(
+                        "上一组模型",
+                        "查看上一组 10 个模型",
+                        || Action::Palette(-1),
+                        ctx,
+                    ),
+                    TextBlock::new()
+                        .text(format!(
+                            "{} / {}",
+                            state.palette + 1,
+                            routes.len().saturating_sub(1) / 10 + 1
+                        ))
+                        .font_size(theme.label_size)
+                        .foreground(theme.subtle)
+                        .min_width(64.0)
+                        .horizontal_alignment(HorizontalAlignment::Center)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .into(),
+                    small_button(
+                        "下一组模型",
+                        help_for("下一组模型"),
+                        || Action::Palette(1),
+                        ctx,
+                    ),
+                ])),
+        );
+        route_rows.push(
+            Border::new()
+                .padding(Thickness::new(0.0, 6.0, 0.0, 4.0))
+                .content(secondary(
+                    "扫描只读取模型目录；生成检测会产生少量用量，监工可按工作流选择，遵守共享探针预算。列表可见不代表已验证可用。",
+                )),
+        );
+        blocks.push(w::section(
+            theme,
+            Symbol::Filter,
+            "模型与来源",
+            vec![w::card(theme, vstack(0.0, route_rows))],
+        ));
+
+        // ---- 限时模型池 ----
+        let pool_cols = vec![
+            GridLength::STAR,
+            GridLength::Pixel(40.0),
+            GridLength::Pixel(40.0),
+            GridLength::Pixel(40.0),
+        ];
+        let mut pool_rows: Vec<View> = vec![table_head(
+            theme,
+            pool_cols.clone(),
+            vec![
+                ("顺序 · 模型 · 剩余", HorizontalAlignment::Stretch),
+                ("上移", HorizontalAlignment::Center),
+                ("下移", HorizontalAlignment::Center),
+                ("移出", HorizontalAlignment::Center),
+            ],
+        )];
         for (i, p) in state.draft.pool.iter().enumerate() {
             let name = state
                 .snapshot
@@ -1264,270 +1840,505 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 .map_or(p.route_id.as_str(), |r| r.model.as_str());
             let left = p.expires_at.saturating_sub(model::now_ms()) / 60000;
             let id = p.route_id.clone();
-            blocks.push(label_actions(
-                format!(
-                    "{} · {name} · {}",
-                    i + 1,
-                    if left == 0 {
-                        "已到期".into()
-                    } else {
-                        format!("剩余 {left} 分钟")
-                    }
-                ),
+            pool_rows.push(table_row(
+                theme,
+                pool_cols.clone(),
                 vec![
-                    button("↑", move || Action::MovePool(i, -1), ctx),
-                    button("↓", move || Action::MovePool(i, 1), ctx),
-                    button("移出", move || Action::RemovePool(id.clone()), ctx),
+                    tcell(
+                        0,
+                        TextBlock::new()
+                            .text(format!(
+                                "{} · {name} · {}",
+                                i + 1,
+                                if left == 0 {
+                                    "已到期".into()
+                                } else {
+                                    format!("剩余 {left} 分钟")
+                                }
+                            ))
+                            .text_wrapping(TextWrapping::Wrap),
+                    ),
+                    tcell(
+                        1,
+                        glyph_button(theme, "↑", "上移", move || Action::MovePool(i, -1), ctx),
+                    ),
+                    tcell(
+                        2,
+                        glyph_button(theme, "↓", "下移", move || Action::MovePool(i, 1), ctx),
+                    ),
+                    tcell(
+                        3,
+                        glyph_button(
+                            theme,
+                            "✕",
+                            "移出模型池",
+                            {
+                                let id = id.clone();
+                                move || Action::RemovePool(id.clone())
+                            },
+                            ctx,
+                        ),
+                    ),
                 ],
             ));
         }
-        return blocks;
+        if state.draft.pool.is_empty() {
+            pool_rows.push(secondary("尚未加入任何模型。"));
+        }
+        blocks.push(w::section(
+            theme,
+            Symbol::Clock,
+            "限时模型池",
+            vec![w::card(theme, vstack(0.0, pool_rows))],
+        ));
     }
     blocks
 }
 
+/// Equal-width cells, `cols` per row: every button in the grid shares one
+/// width and one left edge (rows of natural-width buttons staggered with the
+/// label lengths).
+fn uniform_grid(cols: usize, spacing: f64, views: Vec<View>) -> View {
+    let rows = views.len().div_ceil(cols.max(1));
+    Grid::new()
+        .columns((0..cols).map(|_| GridLength::STAR))
+        .rows((0..rows).map(|_| GridLength::Auto))
+        .column_spacing(spacing)
+        .row_spacing(spacing)
+        .keyed_children(views.into_iter().enumerate().map(|(i, v)| {
+            KeyedView::new(
+                i as u64,
+                Border::new()
+                    .grid_column((i % cols) as i32)
+                    .grid_row((i / cols) as i32)
+                    .content(v),
+            )
+        }))
+}
+
+fn profiles_blocks(
+    mut blocks: Vec<View>,
+    state: &State,
+    theme: &Theme,
+    ctx: &ViewContext<Shell>,
+) -> Vec<View> {
+    let presets: Vec<View> = state
+        .snapshot
+        .call_presets
+        .iter()
+        .enumerate()
+        .map(|(index, p)| {
+            Button::new()
+                .min_height(36.0)
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .on_click(ctx.callback(move |_| Msg::Scheduling(Action::CallPreset(index))))
+                .content(p["title"].as_str().unwrap_or("预设"))
+        })
+        .collect();
+    let mut preset_card: Vec<View> = vec![secondary(
+        "节点显式参数优先于预设默认值；当前配置上限与模型原生上限共同生效。保存仅修改本协调器设置。",
+    )];
+    if presets.is_empty() {
+        preset_card.push(w::empty_state(theme, "协调器未提供调用预设。"));
+    } else {
+        preset_card.push(uniform_grid(3, 8.0, presets));
+    }
+    blocks.push(w::section(
+        theme,
+        Symbol::List,
+        "预设",
+        vec![w::card(theme, vstack(12.0, preset_card))],
+    ));
+    blocks.push(w::section(
+        theme,
+        Symbol::Edit,
+        "调用配置 JSON",
+        vec![w::card(
+            theme,
+            vstack(
+                10.0,
+                vec![
+                    line(
+                        "调用配置 JSON",
+                        state.profile_editor.clone(),
+                        Action::ProfileEditor,
+                        ctx,
+                    ),
+                    Border::new()
+                        .horizontal_alignment(HorizontalAlignment::Right)
+                        .content(button("应用到待保存设置", || Action::ApplyProfile, ctx)),
+                ],
+            ),
+        )],
+    ));
+    blocks.push(w::section(
+        theme,
+        Symbol::Document,
+        "当前生效值",
+        vec![w::card(
+            theme,
+            TextBlock::new()
+                .text(
+                    serde_json::to_string_pretty(&state.snapshot.effective_profile)
+                        .unwrap_or_default(),
+                )
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .is_text_selection_enabled(true)
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        )],
+    ));
+    blocks
+}
+
+/// Icon + label button content (Run / Stop): the glyph is a SymbolIcon on the
+/// label's center line instead of a "▶" character riding on the text baseline.
+fn icon_label(icon: Symbol, label: &str) -> View {
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(8.0)
+        .children((
+            // 16 DIP like WinUI's AppBarButton glyphs; the bare SymbolIcon is
+            // 20 and outweighed the label next to it.
+            Viewbox::new()
+                .width(16.0)
+                .height(16.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .slot(ViewboxSlot::Child, SymbolIcon::new().symbol(icon)),
+            TextBlock::new()
+                .text(label)
+                .vertical_alignment(VerticalAlignment::Center),
+        ))
+}
+
 fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
     let reason = state.run_disabled_reason();
-    let mut actions = vec![
+    // ---- 工作流工具栏：编辑在左，执行在右 ----
+    // 运行 is the page's primary action unless there are unsaved edits — then
+    // 保存修改 (in the band above) holds the accent and 运行 is disabled anyway.
+    let mut run_actions = Vec::new();
+    if state.active_run() {
+        run_actions.push(
+            Button::new()
+                .min_height(36.0)
+                .is_enabled(!state.busy)
+                .on_click(ctx.callback(|_| Msg::Scheduling(Action::Cancel)))
+                .content(icon_label(Symbol::Stop, "停止"))
+                .tooltip(help_for("停止")),
+        );
+    }
+    run_actions.push(
         Button::new()
-            .style(ButtonStyle::Accent)
+            .style(if state.dirty {
+                ButtonStyle::Default
+            } else {
+                ButtonStyle::Accent
+            })
             .min_height(36.0)
             .is_enabled(reason.is_none())
             .on_click(ctx.callback(|_| Msg::Scheduling(Action::Run)))
-            .content("▶ 运行工作流")
+            .content(icon_label(Symbol::Play, "运行工作流"))
             .tooltip(reason.unwrap_or(help_for("运行工作流"))),
-        Button::new()
-            .min_height(36.0)
-            .is_enabled(state.dirty && !state.busy)
-            .on_click(ctx.callback(|_| Msg::Scheduling(Action::Save)))
-            .content("保存修改")
-            .tooltip(help_for("保存修改")),
-    ];
-    if state.active_run() {
-        actions.insert(0, button("停止", || Action::Cancel, ctx));
-    }
-    actions.push(more_menu(state, ctx));
-    let head = Grid::new()
+    );
+    let flow_bar = Grid::new()
         .columns([GridLength::STAR, GridLength::Auto])
-        .rows([GridLength::Auto, GridLength::Auto])
         .column_spacing(16.0)
-        .row_spacing(6.0)
         .children((
-            ComboBox::new()
-                .placeholder_text("选择或添加工作流")
-                .items_source(state.draft.workflows.iter().map(|w| w.name.as_str()))
-                .selected_index((!state.draft.workflows.is_empty()).then_some(state.selected))
-                .min_height(36.0)
-                .max_width(300.0)
-                .horizontal_alignment(HorizontalAlignment::Left)
-                .on_selection_changed(ctx.callback(|v: Option<usize>| {
-                    Msg::Scheduling(v.map_or(Action::StopDrag, Action::Select))
-                })),
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(row(vec![
+                    ComboBox::new()
+                        .placeholder_text("选择或添加工作流")
+                        .items_source(state.draft.workflows.iter().map(|w| w.name.as_str()))
+                        .selected_index(
+                            (!state.draft.workflows.is_empty()).then_some(state.selected),
+                        )
+                        .min_height(36.0)
+                        .width(240.0)
+                        .on_selection_changed(ctx.callback(|v: Option<usize>| {
+                            Msg::Scheduling(v.map_or(Action::StopDrag, Action::Select))
+                        }))
+                        .into(),
+                    add_menu(state, ctx),
+                    view_menu(state, ctx),
+                    help_button(theme),
+                ])),
             Border::new()
                 .grid_column(1)
                 .vertical_alignment(VerticalAlignment::Center)
-                .content(row(actions)),
-            TextBlock::new()
-                .grid_row(1)
-                .grid_column_span(2)
-                .margin(Thickness::new(8.0, 0.0, 0.0, 0.0))
-                .text(format!(
-                    "{} · {} 个节点",
-                    if state.busy {
-                        "处理中"
-                    } else if state.dirty {
-                        "有未保存修改"
-                    } else {
-                        "已同步"
-                    },
-                    state.workflow().map_or(0, |w| w.nodes.len())
-                ))
-                .font_size(12.0)
-                .foreground(theme.subtle)
-                .text_wrapping(TextWrapping::Wrap),
+                .content(row(run_actions)),
         ));
-    let view = menu(
-        "视图与帮助",
-        "画布缩放、平移、结果面板和操作说明。",
-        "view",
-        ctx,
-    );
-    let tools = Grid::new()
+    // ---- 模型库：搜索与翻页在左，画布概况在右 ----
+    let pages = state.routes().len().saturating_sub(1) / state.palette_page_size() + 1;
+    let library_bar = Grid::new()
         .columns([GridLength::STAR, GridLength::Auto])
+        .column_spacing(16.0)
         .children((
-            row(vec![
-                TextBox::new()
-                    .placeholder_text("搜索模型库")
-                    .text(&state.query)
-                    .width(200.0)
-                    .min_height(36.0)
-                    .on_text_changed(ctx.callback(|v| Msg::Scheduling(Action::Query(v))))
-                    .tooltip("按模型或来源名称筛选左侧列表。"),
-                Button::new()
-                    .width(36.0)
-                    .height(36.0)
-                    .is_enabled(state.palette > 0)
-                    .on_click(ctx.callback(|_| Msg::Scheduling(Action::Palette(-1))))
-                    .content("‹")
-                    .tooltip("上一页模型"),
-                Button::new()
-                    .width(36.0)
-                    .height(36.0)
-                    .is_enabled((state.palette + 1) * 10 < state.routes().len())
-                    .on_click(ctx.callback(|_| Msg::Scheduling(Action::Palette(1))))
-                    .content("›")
-                    .tooltip("下一页模型"),
-                TextBlock::new()
-                    .text(format!(
-                        "{} / {} 页",
-                        state.palette + 1,
-                        state.routes().len().saturating_sub(1) / 10 + 1
-                    ))
-                    .font_size(12.0)
-                    .foreground(theme.subtle)
-                    .min_width(64.0)
-                    .into(),
-            ]),
-            Border::new().grid_column(1).content(row(vec![
-                menu("＋ 添加节点", help_for("添加节点"), "add", ctx),
-                view,
-            ])),
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(row(vec![
+                    TextBox::new()
+                        .placeholder_text("搜索模型库（模型或来源）")
+                        .text(&state.query)
+                        .width(240.0)
+                        .min_height(32.0)
+                        .on_text_changed(ctx.callback(|v| Msg::Scheduling(Action::Query(v))))
+                        .into(),
+                    glyph_button(theme, "‹", "上一页模型", || Action::Palette(-1), ctx),
+                    TextBlock::new()
+                        .text(format!("{} / {pages}", state.palette + 1))
+                        .font_size(theme.label_size)
+                        .foreground(theme.subtle)
+                        .min_width(44.0)
+                        .horizontal_alignment(HorizontalAlignment::Center)
+                        .into(),
+                    glyph_button(theme, "›", "下一页模型", || Action::Palette(1), ctx),
+                ])),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    TextBlock::new()
+                        .text(format!(
+                            "{} 个节点 · 缩放 {:.0}%{}",
+                            state.workflow().map_or(0, |w| w.nodes.len()),
+                            state.zoom * 100.0,
+                            if state.pan_tool {
+                                " · 平移工具"
+                            } else {
+                                ""
+                            }
+                        ))
+                        .font_size(theme.label_size)
+                        .foreground(theme.subtle),
+                ),
         ));
     let side = state.show_node_details || state.show_params;
     let body = Grid::new()
         .columns([
             GridLength::STAR,
-            GridLength::Pixel(if side { 310.0 } else { 0.0 }),
+            GridLength::Pixel(if side { 320.0 } else { 0.0 }),
         ])
+        .column_spacing(if side { 10.0 } else { 0.0 })
         .children((
             Border::new().content(canvas(state, theme, ctx)),
-            Border::new()
-                .grid_column(1)
-                .padding(Thickness::xy(if side { 6.0 } else { 0.0 }, 0.0))
-                .content(if side {
-                    inspector(state, theme, ctx)
-                } else {
-                    Border::new().into()
-                }),
-        ));
-    let selected = state
-        .node
-        .and_then(|i| state.workflow().and_then(|w| w.nodes.get(i)));
-    let info = if let Some(node) = selected {
-        StackPanel::new().spacing(4.0).children((
-            TextBlock::new()
-                .text(format!("已选中：{}", node.title))
-                .font_size(14.0)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .foreground(theme.accent)
-                .text_wrapping(TextWrapping::Wrap),
-            secondary("拖动节点主体移动 · 从右端口连接下游"),
-        ))
-    } else {
-        secondary(reason.unwrap_or("从左侧拖入模型，或添加职责模板开始编排。"))
-    };
-    let actions = if selected.is_some() {
-        vec![
-            button("编辑节点", || Action::EditNode, ctx),
-            button("取消选择", || Action::ClearSelection, ctx),
-        ]
-    } else {
-        vec![]
-    };
-    let context = Grid::new()
-        .columns([GridLength::STAR, GridLength::Auto])
-        .column_spacing(16.0)
-        .min_height(40.0)
-        .children((
-            Border::new()
-                .vertical_alignment(VerticalAlignment::Center)
-                .content(info),
-            Border::new()
-                .grid_column(1)
-                .vertical_alignment(VerticalAlignment::Center)
-                .content(row(actions)),
-        ));
-    let status = StackPanel::new().spacing(6.0).children((
-        TextBlock::new()
-            .text(state.error.as_deref().unwrap_or(""))
-            .foreground(theme.danger)
-            .text_wrapping(TextWrapping::Wrap)
-            .max_height(if state.error.is_some() { 44.0 } else { 0.0 }),
-        context,
-    ));
-    let main = Grid::new()
-        .rows([
-            GridLength::Auto,
-            GridLength::Auto,
-            GridLength::STAR,
-            GridLength::Auto,
-            GridLength::Auto,
-        ])
-        .row_spacing(10.0)
-        .children((
-            head,
-            Border::new().grid_row(1).content(tools),
-            Border::new().grid_row(2).content(body),
-            Border::new().grid_row(3).content(status),
-            Border::new().grid_row(4).content(if state.show_run {
-                run_panel(state, ctx)
+            Border::new().grid_column(1).content(if side {
+                inspector(state, theme, ctx)
             } else {
                 Border::new().into()
             }),
         ));
-    let mut layers = vec![KeyedView::new("workspace", main)];
-    if state.open_menu.is_some() {
+    // ---- 底部状态：选中节点的上下文，或运行不可用的原因 ----
+    let selected = state
+        .node
+        .and_then(|i| state.workflow().and_then(|w| w.nodes.get(i)));
+    let status: View = if let Some(node) = selected {
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(16.0)
+            .min_height(40.0)
+            .children((
+                Border::new()
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(
+                        StackPanel::new().spacing(2.0).children((
+                            TextBlock::new()
+                                .text(format!("已选中：{}", node.title))
+                                .font_weight(FontWeight::SEMI_BOLD)
+                                .foreground(theme.accent)
+                                .text_trimming(TextTrimming::CharacterEllipsis),
+                            secondary("拖动节点主体移动 · 从右端口连接下游 · 右键打开节点菜单"),
+                        )),
+                    ),
+                Border::new()
+                    .grid_column(1)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(row(vec![
+                        button("编辑节点", || Action::EditNode, ctx),
+                        button("取消选择", || Action::ClearSelection, ctx),
+                    ])),
+            ))
+    } else if let Some(reason) = reason {
+        InfoBar::new()
+            .severity(InfoBarSeverity::Informational)
+            .is_open(true)
+            .is_closable(false)
+            .title("暂不能运行")
+            .message(reason)
+            .into()
+    } else {
+        secondary("就绪：可以运行工作流。运行前可在 更多 › 运行前预检 中检查路线与预算。")
+    };
+    // Bands, not one five-row grid: the toolbar keeps its natural height and
+    // the node sheet lives in the pane below it, anchored by layout.
+    let mut top = vec![page_band(state, theme, ctx)];
+    top.extend(error_bar(state));
+    top.push(flow_bar);
+    top.push(library_bar);
+    let toolbar = vstack(10.0, top);
+    // Only the rows that have content: an empty Auto row still paid the grid's
+    // row spacing. With the run pane open and nothing selected the status row
+    // steps aside (the pane repeats the reason) so the canvas keeps its height.
+    let mut rows: Vec<(&str, View)> = vec![("body", body)];
+    if !state.show_run || selected.is_some() {
+        rows.push(("status", status));
+    }
+    if state.show_run {
+        rows.push(("run", run_panel(state, theme, ctx)));
+    }
+    let pane =
+        Grid::new()
+            .rows((0..rows.len()).map(|i| {
+                if i == 0 {
+                    GridLength::STAR
+                } else {
+                    GridLength::Auto
+                }
+            }))
+            .row_spacing(10.0)
+            .keyed_children(rows.into_iter().enumerate().map(|(i, (key, v))| {
+                KeyedView::new(key, Border::new().grid_row(i as i32).content(v))
+            }));
+    let mut layers = vec![
+        KeyedView::new("toolbar", toolbar),
+        KeyedView::new("pane", Border::new().grid_row(1).content(pane)),
+    ];
+    if state.open_menu == Some("node") {
         layers.push(KeyedView::new(
             "dismiss",
             Border::new()
+                .grid_row(1)
                 .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
                 .on_pointer_pressed(ctx.callback(|_| Msg::Scheduling(Action::CloseMenu))),
         ));
+        // Anchored where the node was right-pressed. Pointer coordinates are
+        // canvas-local and the canvas is the pane cell's first row, so the
+        // same (x, y) positions the layer inside that cell; clamp so a node
+        // near an edge keeps the sheet on screen.
+        let (px, py) = state.menu_at;
+        let (vw, vh) = state.viewport.get();
+        let left = px.clamp(0.0, (vw - NODE_MENU_W - 12.0).max(0.0));
+        let top = py.clamp(0.0, (vh - 220.0).max(0.0));
         layers.push(KeyedView::new(
             "menu",
             Border::new()
-                .horizontal_alignment(HorizontalAlignment::Right)
+                .grid_row(1)
+                .horizontal_alignment(HorizontalAlignment::Left)
                 .vertical_alignment(VerticalAlignment::Top)
-                .margin(Thickness::new(0.0, 48.0, 0.0, 0.0))
-                .content(menu_panel(state, theme, ctx)),
+                .margin(Thickness::new(left, top, 0.0, 0.0))
+                .content(node_menu(state, theme, ctx)),
         ));
     }
-    Grid::new().keyed_children(layers)
+    Grid::new()
+        .rows([GridLength::Auto, GridLength::STAR])
+        .row_spacing(10.0)
+        .keyed_children(layers)
 }
 
-fn run_panel(state: &State, ctx: &ViewContext<Shell>) -> View {
+/// Title row of a side/bottom pane: title (+ optional caption) left, a
+/// "收起" button pinned right — the inspector and the run pane share it, so
+/// both close from the same corner with the same word.
+fn pane_head(
+    theme: &Theme,
+    title: &str,
+    caption: &str,
+    close: impl Fn() -> Action + 'static,
+    ctx: &ViewContext<Shell>,
+) -> View {
+    // Title and 收起 share one centered row; the caption runs full width under
+    // it (squeezed beside the button it wrapped after a few characters).
+    let head = Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .column_spacing(12.0)
+        .children((
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    TextBlock::new()
+                        .text(title)
+                        .font_size(theme.h2_size)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .text_wrapping(TextWrapping::Wrap),
+                ),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    Button::new()
+                        .style(ButtonStyle::Subtle)
+                        .min_height(32.0)
+                        .on_click(ctx.callback(move |_| Msg::Scheduling(close())))
+                        .content(icon_label(Symbol::Cancel, "收起")),
+                ),
+        ));
+    if caption.is_empty() {
+        head
+    } else {
+        vstack(4.0, vec![head, secondary(caption)])
+    }
+}
+
+fn run_panel(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
+    // 预检和运行都会打开这张面板；标题行常驻"收起"，与检查器同一位置、同一个词。
+    // 面板打开时底部状态行让位，"暂不能运行"的原因改在标题下说明。
+    let caption = state
+        .run_disabled_reason()
+        .filter(|_| state.node.is_none())
+        .map_or_else(String::new, |r| format!("暂不能运行：{r}"));
+    let head = pane_head(
+        theme,
+        if state.active_run() {
+            "输入与结果 · 运行中"
+        } else {
+            "输入与结果"
+        },
+        &caption,
+        || Action::ToggleRun,
+        ctx,
+    );
     let mut blocks = vec![
         Grid::new()
-            .columns([GridLength::Pixel(210.0), GridLength::STAR])
-            .column_spacing(12.0)
+            .columns([GridLength::Pixel(220.0), GridLength::STAR])
+            .column_spacing(16.0)
             .children((
-                line(
-                    "工作流 ID",
-                    state.workflow_id.clone(),
-                    Action::WorkflowId,
-                    ctx,
-                ),
-                Border::new().grid_column(1).content(line(
-                    "本次输入材料",
-                    state.input.clone(),
-                    Action::Input,
-                    ctx,
-                )),
+                Border::new()
+                    .vertical_alignment(VerticalAlignment::Top)
+                    .content(line(
+                        "工作流 ID",
+                        state.workflow_id.clone(),
+                        Action::WorkflowId,
+                        ctx,
+                    )),
+                Border::new()
+                    .grid_column(1)
+                    .vertical_alignment(VerticalAlignment::Top)
+                    .content(line(
+                        "本次输入材料",
+                        state.input.clone(),
+                        Action::Input,
+                        ctx,
+                    )),
             )),
-        row(vec![
-            TextBlock::new()
-                .text("新建未知结果的运行前接受重复付费风险")
-                .into(),
-            ToggleSwitch::new()
-                .is_on(state.acknowledge)
-                .on_toggled(ctx.callback(|v| Msg::Scheduling(Action::Acknowledge(v))))
-                .into(),
-        ]),
+        w::ruled_row(
+            theme,
+            label_actions(
+                "新建未知结果的运行前，接受重复付费风险".into(),
+                vec![crate::pages::switch(
+                    theme,
+                    state.acknowledge,
+                    ctx.callback(|v| Msg::Scheduling(Action::Acknowledge(v))),
+                )],
+            ),
+        ),
     ];
-    for run in &state.snapshot.runs {
-        if let Some(id) = run["id"].as_str() {
-            let id = id.to_owned();
-            blocks.push(button(
+    let runs: Vec<View> = state
+        .snapshot
+        .runs
+        .iter()
+        .filter_map(|run| {
+            let id = run["id"].as_str()?.to_owned();
+            Some(button(
                 &format!(
                     "{} · {}",
                     run["name"].as_str().unwrap_or("运行"),
@@ -1535,28 +2346,39 @@ fn run_panel(state: &State, ctx: &ViewContext<Shell>) -> View {
                 ),
                 move || Action::Detail(id.clone()),
                 ctx,
-            ));
-        }
+            ))
+        })
+        .collect();
+    if !runs.is_empty() {
+        blocks.push(secondary("最近运行 · 点击查看明细"));
+        blocks.push(uniform_grid(3, 8.0, runs));
     }
     if let Some(detail) = &state.detail {
         if let Some(nodes) = detail["nodes"].as_object() {
-            for (id, node) in nodes {
-                if let Some(job) = node["job_id"].as_str() {
-                    let job = job.to_owned();
-                    blocks.push(button(
+            let reports: Vec<View> = nodes
+                .iter()
+                .filter_map(|(id, node)| {
+                    let job = node["job_id"].as_str()?.to_owned();
+                    Some(button(
                         &format!(
                             "节点 {id} · {} · 查看报告",
                             node["state"].as_str().unwrap_or("未知")
                         ),
                         move || Action::Collect(job.clone()),
                         ctx,
-                    ));
-                }
+                    ))
+                })
+                .collect();
+            if !reports.is_empty() {
+                blocks.push(secondary("节点报告"));
+                blocks.push(uniform_grid(2, 8.0, reports));
             }
         }
         blocks.push(
             TextBlock::new()
                 .text(state.detail_text.clone())
+                .font_size(theme.label_size)
+                .is_text_selection_enabled(true)
                 .text_wrapping(TextWrapping::Wrap)
                 .into(),
         );
@@ -1565,78 +2387,115 @@ fn run_panel(state: &State, ctx: &ViewContext<Shell>) -> View {
         blocks.push(
             TextBlock::new()
                 .text(state.report_text.clone())
+                .font_size(theme.label_size)
+                .is_text_selection_enabled(true)
                 .text_wrapping(TextWrapping::Wrap)
                 .into(),
         );
     }
-    ScrollViewer::new()
-        .height(190.0)
-        .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
-        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
-        .content(
-            StackPanel::new()
-                .spacing(8.0)
-                .keyed_children(crate::pages::keyed(blocks)),
-        )
+    // Vertical stack, not a Grid: grid children without an explicit row all
+    // land in row 0, which stacked the header under the scroll content and
+    // made clicks on 收起 land in the wide input field instead.
+    w::card(
+        theme,
+        StackPanel::new().spacing(8.0).children((
+            head,
+            ScrollViewer::new()
+                .height(170.0)
+                .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+                .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                .content(
+                    StackPanel::new()
+                        .margin(Thickness::new(0.0, 0.0, 12.0, 0.0))
+                        .spacing(10.0)
+                        .keyed_children(crate::pages::keyed(blocks)),
+                ),
+        )),
+    )
 }
 
-fn inspector(state: &State, _theme: &Theme, ctx: &ViewContext<Shell>) -> View {
-    let mut blocks = vec![
-        TextBlock::new()
-            .text(if state.show_params {
-                "工作流设置"
-            } else {
-                "节点设置"
-            })
-            .font_size(18.0)
-            .into(),
-        secondary(if state.show_params {
+fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
+    let mut blocks = vec![pane_head(
+        theme,
+        if state.show_params {
+            "工作流设置"
+        } else {
+            "节点设置"
+        },
+        if state.show_params {
             "配置本工作流的执行范围和保护条件。"
         } else {
             "修改当前选中节点的职责与交付要求。"
-        }),
-        button("收起设置", || Action::CloseInspector, ctx),
-    ];
+        },
+        || Action::CloseInspector,
+        ctx,
+    )];
     if state.show_params {
-        blocks.push(section(
-            "工作流管理",
-            "新建、移除以及批量调整依赖。",
-            vec![
-                button("新工作流", || Action::New, ctx),
-                button("移除工作流", || Action::RemoveWorkflow, ctx),
-                button("顺序串联", || Action::Chain, ctx),
-                button("清空连线", || Action::Unlink, ctx),
-            ],
-        ));
-        blocks.push(row(vec![
-            TextBlock::new().text("Luna 监工").into(),
-            ToggleSwitch::new()
-                .is_on(
+        if let Some(w) = state.workflow() {
+            blocks.push(line("工作流名称", w.name.clone(), Action::Name, ctx));
+            // Two numbers side by side: they are short, and one column of
+            // full-width boxes read as a form twice its real length.
+            blocks.push(
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::STAR])
+                    .column_spacing(10.0)
+                    .children((
+                        Border::new()
+                            .vertical_alignment(VerticalAlignment::Top)
+                            .content(line(
+                                "总 Token 预算",
+                                w.token_budget.to_string(),
+                                Action::Budget,
+                                ctx,
+                            )),
+                        Border::new()
+                            .grid_column(1)
+                            .vertical_alignment(VerticalAlignment::Top)
+                            .content(line(
+                                "并发目标",
+                                w.max_parallel.to_string(),
+                                Action::Parallel,
+                                ctx,
+                            )),
+                    )),
+            );
+        }
+        blocks.push(w::ruled_row(
+            theme,
+            label_actions(
+                "Luna 监工".into(),
+                vec![crate::pages::switch(
+                    theme,
                     state
                         .workflow()
                         .map_or(state.probe_supervision, |w| w.luna_supervision),
-                )
-                .on_toggled(ctx.callback(|v| Msg::Scheduling(Action::Supervision(v))))
-                .into(),
-        ]));
+                    ctx.callback(|v| Msg::Scheduling(Action::Supervision(v))),
+                )],
+            ),
+        ));
         blocks.push(secondary(
             "开启时需有同一工作流的在线监工；关闭仍保留预算、模型池和恢复保护。",
         ));
-        if let Some(w) = state.workflow() {
-            blocks.push(line("工作流名称", w.name.clone(), Action::Name, ctx));
-            blocks.push(line(
-                "总 Token 预算",
-                w.token_budget.to_string(),
-                Action::Budget,
-                ctx,
-            ));
-            blocks.push(line(
-                "并发目标",
-                w.max_parallel.to_string(),
-                Action::Parallel,
-                ctx,
-            ));
-        }
+        blocks.push(section(
+            theme,
+            "flow-manage",
+            "工作流管理",
+            "新建、移除以及批量调整依赖。",
+            // 2×2 instead of a vertical stack: four chunky full-width buttons
+            // read as a page of their own inside the narrow inspector.
+            vec![uniform_grid(
+                2,
+                6.0,
+                vec![
+                    button("新工作流", || Action::New, ctx),
+                    button("移除工作流", || Action::RemoveWorkflow, ctx),
+                    button("顺序串联", || Action::Chain, ctx),
+                    button("清空连线", || Action::Unlink, ctx),
+                ],
+            )],
+            state.expanded.contains("flow-manage"),
+            ctx,
+        ));
     }
     if state.show_node_details
         && let Some(w) = state.workflow()
@@ -1776,35 +2635,175 @@ fn inspector(state: &State, _theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         ));
         advanced.push(button("应用高级参数", || Action::ApplyTaskEditor, ctx));
         blocks.push(section(
+            theme,
+            "node-advanced",
             "高级调用参数",
             "输出容量、超时、重试和精确 JSON 设置。",
             advanced,
+            state.expanded.contains("node-advanced"),
+            ctx,
         ));
     }
-    ScrollViewer::new()
-        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
-        .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
-        .content(
-            StackPanel::new()
-                .spacing(8.0)
-                .keyed_children(crate::pages::keyed(blocks)),
-        )
+    // A card, like the run pane: the fields used to float straight on the page
+    // background next to the canvas edge, so the pane had no visible extent.
+    // The scroll content keeps a 12 DIP gutter so the scrollbar never covers
+    // the right edge of the text boxes.
+    w::card(
+        theme,
+        ScrollViewer::new()
+            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+            .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+            .content(
+                StackPanel::new()
+                    .margin(Thickness::new(0.0, 0.0, 12.0, 0.0))
+                    .spacing(12.0)
+                    .keyed_children(crate::pages::keyed(blocks)),
+            ),
+    )
+}
+
+/// Status color classes for the node canvas; resolved to brushes in the draw
+/// closure (brushes are device-bound, the classification is plain data).
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+    Good,
+    Warn,
+    Bad,
+    Info,
+    Muted,
+}
+
+/// Classifies a router run-state string into a badge. Keyword matching on the
+/// lowercase value keeps unknown router vocabulary from mislabeling a node —
+/// anything non-final reads as waiting.
+fn run_tone(state: &str) -> (Tone, String) {
+    let s = state.to_ascii_lowercase();
+    if s.contains("run") || s.contains("dispatch") {
+        (Tone::Info, "运行中".into())
+    } else if s.contains("succeed") || s.contains("complete") || s.contains("done") {
+        (Tone::Good, "已完成".into())
+    } else if s.contains("fail") || s.contains("error") {
+        (Tone::Bad, "失败".into())
+    } else if s.contains("cancel") || s.contains("abort") {
+        (Tone::Muted, "已取消".into())
+    } else {
+        (Tone::Muted, "等待中".into())
+    }
+}
+
+/// One node's canvas status: the connectivity light of its route and the
+/// live run badge, both as tone + short label (None when not applicable).
+type NodeStatus = (Option<(Tone, String)>, Option<(Tone, String)>);
+
+/// Trims `text` to roughly `units` em-halves (ASCII ≈ 1, CJK ≈ 2) with an
+/// ellipsis. Direct2D `DrawText` neither clips nor trims a NoWrap line, so a
+/// long model id ran out of the 200 DIP library column into the canvas.
+fn ellipsize(text: &str, units: f64) -> String {
+    let width = |c: char| if c.is_ascii() { 1.0 } else { 2.0 };
+    if text.chars().map(width).sum::<f64>() <= units {
+        return text.to_owned();
+    }
+    let mut used = 1.0; // room for the ellipsis
+    let mut out = String::new();
+    for c in text.chars() {
+        used += width(c);
+        if used > units {
+            break;
+        }
+        out.push(c);
+    }
+    out + "…"
 }
 
 fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
+    // Same page size the hit test and pagination use — rows per canvas
+    // height. A stale page index (window shrank between messages) clamps to
+    // the last page instead of drawing an empty strip.
+    let page_size = state.palette_page_size();
+    let pages = state.routes().len().saturating_sub(1) / page_size + 1;
+    let palette_page = state.palette.min(pages - 1);
     let palette: Vec<_> = state
         .routes()
         .into_iter()
-        .skip(state.palette * 10)
-        .take(10)
-        .map(|r| format!("{} / {}", r.source, r.model))
+        .skip(palette_page * page_size)
+        .take(page_size)
+        .map(|r| (ellipsize(&r.model, 31.0), ellipsize(&r.source, 34.0)))
         .collect();
-    let nodes: Vec<(String, String, String, f64, f64)> = state
+    let nodes: Vec<(String, String, String, f64, f64, String)> = state
         .workflow()
         .map(|w| {
             w.nodes
                 .iter()
-                .map(|n| (n.id.clone(), n.title.clone(), n.tags.join(" · "), n.x, n.y))
+                .map(|n| {
+                    (
+                        n.id.clone(),
+                        n.title.clone(),
+                        n.tags.join(" · "),
+                        n.x,
+                        n.y,
+                        n.node_type.clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Per-node status in the same order as `nodes`: the connectivity light of
+    // the bound route, and the live run state once a run reports per-node
+    // results. Plain data — the draw closure stays a pure renderer.
+    let routes_by_id: std::collections::HashMap<&str, &Route> = state
+        .snapshot
+        .routes
+        .iter()
+        .map(|r| (r.route_id.as_str(), r))
+        .collect();
+    let run_states: std::collections::HashMap<String, String> = state
+        .detail
+        .as_ref()
+        .and_then(|d| d["nodes"].as_object())
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| v["job_id"].as_str().is_some())
+                .filter_map(|(k, v)| v["state"].as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let statuses: Vec<NodeStatus> = state
+        .workflow()
+        .map(|w| {
+            w.nodes
+                .iter()
+                .map(|n| {
+                    let light = if n.node_type == "input" {
+                        // 母节点：工作流入口，恒为绿色提示而非模型连通性。
+                        // 状态带只有一行高——标签必须短到任何缩放都不折行。
+                        Some((Tone::Good, "入口".into()))
+                    } else if n.node_type != "model" {
+                        None
+                    } else {
+                        // Router vocabulary: "verified" / "unverified" /
+                        // "verification_required" / "" — only a verified
+                        // route is a green light, anything else is a warning
+                        // unless the router reports a hard failure.
+                        match routes_by_id.get(n.route_id.as_str()) {
+                            Some(r) if r.connectivity == "verified" => {
+                                Some((Tone::Good, "已连通".into()))
+                            }
+                            Some(r) if r.connectivity.is_empty() => {
+                                Some((Tone::Warn, "未验证".into()))
+                            }
+                            Some(r) if r.connectivity == "unverified" => {
+                                Some((Tone::Warn, "未验证".into()))
+                            }
+                            Some(r) if r.connectivity == "verification_required" => {
+                                Some((Tone::Warn, "需要验证".into()))
+                            }
+                            Some(_) => Some((Tone::Bad, "连通异常".into())),
+                            None => Some((Tone::Warn, "未绑定模型".into())),
+                        }
+                    };
+                    let badge = run_states.get(&n.id).map(|s| run_tone(s));
+                    (light, badge)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1854,12 +2853,21 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             _ => false,
         })
     });
-    let state_palette = state.palette * 10;
+    let state_palette = palette_page * page_size;
     let draw = move |c: &windows_canvas::DrawContext<'_>| {
-        use windows_canvas::{Rect, RoundedRect, TextFormat, Vector2};
+        use windows_canvas::{
+            Ellipse, PathBuilder, Rect, RoundedRect, TextAlignment, TextFormat, Vector2,
+            WordWrapping,
+        };
         viewport.set((f64::from(c.width), f64::from(c.height)));
         c.clear(bg);
         let text = TextFormat::new(&family, 12.0)?;
+        // Status band: one line high — wrapping stacked a second line past
+        // the node edge, so band text never wraps (it just trims instead).
+        let band = TextFormat::new(&family, 12.0)?.with_word_wrapping(WordWrapping::NoWrap);
+        let tail = TextFormat::new(&family, 12.0)?
+            .with_alignment(TextAlignment::Trailing)
+            .with_word_wrapping(WordWrapping::NoWrap);
         let brush = c.create_solid_brush(ink)?;
         let line = c.create_solid_brush(grid)?;
         let hi = c.create_solid_brush(accent)?;
@@ -1867,6 +2875,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         let picked = c.create_solid_brush(windows_canvas::ColorF { a: 0.16, ..accent })?;
         let good = c.create_solid_brush(windows_canvas::ColorF::from_rgba8(62, 190, 132, 255))?;
         let bad = c.create_solid_brush(windows_canvas::ColorF::from_rgba8(235, 108, 108, 255))?;
+        let warn = c.create_solid_brush(windows_canvas::ColorF::from_rgba8(232, 176, 84, 255))?;
         if nodes.is_empty() {
             c.draw_text(
                 "拖入模型，开始编排工作流",
@@ -1903,12 +2912,25 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         };
         for e in &edges {
             if let (Some(a), Some(b)) = (positions.get(&e.from), positions.get(&e.to)) {
-                c.draw_line(
-                    point(a.0 + 220.0, a.1 + 56.0),
-                    point(b.0, b.1 + 56.0),
-                    &hi,
-                    2.0,
-                );
+                let tail = point(a.0 + 220.0, a.1 + 56.0);
+                let tip = point(b.0, b.1 + 56.0);
+                c.draw_line(tail, tip, &hi, 2.0);
+                // Arrowhead at the target end: the bare line read as an
+                // undirected association; the chevron makes from→to legible
+                // at any zoom.
+                let (dx, dy) = (tip.x - tail.x, tip.y - tail.y);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len > 26.0 {
+                    let (ux, uy) = (dx / len, dy / len);
+                    let bx = tip.x - ux * 12.0;
+                    let by = tip.y - uy * 12.0;
+                    let arrow = PathBuilder::new(c.device())?.polygon([
+                        Vector2::new(tip.x, tip.y),
+                        Vector2::new(bx - uy * 5.0, by + ux * 5.0),
+                        Vector2::new(bx + uy * 5.0, by - ux * 5.0),
+                    ])?;
+                    c.fill_path(&arrow, &hi);
+                }
             }
         }
         for (i, n) in nodes.iter().enumerate() {
@@ -1918,6 +2940,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             if p.x + w < 210.0 || p.x > c.width || p.y + h < 0.0 || p.y > c.height {
                 continue;
             }
+            let master = n.5 == "input";
             let rect = Rect::new(p.x, p.y, p.x + w, p.y + h);
             let rounded = RoundedRect::new(rect, 8.0, 8.0);
             c.fill_rounded_rect(&rounded, &fill);
@@ -1928,10 +2951,20 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 &rounded,
                 if selected == Some(i) || hover == Some(i) {
                     &hi
+                } else if master {
+                    // 母节点 keeps a green frame so the entry point reads
+                    // apart from model nodes at any zoom.
+                    &good
                 } else {
                     &line
                 },
-                if selected == Some(i) { 3.0 } else { 1.5 },
+                if selected == Some(i) {
+                    3.0
+                } else if master {
+                    2.0
+                } else {
+                    1.5
+                },
             );
             if let Some((active, _, start)) = flash
                 && active == i
@@ -1967,31 +3000,90 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 &Rect::new(p.x + 12.0, p.y + 9.0, p.x + w - 12.0, p.y + 43.0),
                 &hi,
             );
+            // Tags stop above the status band so three-line tags can't run
+            // under it.
             c.draw_text(
                 &n.2,
                 &text,
-                &Rect::new(p.x + 12.0, p.y + 44.0, p.x + w - 12.0, p.y + h - 8.0),
+                &Rect::new(p.x + 12.0, p.y + 44.0, p.x + w - 12.0, p.y + h - 30.0),
                 &brush,
             );
-            if selected == Some(i) && zoom >= 0.6 {
-                c.draw_text(
-                    "✓ 已选中",
-                    &text,
-                    &Rect::new(p.x + 12.0, p.y + h - 28.0, p.x + w - 24.0, p.y + h - 4.0),
+            // Bottom band: connectivity light on the left, run state (or the
+            // selection mark when idle) tail-aligned on the right.
+            if zoom >= 0.6 {
+                let top = p.y + h - 26.0;
+                let bottom = p.y + h - 4.0;
+                if let Some((tone, label)) = statuses.get(i).and_then(|s| s.0.as_ref()) {
+                    let light = match tone {
+                        Tone::Good => &good,
+                        Tone::Bad => &bad,
+                        Tone::Warn => &warn,
+                        Tone::Info => &hi,
+                        Tone::Muted => &brush,
+                    };
+                    c.draw_text(
+                        &format!("● {label}"),
+                        &band,
+                        &Rect::new(p.x + 12.0, top, p.x + w * 0.55, bottom),
+                        light,
+                    );
+                }
+                if let Some((tone, label)) = statuses.get(i).and_then(|s| s.1.as_ref()) {
+                    let badge = match tone {
+                        Tone::Good => &good,
+                        Tone::Bad => &bad,
+                        Tone::Warn => &warn,
+                        Tone::Info => &hi,
+                        Tone::Muted => &brush,
+                    };
+                    c.draw_text(
+                        label,
+                        &tail,
+                        &Rect::new(p.x + w * 0.55, top, p.x + w - 10.0, bottom),
+                        badge,
+                    );
+                } else if selected == Some(i) {
+                    c.draw_text(
+                        "✓ 已选中",
+                        &tail,
+                        &Rect::new(p.x + w * 0.55, top, p.x + w - 10.0, bottom),
+                        &hi,
+                    );
+                }
+            }
+            // Ports: masters are entry points — a filled output port only;
+            // every other node shows a hollow output port on the right and a
+            // hollow input port on the left, so edge direction reads even
+            // without following the arrowheads.
+            if master {
+                c.fill_ellipse(
+                    &Ellipse {
+                        center: Vector2::new(p.x + w + 3.0, p.y + h / 2.0),
+                        radius_x: 4.5,
+                        radius_y: 4.5,
+                    },
+                    &good,
+                );
+            } else if zoom >= 0.6 {
+                c.draw_ellipse(
+                    &Ellipse {
+                        center: Vector2::new(p.x + w + 2.0, p.y + h / 2.0),
+                        radius_x: 4.5,
+                        radius_y: 4.5,
+                    },
                     &hi,
+                    1.5,
+                );
+                c.draw_ellipse(
+                    &Ellipse {
+                        center: Vector2::new(p.x - 2.0, p.y + h / 2.0),
+                        radius_x: 4.5,
+                        radius_y: 4.5,
+                    },
+                    &line,
+                    1.5,
                 );
             }
-            c.draw_text(
-                "●",
-                &text,
-                &Rect::new(
-                    p.x + w - 15.0,
-                    p.y + h / 2.0 - 10.0,
-                    p.x + w + 3.0,
-                    p.y + h / 2.0 + 12.0,
-                ),
-                &hi,
-            );
         }
         if let Some(to) = target
             && matches!(drag, Some(Drag::Model(_) | Drag::Edge(_)))
@@ -2085,7 +3177,15 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             &Rect::new(8.0, 8.0, 200.0, 36.0),
             &hi,
         );
-        for (i, title) in palette.iter().enumerate() {
+        // Two fixed lines per 42 DIP row — model, then its source — instead of
+        // "source / model" wrapping onto a second line only when long, which
+        // left single-line rows top-heavy and the list's rhythm uneven.
+        let small = TextFormat::new(&family, 11.0)?.with_word_wrapping(WordWrapping::NoWrap);
+        let faint = c.create_solid_brush(windows_canvas::ColorF {
+            a: ink.a * 0.7,
+            ..ink
+        })?;
+        for (i, (model, source)) in palette.iter().enumerate() {
             let y = 42.0 + i as f32 * 42.0;
             if matches!(drag,Some(Drag::Model(active)) if active==state_palette+i) {
                 c.fill_rounded_rect(
@@ -2098,7 +3198,18 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                     1.5,
                 );
             }
-            c.draw_text(title, &text, &Rect::new(8.0, y, 202.0, y + 38.0), &brush);
+            c.draw_text(
+                model,
+                &band,
+                &Rect::new(10.0, y + 2.0, 202.0, y + 20.0),
+                &brush,
+            );
+            c.draw_text(
+                source,
+                &small,
+                &Rect::new(10.0, y + 20.0, 202.0, y + 36.0),
+                &faint,
+            );
         }
         Ok(())
     };
@@ -2186,5 +3297,59 @@ mod gesture_tests {
         state.dirty = false;
         state.detail = Some(serde_json::json!({"state":"running"}));
         assert!(state.run_disabled_reason().unwrap().contains("运行"));
+    }
+    #[test]
+    fn ellipsize_keeps_short_text_and_trims_long_ids() {
+        assert_eq!(super::ellipsize("deepseek-flash", 31.0), "deepseek-flash");
+        let long = super::ellipsize("deepseek-ai/DeepSeek-V4.1-Flash-1017", 31.0);
+        assert!(long.ends_with('…'));
+        assert_eq!(long.chars().count(), 31);
+        // CJK counts double, so the same budget holds half as many glyphs.
+        assert_eq!(super::ellipsize("一二三四五六七八九十", 10.0), "一二三四…");
+    }
+
+    #[test]
+    fn palette_page_size_tracks_canvas_height_within_bounds() {
+        let state = super::State::default();
+        // Before the first canvas frame the viewport reports 0 — the floor
+        // keeps the old 10-row page (and a sane page count) instead of
+        // underflowing on the negative quotient.
+        assert_eq!(state.palette_page_size(), 10);
+        // Fullscreen canvas: rows fill the strip instead of stranding its
+        // lower half (the complaint this replaces: 10 rows + dead space).
+        state.viewport.set((1900.0, 1200.0));
+        assert_eq!(state.palette_page_size(), 27); // (1200 − 50) / 42
+        // Absurdly tall windows clamp so one page can't explode; short ones
+        // keep 10 so the shared page index stays inside the sources table's
+        // own 10-row range.
+        state.viewport.set((1900.0, 6000.0));
+        assert_eq!(state.palette_page_size(), 60);
+        state.viewport.set((1900.0, 300.0));
+        assert_eq!(state.palette_page_size(), 10);
+    }
+    #[test]
+    fn master_node_is_an_entry_point_and_refuses_inbound_edges() {
+        let mut workflow = globaltokentracker_core::scheduler::Workflow::new("fixture".into());
+        let master = workflow.add_master(10.0, 10.0).unwrap();
+        let route = globaltokentracker_core::scheduler::Route {
+            route_id: "fixture-route".into(),
+            ..Default::default()
+        };
+        let model = workflow.add_route(&route, 300.0, 10.0).unwrap();
+        assert_eq!(workflow.nodes[master].node_type, "input");
+        assert_eq!(workflow.nodes[master].route_id, "");
+        // 母节点是工作流入口：出边合法，入边拒绝。
+        assert!(workflow.can_connect(master, model).is_ok());
+        assert!(workflow.can_connect(model, master).is_err());
+        workflow.connect(master, model).unwrap();
+        // disconnect clears the node's edges but keeps every node.
+        workflow.disconnect(model);
+        assert_eq!(workflow.edges.len(), 0);
+        assert_eq!(workflow.nodes.len(), 2);
+        // remove still takes the node and its edges with it.
+        workflow.connect(master, model).unwrap();
+        workflow.remove(model);
+        assert_eq!(workflow.edges.len(), 0);
+        assert_eq!(workflow.nodes.len(), 1);
     }
 }

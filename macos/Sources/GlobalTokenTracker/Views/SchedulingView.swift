@@ -154,25 +154,26 @@ struct SchedulingView: View {
     private var now: UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment:.center,spacing:10) {
-                if tab == "workflow" { workflowPicker } else { Text(tab == "sources" ? "来源与模型池":"调用配置").font(.title2.bold()) }
-                Spacer()
-                if busy { ProgressView().controlSize(.small) }
-                if tab == "workflow" { executionButtons }
-                Button("保存修改") {save()}.disabled(busy || !dirty).help("保存节点和配置；保存本身不会调用模型。")
-                moreMenu
-            }.frame(minHeight:32)
-            Text("\(dirty ? "有未保存修改":"已同步") · \(graph?.nodes.count ?? 0) 个节点").font(.caption).foregroundStyle(.secondary).padding(.leading,6)
-            Picker("调度视图", selection: $tab) {
-                Text("工作流").tag("workflow"); Text("来源与模型池").tag("sources"); Text("调用配置").tag("profiles")
-            }.pickerStyle(.segmented).frame(maxWidth: 600)
-            if let error { Text(error).foregroundStyle(.red).font(.caption).lineLimit(3).textSelection(.enabled) }
-            if !notice.isEmpty { Text(notice).font(.caption).lineLimit(2).textSelection(.enabled) }
-            if tab == "workflow" { workspace }
-            else { ScrollView { VStack(alignment: .leading, spacing: 12) {
-                if tab == "sources" { sourcePanel } else { profilePanel }
-            }.frame(maxWidth: .infinity, alignment: .leading) } }
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            if let error {
+                Label { Text(error).lineLimit(3).textSelection(.enabled) } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                }
+                .font(.callout)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+            if !notice.isEmpty {
+                Label { Text(notice).lineLimit(4).textSelection(.enabled) } icon: { Image(systemName: "info.circle") }
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            switch tab {
+            case "sources": sourcePanel
+            case "profiles": profilePanel
+            default: workspace
+            }
         }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { request() }
         .task(id: runId) {
@@ -187,87 +188,176 @@ struct SchedulingView: View {
         .onChange(of: nodeId) { _, _ in taskText = nodeIndex.flatMap { graph?.nodes[$0].task.pretty } ?? "" }
     }
 
-    @ViewBuilder private var sourcePanel: some View {
-        Toggle("允许模型调度", isOn: Binding(get: {settings.enabled}, set: {settings.enabled=$0;dirty=true}))
-        Toggle("定向模式 · 仅使用限时池", isOn: Binding(get: {settings.mode=="directed"}, set: {settings.mode=$0 ? "directed":"auto";dirty=true}))
-        Toggle("手动检测启用 Luna", isOn: $probeSupervision)
-        Text("目录与认证提示不代表生成可用。检测占用共享预算，可按当前工作流选择监工。").font(.caption).foregroundStyle(.secondary)
-                ForEach(sources, id: \.self) { source in
-                    Toggle("\(source) · \(routes.filter { $0.source == source }.count) 模型", isOn: Binding(
-                        get: { settings.sources[source] ?? true }, set: { settings.sources[source] = $0; dirty = true }))
-                }
-                HStack { TextField("搜索模型 / 来源", text: $query); Stepper("有效期 \(minutes) 分钟", value: $minutes, in: 1...10080) }
-                Text("目录可见不代表生成可用。检测会产生少量用量，监工可选，并遵守共享探针预算。")
-                    .font(.caption).foregroundStyle(.secondary)
-                ScrollView { LazyVStack(alignment: .leading) {
-                    ForEach(filtered) { route in
-                        HStack {
-                            Text("\(route.source) / \(route.model)").draggable(route.id)
-                            Spacer()
-                            Text(route.connectivity).font(.caption)
-                            Button("加入 / 续期") { pool(route.id) }
-                            Button("生成检测") { request(params: .object(["action": .string("check"), "route_id": .string(route.id), "workflow_id": .string(workflowId), "luna_supervision": .bool(graph?.lunaSupervision ?? probeSupervision)])) }.disabled(busy)
-                        }.padding(5)
-                    }
-                }}.frame(height: 280)
-                Divider()
-                Text("限时模型池").font(.headline)
-                ForEach(Array(settings.pool.enumerated()), id: \.element.id) { index, entry in
-                    HStack {
-                        Text("\(index + 1) · \(routes.first { $0.id == entry.id }?.model ?? entry.id)")
-                        Text(entry.expiresAt > now ? "剩余 \((entry.expiresAt - now) / 60000) 分钟" : "已到期").font(.caption)
-                        Spacer()
-                        Button("↑") { movePool(index, -1) }
-                        Button("↓") { movePool(index, 1) }
-                        Button("移出") { settings.pool.remove(at: index); dirty = true }
-                    }
-                }
-                Divider()
-
+    /// Page switcher on the left; sync state, 保存修改 and 更多 on the right —
+    /// the same spot on all three pages (the WinUI band mirrors this). 保存
+    /// is the prominent button only while there is something to save.
+    private var header: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Picker("调度视图", selection: $tab) {
+                Text("工作流画布").tag("workflow"); Text("来源与模型池").tag("sources"); Text("调用配置").tag("profiles")
+            }.pickerStyle(.segmented).labelsHidden().fixedSize()
+            Spacer(minLength: 12)
+            if busy { ProgressView().controlSize(.small) }
+            Text(busy ? "处理中…" : dirty ? "有未保存修改" : "已同步")
+                .font(.callout).foregroundStyle(dirty ? Color.orange : Color.secondary)
+            saveButton
+            moreMenu
+        }
+    }
+    @ViewBuilder private var saveButton: some View {
+        let button = Button("保存修改") { save() }
+            .disabled(busy || !dirty)
+            .keyboardShortcut("s", modifiers: .command)
+            .help("保存节点和配置（⌘S）；保存本身不会调用模型。")
+        if dirty { button.buttonStyle(.borderedProminent) } else { button }
+    }
+    private var running: Bool { ["running","cancelling"].contains(detailValue["state"].text) }
+    private func connectivityLabel(_ value: String) -> String {
+        switch value {
+        case "verified": return "已连通"
+        case "", "unverified": return "未验证"
+        case "verification_required": return "需要验证"
+        default: return "连通异常"
+        }
     }
 
-    @ViewBuilder private var profilePanel: some View {
-                    Text("节点显式参数优先于预设默认值；配置档上限与模型原生上限共同生效。")
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3)) {
-                        ForEach(callPresets.indices, id: \.self) { i in Button(callPresets[i]["title"].text) { settings.callProfile = callPresets[i]["value"]; profileText = settings.callProfile.pretty; dirty = true } }
+    /// Grouped form like Settings and Devices: every switch and button sits on
+    /// the trailing edge of its row, so the columns line up without manual
+    /// spacers (the old loose HStacks put each control wherever its label ended).
+    private var sourcePanel: some View {
+        Form {
+            Section {
+                Toggle("允许模型调度", isOn: Binding(get: {settings.enabled}, set: {settings.enabled=$0;dirty=true}))
+                Toggle("定向模式 · 仅使用限时池", isOn: Binding(get: {settings.mode=="directed"}, set: {settings.mode=$0 ? "directed":"auto";dirty=true}))
+                Toggle("手动检测启用 Luna", isOn: $probeSupervision)
+            } header: { Text("调度开关") } footer: {
+                Text("自动模式按能力选路；定向模式按池内顺序选路，池到期后停止派发。").foregroundStyle(.secondary)
+            }
+            Section("来源") {
+                if sources.isEmpty { Text("尚未发现来源。请检查协调器是否已启动。").foregroundStyle(.secondary) }
+                ForEach(sources, id: \.self) { source in
+                    Toggle(isOn: Binding(get: { settings.sources[source] ?? true }, set: { settings.sources[source] = $0; dirty = true })) {
+                        Text(source)
+                        Text("\(routes.filter { $0.source == source }.count) 个模型 · \(routes.filter { $0.source == source && $0.connectivity == "verified" }.count) 个近期生成验证")
                     }
-                    TextEditor(text: $profileText).frame(height: 220).border(.quaternary)
-                    Button("应用配置到待保存设置") { do { let value = try JSONDecoder().decode(SchedulerJSON.self, from: Data(profileText.utf8)); guard case .object = value else { return }; settings.callProfile = value; dirty = true } catch { self.error = error.localizedDescription } }
-                    Text(effectiveProfile).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+            Section {
+                TextField("筛选", text: $query, prompt: Text("模型或来源名称"))
+                Stepper("入池有效期：\(minutes) 分钟", value: $minutes, in: 1...10080)
+                if filtered.isEmpty { Text("没有匹配的模型。").foregroundStyle(.secondary) }
+                ForEach(filtered) { route in routeRow(route) }
+            } header: { Text("模型与来源") } footer: {
+                Text("扫描只读取模型目录；生成检测会产生少量用量，监工可选，并遵守共享探针预算。列表可见不代表已验证可用。").foregroundStyle(.secondary)
+            }
+            Section("限时模型池") {
+                if settings.pool.isEmpty { Text("尚未加入任何模型。").foregroundStyle(.secondary) }
+                ForEach(Array(settings.pool.enumerated()), id: \.element.id) { index, entry in
+                    HStack(spacing: 10) {
+                        Text("\(index + 1)").monospacedDigit().foregroundStyle(.secondary).frame(minWidth: 20, alignment: .trailing)
+                        Text(routes.first { $0.id == entry.id }?.model ?? entry.id).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text(entry.expiresAt > now ? "剩余 \((entry.expiresAt - now) / 60000) 分钟" : "已到期")
+                            .font(.caption).monospacedDigit().foregroundStyle(entry.expiresAt > now ? Color.secondary : Color.orange)
+                        ControlGroup {
+                            Button { movePool(index, -1) } label: { Image(systemName: "chevron.up") }.disabled(index == 0).help("上移")
+                            Button { movePool(index, 1) } label: { Image(systemName: "chevron.down") }.disabled(index == settings.pool.count - 1).help("下移")
+                        }.fixedSize()
+                        Button { settings.pool.remove(at: index); dirty = true } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.borderless).help("移出模型池")
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+    /// Model on the first line, source · connectivity on the second; actions
+    /// are borderless icon buttons on the trailing edge with their meaning in
+    /// the tooltip (the old rows repeated two text buttons per model).
+    private func routeRow(_ route: ScheduleRoute) -> some View {
+        let pooled = settings.pool.contains { $0.id == route.id && $0.expiresAt > now }
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(route.model).lineLimit(1).truncationMode(.middle)
+                Text("\(route.source) · \(connectivityLabel(route.connectivity))\(route.lastError.map { " · \($0)" } ?? "")")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+            }.draggable(route.id)
+            Spacer(minLength: 8)
+            Button { pool(route.id) } label: { Image(systemName: pooled ? "arrow.clockwise.circle" : "plus.circle") }
+                .buttonStyle(.borderless).help(pooled ? "续期：按当前有效期重新计时" : "加入限时模型池")
+            Button { request(params: .object(["action": .string("check"), "route_id": .string(route.id), "workflow_id": .string(workflowId), "luna_supervision": .bool(graph?.lunaSupervision ?? probeSupervision)])) } label: { Image(systemName: "bolt.circle") }
+                .buttonStyle(.borderless).disabled(busy).help("生成检测：会产生少量用量")
+        }
+    }
 
+    private var profilePanel: some View {
+        Form {
+            Section {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                    ForEach(callPresets.indices, id: \.self) { i in
+                        Button { settings.callProfile = callPresets[i]["value"]; profileText = settings.callProfile.pretty; dirty = true } label: {
+                            Text(callPresets[i]["title"].text).frame(maxWidth: .infinity)
+                        }.buttonStyle(.bordered)
+                    }
+                }
+                if callPresets.isEmpty { Text("协调器未提供调用预设。").foregroundStyle(.secondary) }
+            } header: { Text("预设") } footer: {
+                Text("节点显式参数优先于预设默认值；配置档上限与模型原生上限共同生效。").foregroundStyle(.secondary)
+            }
+            Section("调用配置 JSON") {
+                TextEditor(text: $profileText).font(.system(.body, design: .monospaced)).frame(minHeight: 180)
+                HStack {
+                    Spacer()
+                    Button("应用到待保存设置") { do { let value = try JSONDecoder().decode(SchedulerJSON.self, from: Data(profileText.utf8)); guard case .object = value else { return }; settings.callProfile = value; dirty = true } catch { self.error = error.localizedDescription } }
+                }
+            }
+            Section("当前生效值") {
+                Text(effectiveProfile).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 
     private var workspace: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Menu("＋ 添加节点") { ForEach(templates) {t in Button(t.title) {addTemplate(t)}.help(t.role)} }.help("选择职责模板，或直接从左侧拖入模型。")
-                Menu("视图与帮助") {
-                    Button("适应全图") {fitCanvas()}.help("让全部节点进入当前视口。")
-                    Toggle("平移工具",isOn:$panTool)
-                    Button("缩小") {zoomCanvas(-0.1)}
-                    Button("放大") {zoomCanvas(0.1)}
-                    Toggle("显示模型库",isOn:$showLibrary)
-                    Toggle("输入与结果",isOn:$showRun)
-                    Divider()
-                    Text("空白处拖动平移；拖节点主体移动。")
-                    Text("点击右端口后，再点击下游左端口连线。")
-                    Text("蓝色外框和底部名称表示已选中。")
-                }.help("画布缩放、平移、运行面板和操作说明。")
-                Spacer()
-                Text("\(Int(zoom*100))% · \(graph?.nodes.count ?? 0) 个节点").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            // Editing on the left, execution on the right; the canvas summary
+            // sits between them so it no longer floats on its own line.
+            HStack(spacing: 10) {
+                workflowPicker
+                addMenu
+                viewMenu
+                Spacer(minLength: 12)
+                Text(verbatim: "\(graph?.nodes.count ?? 0) 个节点 · 缩放 \(Int((zoom * 100).rounded()))%")
+                    .font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                executionButtons
             }
             HSplitView {
                 if showLibrary { modelLibrary }
                 graphCanvas.frame(minWidth: 200, minHeight: 180)
                 if showInspector { inspectorPanel }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack(alignment:.center,spacing:16) {
-                if let i=nodeIndex,let node=graph?.nodes[i] {
-                    VStack(alignment:.leading,spacing:4) {Text("已选中：\(node.title)").font(.body.weight(.semibold)).foregroundStyle(Color.accentColor);Text("拖动节点主体移动 · 从右端口连接下游").font(.caption).foregroundStyle(.secondary)}.frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
-                    HStack(spacing:8) {Button("编辑节点") {workflowSettings=false;showInspector=true}.help("查看当前节点的职责、提示词和参数。");Button("取消选择") {nodeId=nil;showInspector=false}}.layoutPriority(1)
-                } else {Text(runReason ?? "从左侧拖入模型，或添加职责模板开始编排。").font(.caption).foregroundStyle(.secondary)}
+            statusBar
+            if showRun { runPanel.frame(height: 230) }
+        }
+    }
+    @ViewBuilder private var statusBar: some View {
+        if let i=nodeIndex,let node=graph?.nodes[i] {
+            HStack(alignment:.center,spacing:12) {
+                VStack(alignment:.leading,spacing:2) {
+                    Text("已选中：\(node.title)").fontWeight(.semibold).foregroundStyle(Color.accentColor).lineLimit(1)
+                    Text("拖动节点主体移动 · 从右端口连接下游").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                Button("编辑节点") {workflowSettings=false;showInspector=true}.help("查看当前节点的职责、提示词和参数。")
+                Button("取消选择") {nodeId=nil;showInspector=false}
             }
-            if showRun { runPanel.frame(height: 200) }
+        } else if let reason = runReason {
+            Label(reason, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
+        } else {
+            Label("就绪：可以运行工作流（⌘↩）。", systemImage: "checkmark.circle").font(.callout).foregroundStyle(.secondary)
         }
     }
     private var runReason: String? {
@@ -280,85 +370,180 @@ struct SchedulingView: View {
         return nil
     }
     private var moreMenu: some View {
-        Menu("更多") {
+        Menu {
             Section("运行准备") {
-                Button("运行前预检") {preflight()}.disabled(busy || graph==nil).help("只计算路线和预算，不生成模型内容。")
-                Button("工作流设置") {workflowSettings=true;showInspector=true}.help("调整预算、并发和可选 Luna 监工。")
-                Button("输入与结果") {showRun.toggle()}
-                Button("来源与模型池") {tab="sources"}
-                Button("调用配置") {tab="profiles"}
+                Button("运行前预检", systemImage: "checklist") {preflight()}.disabled(busy || graph==nil).help("只计算路线和预算，不生成模型内容。")
+                Button("工作流设置…", systemImage: "slider.horizontal.3") {tab="workflow";workflowSettings=true;showInspector=true}.help("调整预算、并发和可选 Luna 监工。")
             }
             Section("服务管理") {
-                Button("启动服务") {request("router_start")}
-                Button("刷新状态") {request()}
-                Button("重新扫描来源") {request(params:.object(["action":.string("refresh")]))}.help("读取目录；不会发出生成检测。")
-                Button("重载设置") {dirty=false;nodeId=nil;showInspector=false;request()}.help("放弃未保存修改，读取已有设置。")
+                Button("刷新状态", systemImage: "arrow.clockwise") {request()}.disabled(busy)
+                Button("重新扫描来源", systemImage: "arrow.triangle.2.circlepath") {request(params:.object(["action":.string("refresh")]))}.disabled(busy).help("读取目录；不会发出生成检测。")
+                Button("启动协调器服务", systemImage: "power") {request("router_start")}.disabled(busy)
             }
-        }
+            Divider()
+            Button("放弃修改并重载", systemImage: "arrow.uturn.backward", role: .destructive) {dirty=false;nodeId=nil;showInspector=false;request()}.disabled(busy || !dirty).help("放弃未保存修改，读取已有设置。")
+        } label: { Label("更多", systemImage: "ellipsis.circle") }
+        .fixedSize()
     }
     private func preflight() {showRun=true;tab="workflow";guard let graph else {return};do {request("router_workflow_plan",params:.object(["definition":try SchedulerJSON.encode(graph),"workflow_id":.string(workflowId)]))} catch {self.error=error.localizedDescription}}
     private var workflowPicker: some View {
         Picker("工作流", selection: $selected) {
             ForEach(Array(settings.workflows.enumerated()), id: \.element.id) { i,g in Text(g.name).tag(i) }
-        }.labelsHidden().frame(width: 230).onChange(of:selected) { _,_ in nodeId=nil }
+        }.labelsHidden().frame(width: 220).onChange(of:selected) { _,_ in nodeId=nil }
+    }
+    private var addMenu: some View {
+        Menu {
+            ForEach(templates) {t in Button(t.title) {addTemplate(t)}.help(t.role)}
+        } label: { Label("添加节点", systemImage: "plus") }
+        .fixedSize().help("选择职责模板，或直接从模型库拖入模型。")
+    }
+    private var viewMenu: some View {
+        Menu {
+            Button("适应全图", systemImage: "arrow.up.left.and.down.right.magnifyingglass") {fitCanvas()}.help("让全部节点进入当前视口。")
+            Button("放大", systemImage: "plus.magnifyingglass") {zoomCanvas(0.1)}.disabled(zoom >= 1.8)
+            Button("缩小", systemImage: "minus.magnifyingglass") {zoomCanvas(-0.1)}.disabled(zoom <= 0.02)
+            Button("实际大小", systemImage: "1.magnifyingglass") {zoomCanvas(1-zoom)}.disabled(abs(zoom-1) < 0.001)
+            Divider()
+            Toggle("平移工具", systemImage: "hand.raised", isOn: $panTool)
+            Toggle("显示模型库", systemImage: "sidebar.left", isOn: $showLibrary)
+            Toggle("显示输入与结果", systemImage: "rectangle.bottomthird.inset.filled", isOn: $showRun)
+            Divider()
+            Section("操作说明") {
+                Text("空白处拖动平移；拖节点主体移动。")
+                Text("点击右端口后，再点击下游左端口连线。")
+                Text("蓝色外框和底部名称表示已选中。")
+            }
+        } label: { Label("视图", systemImage: "eye") }
+        .fixedSize().help("画布缩放、平移、面板显示和操作说明。")
     }
     private var supervisorToggle: some View {
-        Toggle("Luna", isOn: Binding(get: {graph?.lunaSupervision ?? probeSupervision}, set: {v in probeSupervision=v;mutate {$0.lunaSupervision=v}})).toggleStyle(.switch).fixedSize()
+        Toggle("Luna 监工", isOn: Binding(get: {graph?.lunaSupervision ?? probeSupervision}, set: {v in probeSupervision=v;mutate {$0.lunaSupervision=v}})).toggleStyle(.switch)
     }
+    /// 运行 is prominent unless there are unsaved edits — then 保存 in the
+    /// header carries it, so the page never shows two prominent buttons.
     private var executionButtons: some View {
-        HStack {
-            if ["running","cancelling"].contains(detailValue["state"].text) {Button("停止") {request("router_workflow_cancel",params:.object(["run_id":.string(runId)]))}.disabled(busy).help("请求停止；保留已发生的用量和结果。")}
-            Button {run()} label: {Label("运行工作流",systemImage:"play.fill")}.buttonStyle(.borderedProminent).disabled(runReason != nil).help(runReason ?? "按已保存的节点和依赖调用模型，会占用预算。")
+        HStack(spacing: 8) {
+            if running {Button("停止", systemImage: "stop.fill") {request("router_workflow_cancel",params:.object(["run_id":.string(runId)]))}.disabled(busy).help("请求停止；保留已发生的用量和结果。")}
+            if dirty { runButton.buttonStyle(.bordered) } else { runButton.buttonStyle(.borderedProminent) }
         }
+    }
+    private var runButton: some View {
+        Button {run()} label: {Label("运行工作流",systemImage:"play.fill")}
+            .disabled(runReason != nil)
+            .keyboardShortcut(.return, modifiers: .command)
+            .help(runReason ?? "按已保存的节点和依赖调用模型，会占用预算（⌘↩）。")
     }
     private var modelLibrary: some View {
         VStack(alignment:.leading,spacing:8) {
-            Text("模型库").font(.headline)
-            Text("拖入空白创建；拖入模型节点替换绑定。").font(.caption).foregroundStyle(.secondary)
-            TextField("搜索模型",text:$query)
-            ScrollView {LazyVStack(alignment:.leading) {ForEach(filtered) {r in
-                Text("\(r.source) / \(r.model)").font(.caption).lineLimit(2).padding(8).frame(maxWidth:.infinity,alignment:.leading)
+            HStack(alignment:.firstTextBaseline) {
+                Text("模型库").font(.headline)
+                Spacer()
+                Text("\(filtered.count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            }
+            TextField("搜索模型",text:$query,prompt:Text("模型或来源")).textFieldStyle(.roundedBorder)
+            Text("拖入空白处创建节点；拖到模型节点上替换绑定。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            // Two fixed lines per row (model, then source) so every row has the
+            // same height; "source / model" wrapped only when long.
+            ScrollView {LazyVStack(alignment:.leading,spacing:2) {ForEach(filtered) {r in
+                VStack(alignment:.leading,spacing:1) {
+                    Text(r.model).lineLimit(1).truncationMode(.middle)
+                    Text(r.source).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }.padding(.horizontal,8).padding(.vertical,5).frame(maxWidth:.infinity,alignment:.leading)
                     .background(pickedRoute==r.id ? Color.accentColor.opacity(0.16):Color.clear,in:RoundedRectangle(cornerRadius:6))
+                    .contentShape(Rectangle())
                     .onTapGesture {pickedRoute=r.id}
                     .draggable(r.id) {VStack(alignment:.leading,spacing:6) {Label(r.model,systemImage:"cpu").font(.headline);Text("松开放置模型节点").font(.caption)}.padding(14).frame(width:220).background(.regularMaterial,in:RoundedRectangle(cornerRadius:10)).overlay(RoundedRectangle(cornerRadius:10).stroke(Color.accentColor,lineWidth:2))}
-                    .help("\(r.connectivity)；拖入仅编排，运行后才调用模型。")
+                    .help("\(r.source) · \(connectivityLabel(r.connectivity))；拖入仅编排，运行后才调用模型。")
             }}}
-        }.padding(8).frame(minWidth:160,idealWidth:190,maxWidth:240)
+        }.padding(10).frame(minWidth:180,idealWidth:210,maxWidth:260)
     }
+    /// Title row with a close button, then a grouped form: labels on the
+    /// leading edge, fields and switches on the trailing edge, one rhythm for
+    /// workflow settings and node settings alike.
     private var inspectorPanel: some View {
-        ScrollView {
-            VStack(alignment:.leading,spacing:10) {
-                HStack {Text(workflowSettings ? "工作流设置":"节点设置").font(.headline);Spacer();Button("收起") {showInspector=false}}
-                Text(workflowSettings ? "配置本工作流的执行范围和保护条件。":"修改当前节点的职责与交付要求。").font(.caption).foregroundStyle(.secondary)
-                if workflowSettings {
-                HStack {Button("新建") {settings.workflows.append(ScheduleGraph());selected=settings.workflows.count-1;nodeId=nil;dirty=true}; Button("移除工作流") {if graph != nil {settings.workflows.remove(at:selected);selected=0;nodeId=nil;dirty=true}}}
-                if graph != nil {
-                    TextField("工作流名称",text:graphBinding(\.name))
-                    TextField("总 Token 预算",value:graphBinding(\.tokenBudget),format:.number)
-                    Stepper("并发 \(graph?.maxParallel ?? 2)",value:graphBinding(\.maxParallel),in:1...32)
-                    Button("按顺序串联") {mutate {g in g.edges=zip(g.nodes,g.nodes.dropFirst()).map {ScheduleEdge(from:$0.0.id,to:$0.1.id)}}}
-                    Button("清空连线") {mutate {$0.edges=[]}}
+        VStack(alignment:.leading,spacing:0) {
+            HStack(alignment:.firstTextBaseline) {
+                VStack(alignment:.leading,spacing:2) {
+                    Text(workflowSettings ? "工作流设置":"节点设置").font(.headline)
+                    Text(workflowSettings ? "配置本工作流的执行范围和保护条件。":"修改当前节点的职责与交付要求。").font(.caption).foregroundStyle(.secondary)
                 }
-                supervisorToggle
-                Text("开启时需要同一工作流的在线监工；关闭仍保留预算、模型池和恢复保护。").font(.caption).foregroundStyle(.secondary)
-                }
-                if !workflowSettings,let i=nodeIndex,let n=graph?.nodes[i] {editor(i,n)}
-            }.frame(maxWidth:.infinity,alignment:.leading)
-                .multilineTextAlignment(.leading).padding(10)
-        }.frame(minWidth:270,idealWidth:300,maxWidth:360)
+                Spacer()
+                Button {showInspector=false} label: {Image(systemName:"xmark")}.buttonStyle(.borderless).help("收起")
+            }.padding(.horizontal,14).padding(.top,12).padding(.bottom,2)
+            Form {
+                if workflowSettings {workflowForm}
+                else if let i=nodeIndex,let n=graph?.nodes[i] {editor(i,n)}
+                else {Text("在画布上选中一个节点。").foregroundStyle(.secondary)}
+            }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+        }.frame(minWidth:280,idealWidth:320,maxWidth:380)
+    }
+    @ViewBuilder private var workflowForm: some View {
+        if graph != nil {
+            Section("基本") {
+                TextField("名称",text:graphBinding(\.name))
+                TextField("总 Token 预算",value:graphBinding(\.tokenBudget),format:.number)
+                Stepper("并发目标：\(graph?.maxParallel ?? 2)",value:graphBinding(\.maxParallel),in:1...32)
+            }
+        }
+        Section {
+            supervisorToggle
+        } header: {Text("监工")} footer: {
+            Text("开启时需要同一工作流的在线监工；关闭仍保留预算、模型池和恢复保护。").foregroundStyle(.secondary)
+        }
+        Section("工作流管理") {
+            Button("新建工作流") {settings.workflows.append(ScheduleGraph());selected=settings.workflows.count-1;nodeId=nil;dirty=true}
+            if graph != nil {
+                Button("按顺序串联") {mutate {g in g.edges=zip(g.nodes,g.nodes.dropFirst()).map {ScheduleEdge(from:$0.0.id,to:$0.1.id)}}}
+                Button("清空连线") {mutate {$0.edges=[]}}
+                Button("移除工作流",role:.destructive) {if graph != nil {settings.workflows.remove(at:selected);selected=0;nodeId=nil;dirty=true}}
+            }
+        }
     }
     private var runPanel: some View {
-        ScrollView {
-            VStack(alignment:.leading,spacing:8) {
-                HStack(alignment:.top) {TextField("工作流 ID",text:$workflowId).frame(width:200);TextEditor(text:$input).frame(minHeight:70).border(.quaternary)}
-                Toggle("明确接受未知结果的重复付费风险",isOn:$acknowledge)
-                ForEach(runs.indices,id:\.self) {i in Button("\(runs[i]["name"].text) · \(runs[i]["state"].text)") {runId=runs[i]["id"].text;poll(runId)}}
-                ForEach(detailValue["nodes"].fields.keys.sorted(),id:\.self) {id in
-                    if !detailValue["nodes"][id]["job_id"].text.isEmpty {Button("查看节点 \(id) 报告") {request("router_collect",params:.object(["job_id":detailValue["nodes"][id]["job_id"],"max_chars":.number(12000)]))}}
-                }
-                Text(report.isEmpty ? detail:report).font(.system(.caption,design:.monospaced)).textSelection(.enabled)
-            }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
+        VStack(alignment:.leading,spacing:8) {
+            HStack {
+                Text(running ? "输入与结果 · 运行中":"输入与结果").font(.headline)
+                Spacer()
+                Button {showRun=false} label: {Label("收起",systemImage:"xmark")}.buttonStyle(.borderless)
+            }
+            ScrollView {
+                VStack(alignment:.leading,spacing:10) {
+                    Grid(alignment:.leadingFirstTextBaseline,horizontalSpacing:12,verticalSpacing:8) {
+                        GridRow {
+                            Text("工作流 ID").gridColumnAlignment(.trailing)
+                            TextField("工作流 ID",text:$workflowId,prompt:Text("default")).labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth:260)
+                        }
+                        GridRow(alignment:.top) {
+                            Text("本次输入材料")
+                            TextEditor(text:$input).frame(minHeight:60).overlay(RoundedRectangle(cornerRadius:5).stroke(Color(nsColor:.separatorColor)))
+                        }
+                        GridRow {
+                            Text("付费风险")
+                            Toggle("新建未知结果的运行前，接受重复付费风险",isOn:$acknowledge)
+                        }
+                    }
+                    if !runs.isEmpty {
+                        Text("最近运行").font(.subheadline.weight(.semibold))
+                        LazyVGrid(columns:[GridItem(.adaptive(minimum:200),spacing:8)],alignment:.leading,spacing:8) {
+                            ForEach(runs.indices,id:\.self) {i in Button("\(runs[i]["name"].text) · \(runs[i]["state"].text)") {runId=runs[i]["id"].text;poll(runId)}}
+                        }
+                    }
+                    let jobs = detailValue["nodes"].fields.keys.sorted().filter {!detailValue["nodes"][$0]["job_id"].text.isEmpty}
+                    if !jobs.isEmpty {
+                        Text("节点报告").font(.subheadline.weight(.semibold))
+                        LazyVGrid(columns:[GridItem(.adaptive(minimum:200),spacing:8)],alignment:.leading,spacing:8) {
+                            ForEach(jobs,id:\.self) {id in Button("查看节点 \(id) 报告") {request("router_collect",params:.object(["job_id":detailValue["nodes"][id]["job_id"],"max_chars":.number(12000)]))}}
+                        }
+                    }
+                    Text(report.isEmpty ? detail:report).font(.system(.caption,design:.monospaced)).textSelection(.enabled)
+                }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
+            }
         }
+        .padding(12)
+        .background(Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:10))
+        .overlay(RoundedRectangle(cornerRadius:10).stroke(Color(nsColor:.separatorColor)))
     }
     private var graphCanvas: some View {
         GeometryReader { geometry in
@@ -422,21 +607,42 @@ struct SchedulingView: View {
         zoom=min(1.8,max(0.02,zoom+delta));pan=CGPoint(x:anchor.x-world.x*zoom,y:anchor.y-world.y*zoom)
     }
 
-    private func editor(_ i: Int, _ n: ScheduleNode) -> some View {
-        VStack(alignment: .leading) {
-            VStack(alignment:.leading,spacing:8) {
-                TextField("节点名称", text: nodeBinding(i, \.title))
-                TextField("分类标签，逗号分隔", text: Binding(get: { n.tags.joined(separator: ", ") }, set: { v in mutate { $0.nodes[i].tags = v.split(whereSeparator: { $0 == "," || $0 == "，" }).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } } }))
-                Button("↑") { moveNode(i, -1) }; Button("↓") { moveNode(i, 1) }
-                Button("移除节点") { mutate { g in g.nodes.remove(at: i); g.edges.removeAll { $0.from == n.id || $0.to == n.id } }; nodeId = nil }
+    /// Node editor as form sections: identity, task, fallbacks, template and
+    /// advanced parameters. ↑/↓ share one ControlGroup (they used to sit on
+    /// two separate lines of their own), destructive actions sit last.
+    @ViewBuilder private func editor(_ i: Int, _ n: ScheduleNode) -> some View {
+        Section("节点") {
+            TextField("名称", text: nodeBinding(i, \.title))
+            TextField("分类标签", text: Binding(get: { n.tags.joined(separator: ", ") }, set: { v in mutate { $0.nodes[i].tags = v.split(whereSeparator: { $0 == "," || $0 == "，" }).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } } }), prompt: Text("逗号分隔"))
+            LabeledContent("绑定模型") {
+                Text(routes.first { $0.id == n.routeId }.map { "\($0.source) / \($0.model)" } ?? (n.routeId.isEmpty ? "未绑定" : n.routeId))
+                    .foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
             }
-            TextField("节点职责（可自由调整）", text: nodeBinding(i, \.role))
-            Text("说明这个节点负责什么、交付什么；上游证据会随连线提供。").font(.caption).foregroundStyle(.secondary)
-            if n.nodeType == "model" {
-                Text("备用 / 补位：\(n.fallbackRoutes.map { id in routes.first { $0.id == id }?.model ?? id }.joined(separator: " → "))").font(.caption)
-                Menu("从模型池添加备用") { ForEach(settings.pool.filter { $0.expiresAt > now && $0.id != n.routeId && !n.fallbackRoutes.contains($0.id) }) { p in Button(routes.first { $0.id == p.id }?.model ?? p.id) { mutate { g in if g.nodes[i].fallbackRoutes.count < 8 { g.nodes[i].fallbackRoutes.append(p.id) } } } } }
-                Button("清空备用") { mutate { $0.nodes[i].fallbackRoutes = [] } }
+            LabeledContent("执行优先级") {
+                ControlGroup {
+                    Button { moveNode(i, -1) } label: { Image(systemName: "chevron.up") }.help("提前")
+                    Button { moveNode(i, 1) } label: { Image(systemName: "chevron.down") }.help("延后")
+                }.fixedSize()
             }
+        }
+        Section {
+            TextField("职责", text: nodeBinding(i, \.role), axis: .vertical).lineLimit(2...5)
+            TextField("提示词", text: Binding(get: { n.task["prompt"].text }, set: { v in mutate { $0.nodes[i].task["prompt"] = .string(v) } }), axis: .vertical).lineLimit(2...6)
+        } header: { Text("任务") } footer: {
+            Text("职责说明节点负责什么、交付什么；提示词给出具体任务与验收条件，运行时会附上本次输入和上游报告。").foregroundStyle(.secondary)
+        }
+        if n.nodeType == "model" {
+            Section("备用 / 补位路线") {
+                if n.fallbackRoutes.isEmpty { Text("未设置").foregroundStyle(.secondary) }
+                else { Text(n.fallbackRoutes.map { id in routes.first { $0.id == id }?.model ?? id }.joined(separator: " → ")).lineLimit(3) }
+                HStack {
+                    Menu("从模型池添加") { ForEach(settings.pool.filter { $0.expiresAt > now && $0.id != n.routeId && !n.fallbackRoutes.contains($0.id) }) { p in Button(routes.first { $0.id == p.id }?.model ?? p.id) { mutate { g in if g.nodes[i].fallbackRoutes.count < 8 { g.nodes[i].fallbackRoutes.append(p.id) } } } } }.fixedSize()
+                    Spacer()
+                    Button("清空") { mutate { $0.nodes[i].fallbackRoutes = [] } }.disabled(n.fallbackRoutes.isEmpty)
+                }
+            }
+        }
+        Section {
             DisclosureGroup("套用职责模板") {
                 VStack(alignment:.leading,spacing:8) {
                     ForEach(templates) {t in
@@ -450,20 +656,20 @@ struct SchedulingView: View {
                     }
                 }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
             }
-            Text("绑定：\(routes.first { $0.id == n.routeId }.map { "\($0.source) / \($0.model)" } ?? n.routeId)").font(.caption).fixedSize(horizontal:false,vertical:true)
-            TextField("节点提示词",text:Binding(get:{n.task["prompt"].text},set:{v in mutate {$0.nodes[i].task["prompt"] = .string(v)}}))
-            Text("给出具体任务与验收条件；运行时会提供本次输入和上游报告。").font(.caption).foregroundStyle(.secondary)
             DisclosureGroup("高级调用参数") {
-            VStack(alignment:.leading,spacing:8) {
-            Text("输出与等待参数留空可继承配置档；模型原生容量和共享预算仍有效。").font(.caption).foregroundStyle(.secondary)
-            ForEach(["kind", "max_output_tokens", "token_budget", "deadline_s", "hard_deadline_s", "ttft_s", "idle_s", "output_mode", "report_max_chars"], id: \.self) { key in
-                TextField(parameterName(key), text: Binding(get: { if case .number(let v) = n.task[key] { return String(Int(v)) }; return n.task[key].text }, set: { v in mutate { g in if v.isEmpty && !["kind","prompt"].contains(key) {var fields=g.nodes[i].task.fields;fields.removeValue(forKey:key);g.nodes[i].task = .object(fields)} else {g.nodes[i].task[key] = ["kind", "prompt", "output_mode"].contains(key) ? .string(v) : (Double(v).map(SchedulerJSON.number) ?? .null)} } }))
+                VStack(alignment:.leading,spacing:8) {
+                    Text("输出与等待参数留空可继承配置档；模型原生容量和共享预算仍有效。").font(.caption).foregroundStyle(.secondary)
+                    ForEach(["kind", "max_output_tokens", "token_budget", "deadline_s", "hard_deadline_s", "ttft_s", "idle_s", "output_mode", "report_max_chars"], id: \.self) { key in
+                        TextField(parameterName(key), text: Binding(get: { if case .number(let v) = n.task[key] { return String(Int(v)) }; return n.task[key].text }, set: { v in mutate { g in if v.isEmpty && !["kind","prompt"].contains(key) {var fields=g.nodes[i].task.fields;fields.removeValue(forKey:key);g.nodes[i].task = .object(fields)} else {g.nodes[i].task[key] = ["kind", "prompt", "output_mode"].contains(key) ? .string(v) : (Double(v).map(SchedulerJSON.number) ?? .null)} } }))
+                    }
+                    Text("高级节点参数 JSON").font(.caption)
+                    TextEditor(text: $taskText).font(.system(.body, design: .monospaced)).frame(height: 140).border(.quaternary)
+                    Button("应用高级参数") { do { let value = try JSONDecoder().decode(SchedulerJSON.self, from: Data(taskText.utf8)); guard case .object = value else { return }; mutate { $0.nodes[i].task = value } } catch { self.error = error.localizedDescription } }
+                }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
             }
-            Text("高级节点参数 JSON").font(.caption)
-            TextEditor(text: $taskText).frame(height: 140).border(.quaternary)
-            Button("应用高级参数") { do { let value = try JSONDecoder().decode(SchedulerJSON.self, from: Data(taskText.utf8)); guard case .object = value else { return }; mutate { $0.nodes[i].task = value } } catch { self.error = error.localizedDescription } }
-            }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
-            }
+        }
+        Section {
+            Button("移除节点", role: .destructive) { mutate { g in g.nodes.remove(at: i); g.edges.removeAll { $0.from == n.id || $0.to == n.id } }; nodeId = nil }
         }
     }
     private func parameterName(_ key:String)->String {switch key {case "kind":return "任务类型";case "max_output_tokens":return "最大输出 Tokens";case "token_budget":return "节点 Token 预算";case "deadline_s":return "首次响应期待（秒）";case "hard_deadline_s":return "硬截止（秒）";case "ttft_s":return "首次活动等待（秒）";case "idle_s":return "停滞窗口（秒）";case "output_mode":return "输出模式 fixed / adaptive / native";case "report_max_chars":return "报告字符上限";default:return key}}

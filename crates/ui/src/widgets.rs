@@ -71,6 +71,11 @@ pub fn slide_children(children: Vec<View>, slide: &Slide) -> Vec<View> {
 /// Card chrome: border + background + optional accent edge. All skin values
 /// come from `theme` — a skin swap restyles every card at once.
 pub fn card(theme: &Theme, content: View) -> View {
+    // Measure the body through a Grid so the card always fills its column: a
+    // single child that reports content width (an Expander, a lone button)
+    // otherwise shrank the whole card to a sliver — the quota groups rendered
+    // ~240 DIP wide inside a 1030 DIP page.
+    let content: View = Grid::new().children([content]);
     let base = theme
         .page_bg
         .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
@@ -155,6 +160,126 @@ pub fn section_header(theme: &Theme, icon: Symbol, title: &str) -> View {
         ])
 }
 
+/// A titled group: its header and cards in one block, the header 8 DIP above
+/// its first card. Pushed as separate top-level blocks the header floated
+/// halfway between two sections (the page gap sat above and below it), so
+/// "which card does this title belong to" was a guess on Settings and Devices.
+pub fn section(theme: &Theme, icon: Symbol, title: &str, cards: Vec<View>) -> View {
+    section_with(theme, icon, title, Vec::new(), cards)
+}
+
+/// A [`section`] whose header row ends with its own controls (Devices' find
+/// button), so the action stays glued to the title instead of becoming a
+/// separate block the page gap pushes away.
+pub fn section_with(
+    theme: &Theme,
+    icon: Symbol,
+    title: &str,
+    actions: Vec<View>,
+    cards: Vec<View>,
+) -> View {
+    let head = if actions.is_empty() {
+        section_header(theme, icon, title)
+    } else {
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(12.0)
+            .children([
+                Border::new()
+                    .grid_column(0)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(section_header(theme, icon, title)),
+                Border::new()
+                    .grid_column(1)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(8.0)
+                            .keyed_children(crate::pages::keyed(actions)),
+                    ),
+            ])
+    };
+    let mut children: Vec<View> = vec![head];
+    children.extend(cards);
+    StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(8.0)
+        .keyed_children(crate::pages::keyed(children))
+}
+
+/// Shared chrome for the in-page floating panels (filter pickers on the data
+/// pages; the scheduling menus are native MenuFlyouts). Placement stays with the caller —
+/// this owns everything that must look identical: an opaque page base under the
+/// translucent card tint (page content must not bleed through the panel), one
+/// border weight, one radius, one padding, and a title row whose close action is
+/// pinned right. A short fade covers removal, since window positioning is
+/// layout-owned and cannot animate on entry.
+pub fn overlay_panel(theme: &Theme, title: &str, close: View, body: View) -> View {
+    let base = theme
+        .page_bg
+        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
+    let base_layer: View = Border::new()
+        .background(base)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
+    let tint: View = Border::new()
+        .background(theme.card_bg)
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .into();
+    let frame: View = Border::new()
+        .border_brush(theme.card_border)
+        .border_thickness(Thickness::uniform(1.0))
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .padding(Thickness::uniform(theme.pad))
+        .content(
+            StackPanel::new().spacing(10.0).children((
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::Auto])
+                    .column_spacing(12.0)
+                    .children((
+                        TextBlock::new()
+                            .text(title)
+                            .font_size(theme.h2_size + 2.0)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .text_wrapping(TextWrapping::Wrap)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        Border::new()
+                            .grid_column(1)
+                            .vertical_alignment(VerticalAlignment::Center)
+                            .content(close),
+                    )),
+                body,
+            )),
+        );
+    Grid::new()
+        .exit_transition(ExitTransition::fade(std::time::Duration::from_millis(120)))
+        .children([base_layer, tint, frame])
+}
+
+/// Centered "nothing here" placeholder. `loading` already centers its ring and
+/// caption, so an empty list used to read as a stray text line floating at the
+/// top-left of the page while every other state was centered.
+pub fn empty_state(theme: &Theme, text: &str) -> View {
+    // Every call site sits inside a card, which already pads 16 — the old
+    // 24 on top of that made an empty list read as a 40 DIP hole.
+    Border::new().padding(Thickness::xy(0.0, 8.0)).content(
+        StackPanel::new()
+            .orientation(Orientation::Vertical)
+            .spacing(8.0)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .children((
+                SymbolIcon::new().symbol(Symbol::List),
+                TextBlock::new()
+                    .text(tr(text))
+                    .font_size(theme.body_size)
+                    .foreground(theme.subtle)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+            )),
+    )
+}
+
 /// Emphasis tones — used sparingly: only state signals earn color.
 #[derive(Clone, Copy)]
 pub enum BadgeTone {
@@ -178,6 +303,10 @@ pub fn badge(theme: &Theme, text: String, tone: BadgeTone) -> View {
         .border_brush(brush)
         .border_thickness(Thickness::uniform(1.0))
         .padding(Thickness::xy(7.0, 1.0))
+        // Never stretches: inside a horizontal StackPanel or a Grid cell the
+        // default Stretch pulled the pill to the full row height, which turned
+        // the capsule into a tall rounded box next to 20 DIP text.
+        .vertical_alignment(VerticalAlignment::Center)
         .content(
             TextBlock::new()
                 .text(text)
@@ -210,9 +339,11 @@ pub fn stat_card(
     if let Some((t, tone)) = tag {
         label_children.push(badge(theme, t.to_string(), tone));
     }
+    // Follows the title tier (26 at the default 12pt body) so the numbers keep
+    // their weight against the label when 界面字号 changes.
     let mut value_tb = TextBlock::new()
         .text(value)
-        .font_size(26.0)
+        .font_size(theme.title_size + 4.0)
         .font_weight(FontWeight::SEMI_BOLD);
     if emph {
         value_tb = value_tb.foreground(theme.accent);
@@ -1407,23 +1538,38 @@ pub fn donut_cell(
                 .background(slice_brush(theme, i))
                 .vertical_alignment(VerticalAlignment::Center)
                 .into();
+            // Grid, not a stack: the value sat right after the name, so the
+            // percentages staggered down the legend. The star name column
+            // pushes every value onto one right edge.
             legend.push(
-                StackPanel::new()
-                    .orientation(Orientation::Horizontal)
-                    .spacing(6.0)
+                Grid::new()
+                    .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+                    .column_spacing(6.0)
                     .children([
-                        swatch,
-                        TextBlock::new()
-                            .text(name_short)
-                            .font_size(theme.label_size)
+                        Border::new()
+                            .grid_column(0)
                             .vertical_alignment(VerticalAlignment::Center)
-                            .into(),
-                        TextBlock::new()
-                            .text(format!("{pct}% · {}", fmt_v(*v)))
-                            .font_size(theme.label_size)
-                            .foreground(theme.subtle)
+                            .content(swatch),
+                        Border::new()
+                            .grid_column(1)
                             .vertical_alignment(VerticalAlignment::Center)
-                            .into(),
+                            .content(
+                                TextBlock::new()
+                                    .text(name_short)
+                                    .font_size(theme.label_size)
+                                    .text_trimming(TextTrimming::CharacterEllipsis)
+                                    .vertical_alignment(VerticalAlignment::Center),
+                            ),
+                        Border::new()
+                            .grid_column(2)
+                            .vertical_alignment(VerticalAlignment::Center)
+                            .content(
+                                TextBlock::new()
+                                    .text(format!("{pct}% · {}", fmt_v(*v)))
+                                    .font_size(theme.label_size)
+                                    .foreground(theme.subtle)
+                                    .vertical_alignment(VerticalAlignment::Center),
+                            ),
                     ]),
             );
         }
