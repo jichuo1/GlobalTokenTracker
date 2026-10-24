@@ -27,6 +27,8 @@ const M_ZOOM_OUT: &str = "缩小";
 const M_ZOOM_RESET: &str = "实际大小（100%）";
 const M_PAN_ON: &str = "平移工具";
 const M_PAN_OFF: &str = "退出平移工具";
+const M_MODE_CONNECT: &str = "切换到连线模式";
+const M_MODE_MOVE: &str = "切换到移动模式";
 const M_RUN_SHOW: &str = "显示输入与结果";
 const M_RUN_HIDE: &str = "隐藏输入与结果";
 
@@ -83,6 +85,7 @@ pub enum Action {
     ShowParams,
     ToggleRun,
     TogglePan,
+    ToggleConnectMode,
     Fit,
     CloseInspector,
     Acknowledge(bool),
@@ -196,6 +199,13 @@ pub struct State {
     expanded: std::collections::BTreeSet<&'static str>,
     show_run: bool,
     pan_tool: bool,
+    /// Canvas gesture mode. Move: dragging a node moves it. Connect: dragging
+    /// from anywhere on a node draws an edge. One gesture per mode — the old
+    /// 20 DIP port strip beside the move area made each misfire as the other.
+    connect_mode: bool,
+    /// Last left-press on empty canvas, for double-click detection (pointer
+    /// events carry no click count).
+    last_blank_press: Option<(std::time::Instant, (f64, f64))>,
     viewport: std::rc::Rc<std::cell::Cell<(f64, f64)>>,
     submit_key: String,
     submit_signature: String,
@@ -245,6 +255,8 @@ impl Default for State {
             expanded: std::collections::BTreeSet::new(),
             show_run: false,
             pan_tool: false,
+            connect_mode: false,
+            last_blank_press: None,
             viewport: std::rc::Rc::new(std::cell::Cell::new((800.0, 500.0))),
             submit_key: String::new(),
             submit_signature: String::new(),
@@ -380,9 +392,38 @@ impl State {
             M_ZOOM_OUT => Action::Zoom(-0.1),
             M_ZOOM_RESET => Action::Zoom(1.0 - self.zoom),
             M_PAN_ON | M_PAN_OFF => Action::TogglePan,
+            M_MODE_CONNECT | M_MODE_MOVE => Action::ToggleConnectMode,
             M_RUN_SHOW | M_RUN_HIDE => Action::ToggleRun,
             _ => Action::AddTemplate(self.templates.iter().position(|t| t.title == label)?),
         })
+    }
+    fn toggle_connect_mode(&mut self) {
+        self.connect_mode = !self.connect_mode;
+        // The pan tool would swallow every press and hide the new mode.
+        self.pan_tool = false;
+        self.drag.cancel();
+    }
+    /// Records left-presses on empty canvas and reports the second one of a
+    /// double-click. Any other press (node, palette, right/middle button)
+    /// resets the sequence, so "click node, click blank" never toggles.
+    fn blank_double_click(&mut self, p: PointerEventInfo) -> bool {
+        let (x, y) = self.point(p);
+        let blank = !p.is_right_button_pressed
+            && !p.is_middle_button_pressed
+            && p.x >= 210.0
+            && self.workflow().and_then(|w| w.hit(x, y)).is_none();
+        if !blank {
+            self.last_blank_press = None;
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if is_double_click(self.last_blank_press, now, (p.x, p.y)) {
+            self.last_blank_press = None;
+            true
+        } else {
+            self.last_blank_press = Some((now, (p.x, p.y)));
+            false
+        }
     }
     fn palette_page_size(&self) -> usize {
         let rows = (self.viewport.get().1 - 50.0) / 42.0;
@@ -467,6 +508,7 @@ impl State {
             Action::ShowParams => {self.tab="workflow";self.show_params=true;self.show_node_details=false;},
             Action::ToggleRun => {self.tab="workflow";self.show_run = !self.show_run;},
             Action::TogglePan => { self.pan_tool = !self.pan_tool; self.drag.cancel(); },
+            Action::ToggleConnectMode => self.toggle_connect_mode(),
             Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
             Action::CloseInspector => {self.show_params=false;self.show_node_details=false;},
             Action::AddFallback(id) => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)) && n.node_type=="model" && id!=n.route_id && !n.fallback_routes.contains(&id) && n.fallback_routes.len()<8 {n.fallback_routes.push(id);self.dirty=true;}}
@@ -702,7 +744,9 @@ impl State {
             Action::Zoom(delta) => { let (width,height)=self.viewport.get(); let anchor=((width-210.0)/2.0,height/2.0);let world=((anchor.0-self.pan.0)/self.zoom,(anchor.1-self.pan.1)/self.zoom);self.zoom=(self.zoom+delta).clamp(0.1,1.8);self.pan=(anchor.0-world.0*self.zoom,anchor.1-world.1*self.zoom); },
             Action::Press(p) => {
                 self.pointer=(p.x,p.y);self.error=None;
-                if p.is_right_button_pressed && p.x >= 210.0 {
+                if self.blank_double_click(p) {
+                    self.toggle_connect_mode();
+                } else if p.is_right_button_pressed && p.x >= 210.0 {
                     // Right-press on a node opens the floating quick menu;
                     // on empty canvas it still pans.
                     let (x, y) = self.point(p);
@@ -736,7 +780,9 @@ impl State {
                     if let Some(w) = self.workflow()
                         && let Some(i) = w.hit(x, y) {
                             let n = &w.nodes[i];
-                            let drag = if x > n.x + 200.0 && (y - n.y - 56.0).abs() < 18.0 {
+                            // The mode decides, not where on the node the press
+                            // landed: no hit strip to miss or to graze.
+                            let drag = if self.connect_mode {
                                 Drag::Edge(i)
                             } else {
                                 Drag::Node(i, x - n.x, y - n.y)
@@ -799,7 +845,10 @@ impl State {
                         }
                     }
                     Some(Drag::Edge(from)) => {
-                        let to = self.workflow().and_then(|w| w.hit(x, y));
+                        let to = self
+                            .workflow()
+                            .and_then(|w| w.hit(x, y))
+                            .filter(|to| *to != from);
                         if let (Some(w), Some(to)) = (self.workflow_mut(), to) {
                             if let Err(e) = w.connect(from, to) {
                                 self.error = Some(e.to_string());
@@ -841,6 +890,20 @@ impl State {
         }
         self.inv.invalidate();
     }
+}
+
+/// Windows' default double-click time and a slop of a few pointer pixels:
+/// the second press must land soon and close to the first.
+fn is_double_click(
+    previous: Option<(std::time::Instant, (f64, f64))>,
+    now: std::time::Instant,
+    at: (f64, f64),
+) -> bool {
+    previous.is_some_and(|(when, (px, py))| {
+        now.saturating_duration_since(when) <= std::time::Duration::from_millis(500)
+            && (at.0 - px).abs() <= 8.0
+            && (at.1 - py).abs() <= 8.0
+    })
 }
 
 fn bounded_pretty(value: &Value) -> String {
@@ -1154,6 +1217,14 @@ fn view_menu(state: &State, ctx: &ViewContext<Shell>) -> View {
             Some((M_ZOOM_OUT, state.zoom > 0.11)),
             Some((M_ZOOM_RESET, (state.zoom - 1.0).abs() > 0.001)),
             None,
+            Some((
+                if state.connect_mode {
+                    M_MODE_MOVE
+                } else {
+                    M_MODE_CONNECT
+                },
+                true,
+            )),
             Some((if state.pan_tool { M_PAN_OFF } else { M_PAN_ON }, true)),
             Some((
                 if state.show_run {
@@ -1176,8 +1247,15 @@ fn help_button(theme: &Theme) -> View {
             "拖入模型",
             "从左侧模型库拖到空白处创建节点；拖到模型节点上替换绑定。",
         ),
-        ("移动", "拖动节点主体；空白处拖动平移画布。"),
-        ("连线", "从节点右侧端口拖到下游节点，箭头指向下游。"),
+        (
+            "两种模式",
+            "双击画布空白处在移动模式与连线模式间切换，右上角显示当前模式。",
+        ),
+        ("移动模式", "拖动节点移动它；空白处拖动平移画布。"),
+        (
+            "连线模式",
+            "从任意节点拖到下游节点建立依赖，箭头指向下游；空白处仍可平移。",
+        ),
         ("节点菜单", "右键节点：编辑、断开连线、删除。"),
         (
             "运行",
@@ -2104,10 +2182,10 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
                             "{} 个节点 · 缩放 {:.0}%{}",
                             state.workflow().map_or(0, |w| w.nodes.len()),
                             state.zoom * 100.0,
-                            if state.pan_tool {
-                                " · 平移工具"
-                            } else {
-                                ""
+                            match (state.connect_mode, state.pan_tool) {
+                                (_, true) => " · 平移工具",
+                                (true, false) => " · 连线模式",
+                                (false, false) => " · 移动模式",
                             }
                         ))
                         .font_size(theme.label_size)
@@ -2142,15 +2220,19 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
                 Border::new()
                     .vertical_alignment(VerticalAlignment::Center)
                     .content(
-                        StackPanel::new().spacing(2.0).children((
-                            TextBlock::new()
-                                .text(format!("已选中：{}", node.title))
-                                .font_weight(FontWeight::SEMI_BOLD)
-                                .foreground(theme.accent)
-                                .text_trimming(TextTrimming::CharacterEllipsis),
-                            secondary("拖动节点主体移动 · 从右端口连接下游 · 右键打开节点菜单"),
-                        )),
-                    ),
+                    StackPanel::new().spacing(2.0).children((
+                        TextBlock::new()
+                            .text(format!("已选中：{}", node.title))
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .foreground(theme.accent)
+                            .text_trimming(TextTrimming::CharacterEllipsis),
+                        secondary(if state.connect_mode {
+                            "连线模式：从节点拖到下游连线 · 双击空白处切回移动 · 右键打开节点菜单"
+                        } else {
+                            "移动模式：拖动节点移动 · 双击空白处切到连线 · 右键打开节点菜单"
+                        }),
+                    )),
+                ),
                 Border::new()
                     .grid_column(1)
                     .vertical_alignment(VerticalAlignment::Center)
@@ -2814,6 +2896,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         .map(|w| w.edges.clone())
         .unwrap_or_default();
     let (pan, zoom, selected) = (state.pan, state.zoom, state.node);
+    let connect_mode = state.connect_mode;
     let (bg, card, ink, accent, grid) = (
         theme.card_cf,
         theme.card_cf,
@@ -3211,6 +3294,34 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 &faint,
             );
         }
+        // Mode badge, top-right of the canvas: which gesture a drag on a node
+        // performs right now, and how to switch. Accent-framed in connect
+        // mode so the riskier mode is never mistaken for the default.
+        let (mode, how) = if connect_mode {
+            ("连线模式", "从节点拖到下游节点 · 双击空白处切换")
+        } else {
+            ("移动模式", "拖动节点或平移画布 · 双击空白处切换")
+        };
+        let right = c.width - 12.0;
+        let badge = RoundedRect::new(Rect::new(right - 300.0, 10.0, right, 54.0), 8.0, 8.0);
+        c.fill_rounded_rect(&badge, &opaque);
+        c.draw_rounded_rect(
+            &badge,
+            if connect_mode { &hi } else { &line },
+            if connect_mode { 1.5 } else { 1.0 },
+        );
+        c.draw_text(
+            mode,
+            &tail,
+            &Rect::new(right - 290.0, 14.0, right - 10.0, 32.0),
+            if connect_mode { &hi } else { &brush },
+        );
+        c.draw_text(
+            how,
+            &tail,
+            &Rect::new(right - 290.0, 32.0, right - 10.0, 50.0),
+            &brush,
+        );
         Ok(())
     };
     let painting = if animate {
@@ -3298,6 +3409,30 @@ mod gesture_tests {
         state.detail = Some(serde_json::json!({"state":"running"}));
         assert!(state.run_disabled_reason().unwrap().contains("运行"));
     }
+    #[test]
+    fn double_click_needs_two_close_presses_in_time() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let first = Some((t0, (300.0, 200.0)));
+        assert!(super::is_double_click(
+            first,
+            t0 + Duration::from_millis(250),
+            (304.0, 197.0)
+        ));
+        // Too slow, too far, or no first press: not a double-click.
+        assert!(!super::is_double_click(
+            first,
+            t0 + Duration::from_millis(650),
+            (300.0, 200.0)
+        ));
+        assert!(!super::is_double_click(
+            first,
+            t0 + Duration::from_millis(100),
+            (320.0, 200.0)
+        ));
+        assert!(!super::is_double_click(None, t0, (300.0, 200.0)));
+    }
+
     #[test]
     fn ellipsize_keeps_short_text_and_trims_long_ids() {
         assert_eq!(super::ellipsize("deepseek-flash", 31.0), "deepseek-flash");
