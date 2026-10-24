@@ -1904,3 +1904,159 @@
 - **整合**：用户授权将调度与布局补丁合入main、推送后删除补丁分支。基于远端b728051隔离合并5473838，保留正常双亲历史与原作者；唯一文本冲突为双方审查记录的追加段，完整保留两边内容。保留主线Devin回补及macOS构建修复；新调度页同步使用既有ViewState，避免重新引入CLT缺少SwiftUIMacros的限制。
 - **安装与清理**：先按精确CI提交安装0.8.6最新补丁构建，GUI、CLI、安装器与包载荷哈希逐项相同，启动前正式配置及两份账本哈希保持。开发预览和独立测试协调器退出，正式后端保留；4856个临时/调试文件共4904997255字节已逐项归档并校验，删除2291个清单路径，压缩归档882206756字节。来源不明或PID仍存在的目录保留。原配置、历史证据和Git全引用bundle均保留在本机ignored诊断目录，不上传。
 - **验证边界**：合并树的本机Rust全工作区363项通过、4项既有ignored，Clippy全目标、fmt和diff检查通过。继续核对精确主线CI，再同步最终安装包；分支仅在远端main包含原补丁提交后删除。界面交互由用户验证，本轮不使用Computer Use，不把进程/哈希检查当作视觉验收。
+
+## S152 撤回外部改动与各页排版/面板定位整理（2026-10-23）
+
+- **撤回与边界**：用户要求保留 macOS 页切换（鼓形转场）动画策略并撤回其他编码工具刚做的改动。已将那 6 个文件（gpu_slide/main/pages/scheduling 及 macOS RootView/SchedulingView）整体还原到 cafd769，改动原文留档于 ignored 的 target/diagnostics/reverted-other-tool-20261023-181829.patch；本轮 Windows 与 macOS 页切换动效参数均未改动。
+- **二级面板定位（根因）**：调度页原把面板叠在与页面同一个五行 Grid 上，只能用 margin(top 48/112) 猜工具栏高度；而"添加节点/视图与帮助"在第二行，面板会盖住自己的触发按钮，字号或语言一变偏移就错。现改为工具栏带 + 内容带两段式布局，面板是内容带右上角的同级浮层，位置由布局求得而非魔法数：三个菜单同一位置、同一宽度（320）、同一外观，触发器用 ▴/▾ 表明归属。
+- **浮层外观统一**：新增 widgets::overlay_panel（页底色基底 + 半透明卡片色 + 1px 边框 + 主题圆角/内边距 + 标题行 + 收起按钮 + 120ms 退出淡出）；数据页筛选浮层与调度页共用同一实现，工具多选列表补 300 DIP 上限，长列表不再顶出窗口；筛选浮层保持内容自适应宽度，避免窄窗口被裁。
+- **排版对齐**：setting_row 补 column_spacing(16)，与 setting_row_wide 的控件左边缘对齐（此前同卡内差 16 DIP）；来源页把整段错误从 Auto 列搬到左列换行显示、右列只留"异常"徽章，长错误不再把来源名压到 0；价格页搜索框改为弹性、刷新错误独立换行；速度页把 22pt header 当分页说明改为 36 DIP 说明行；总览 1-DIP 标尺并入标题块，不再独占一个段间距；页面顶层间距的硬编码 10 改为 theme.gap。
+- **状态与动效**：新增 widgets::empty_state，明细页（原先完全没有空态）、配额、来源、速度统一居中空态；总览扫描圆环改用 18×18 同尺寸占位，扫描起止时"布局/刷新"不再左右跳 28 DIP；配额组折叠改用原生 Expander（自带展开动画），不再是"按钮 + 重建内容"的高度硬跳。
+- **验证**：cargo fmt --all -- --check 通过；cargo clippy --workspace --all-targets --locked -- -D warnings 无告警；cargo test --workspace --locked 共 363 项通过、4 项既有 ignored（含 UI 38 项）。
+- **验收边界**：本轮没有接管正式窗口，未做鼠标与截图验收。面板锚点、Expander 头部徽章位置、窄窗口下筛选浮层宽度仍需实机确认；macOS 代码零改动。
+
+## S153 控件间距、分节归属与标题基线整理（2026-10-23）
+
+- **标题带**：`header()` 的标题格与操作格改为垂直居中（此前 22pt 标题与 36 DIP 按钮顶对齐，九个页面的标题都比按钮高一截），补 12 DIP 列间距，长标题改为换行，窄窗口下不再把操作区挤成 0。
+- **分节归属**：新增 `widgets::section` / `section_with`：分节标题与它的卡片合成一个块，标题下 8 DIP、节与节之间仍是页面间距，设置页（5 节）与设备页（5 节）的"这个标题属于哪张卡"不再靠猜；设备页"附近"的查找按钮并入标题行，页尾说明与可能的错误也收进卡片，不再有裸段落夹在两张卡之间。
+- **控件间对齐**：`badge` 固定垂直居中（此前在横排 StackPanel / Grid 单元格里被拉伸到整行高，胶囊变成高圆角块）；总览四个环形图例改成三列 Grid，百分比与金额统一右对齐（此前紧跟在名称后，逐行参差）；`setting_row_wide` 的标签列由顶对齐改为居中，与 `setting_row` 一致（同一张卡里两种行的高低位不同）。
+- **字号与尺寸**：`stat_card` 的大数字由写死的 26 改为 `title_size + 4`，界面字号变化时不再与标签失衡；总览"按工具/按设备/订阅配额"三张卡的分节间距 8 → 10，与趋势/占比/速度/热力图一致。
+- **滚动与裁切**：更新横幅的左侧说明改为三列 Grid（星号列省略号），长错误不再把"立即更新"顶出横幅；价格页刷新错误、外部接口状态错误补换行与危险色；空态内边距与卡片叠加后过厚的 40 DIP 收到 24。
+- **验证**：cargo fmt --all -- --check 通过；cargo clippy --workspace --all-targets --locked -- -D warnings 无告警；cargo test --workspace --locked 363 项通过（含 UI 38 项）。macOS 端零改动。
+- **构建与安装**：installer/package.ps1 产出 dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.75 MB，sha256 ddc0f053…c7520；未签名——本机没有 GTT_SIGN_* 配置，脚本按设计跳过）。安装前先把旧 UI/CLI 备份到 target\diagnostics\preinstall-s153-20261023。首次 --quiet 安装把新 UI 释放为 .globaltokentracker-ui.exe.gtt-new 后卡在替换步骤退出（退出码 1，CLI/UI 均未更新、旧版本完好），当时用安装器同样的 rename-swap 语义手工换入 target\release 产物把界面先跑起来；再次执行安装器 --quiet 时安装流程正常走完（退出码 0，无 .gtt-new 残留），三个文件与产物逐字节一致：ui C97EB71…A2236、cli 0725E67…C4032、setup DDC0F05…47A1，卸载器副本同步为本次安装包。启动后进程稳定运行，gtt_panic.log 未新增。
+- **记录偏差**：%LOCALAPPDATA%\Programs\GlobalTokenTracker\installed-build.json 仍是上一次 CI 构建的出处记录（cafd769、旧 UI 哈希）。本轮是未提交的本地构建，没有改写这份 CI 出处文件。首次安装失败的原因未定位（同一目标后来直接重跑即成功，怀疑安全软件拦截了首次的 MoveFileEx），下次正式升级仍需观察。
+
+## S154 二级面板浮层化与来源页表格化排版（2026-10-23）
+
+- **面板占位（根因）**：来源与模型池/调用配置档两个标签页把二级面板当成普通块 push 进页面列，面板居中、占一整段纵向空间，所有卡片被整体下推；工作流页早已是浮层。新增 `with_menu_overlay`：标题行独立一行，正文一行（STAR），面板与透明点击遮罩作为同一行的浮层挂在右上（距顶 4 DIP），遮罩只盖正文、触发按钮保持可点。三个标签页共用同一套浮层行为。
+- **来源页重排**：整页改为分节卡片（调度开关 / 来源 / 模型与来源 / 限时模型池），与设置、设备页同一套 `w::section` + `w::card`；来源表头「来源 · 模型 · 近期生成验证 | 允许入池」，开关列每行同一 x（原先行内开关随标签长短错位）；行间用 `ruled_row` 发丝线分隔。子导航（工作流画布/来源与模型池/调用配置档）移到标题之下、内容之前。
+- **重复文本按钮改列头 + 图标**：模型表头「来源 / 模型 · 连通性 · 最近错误 | 入池 | 检测」，行内只放 32×32 居中的图标按钮（Add / Refresh，带悬停说明）；模型池表头「顺序 · 模型 · 剩余 | 上移 | 下移 | 移出」，行内 ↑↓ 字形与 Delete 图标。原来每行重复「入池 / 续期」「检测」「移出」整句按钮。
+- **间距**：分页器与说明文案分行并留白（原先贴着最后一行表格）；筛选字段改成两列网格（标签行 + 输入行，两个输入共享基线），搜索框带占位说明；错误/提示文案收进卡片。
+- **验证**：cargo fmt --all -- --check 通过；cargo clippy --workspace --all-targets --locked -- -D warnings 无告警；cargo test --workspace --locked 363 项通过。实机截图核对：面板悬浮右上不再占位、开关列对齐、图标按钮列头清晰、页脚留白正常。安装器产出 dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（sha256 7934d735…bc3f6b4），--quiet 安装退出码 0，UI sha256 FC24931D84DADFBC 与产物一致。
+- **边界**：截图验收用 UIA 选择 + PrintWindow 完成，没有接管鼠标键盘；macOS 零改动。
+
+## S155 开关"幻影宽度"清理与三组控件右边缘统一（2026-10-24）
+
+- **根因**：`ToggleSwitch` 的 `width(44)` 只钉住绘制宽度（WinUI `Width` 不约束向上报告的 DesiredSize），空 On/Off 槽仍按模板固有 ~154 DIP 计量，于是"开关 + 开/关文字"整体测量 ~173 DIP、只画 ~64 DIP。三处错位同源：调度开关卡与总览趋势头整体右对齐后药丸悬在文字左侧 ~110 DIP；来源表 110 DIP 固定列里 Auto 列溢出，药丸钉在列左、文字被推出窗口不可见；模型与来源按钮列（Pixel 列）是唯一没受影响的"对齐标准"。
+- **修复**：`pages::switch` 与 `trend_head` 把轨道槽从 StackPanel 改为 Grid `Pixel(44)` 列（Pixel 列在测量与排布两个阶段都生效，底部按钮列即此语义），"开/关"标题用 `Auto` 列紧跟轨道 8 DIP。设置、设备、局域网共享等所有 `pages::switch` 调用点同步受益（标题从离轨道 ~110 DIP 处回到贴轨道）；`right_cell`/`label_actions`/表格列定义无需改动。
+- **实测**（隔离实例：GTT_DATA_DIR 拷贝副本 + GTT_UI_TEST_INSTANCE，3840px/150% DPI 全屏截图像素测量）：调度页调度开关卡、来源表、模型与来源 ⟳ 按钮右边缘统一为 3777px（=卡内容边缘 3801 − 24px 卡片内边距），来源行与调度开关卡药丸同一 x（3682–3741），来源行"开/关"文字恢复可见；总览折线趋势"标签+开关+关"整组贴右，标题右边缘 3777 与图表右下标签（3777）、热力图标签页右缘一致。
+- **顺手修复**：工作树既有 `scheduling.rs` glyph_button 的 `useless_conversion`（`.into()` 冗余，非本轮引入）挡住工作区 Clippy 门槛，移除。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 363 项通过、4 项既有 ignored（含 UI 38 项）。临时数据目录已删除，正式窗口未接管、未改动。
+
+## S156 预检面板收起、节点状态灯与模型库分页自适应（2026-10-24）
+
+- **预检/运行面板收起**：预检与运行都从更多菜单打开底部"输入与结果"面板，关闭命令原来只存在于同一菜单，面板一开画布被压住且无处可关。面板加标题行 + 常驻"收起"按钮（Action::ToggleRun，与检查器"收起设置"同位同词），运行中标题显示"输入与结果 · 运行中"。用户实测发现首个实现点击"收起"反而落入输入框：根因是包裹用的 Grid 子视图未写 grid_row，WinUI 把标题与滚动内容全叠进第 0 行，按钮被内容层盖住；改为纵向 StackPanel 后开合实测正常（隔离实例点击验证）。
+- **节点方框状态**：220×112 节点框的空白底部改为状态带——左侧连通性灯（● 已连通=绿 / 未验证、需要验证=琥珀 / 连通异常=红 / 未绑定模型=琥珀，按协调器 connectivity 词表映射），右侧运行状态徽标（运行中=强调蓝、已完成=绿、失败=红、已取消/等待=灰，关键词匹配路由器状态串，仅当运行明细节点带 job_id 时显示，选中标记"✓ 已选中"退居无徽标时显示）。实测琥珀"未验证/需要验证"正确渲染；徽标路径未用真实运行验证（避免真实调用计费）。
+- **模型库分页自适应**：画布左侧模型库每页硬编码 10 条，高窗下半空白。新增 `State::palette_page_size()`＝(画布高−50)/42 行，clamp 10..60（下限保证与来源表共用的页索引不越界，首帧前视口为 0 也落在 10）；画布取数、拖拽高亮基址、翻页按钮与页码全部换用同一页大小，视口缩小后显示页自动钳到最后一页。顺带修复：命中测试原对行下标不设界，点击列表空白区会抓到下一页第一个模型，现仅实际绘制的行可发起拖拽。新增单元测试锁定几何换算。
+- **环境**：验证期间发现正式协调器守护进程已自行退出（早于本轮操作，非本轮所致），经调试实例"启动服务"与直接 spawn router.py 恢复正式数据目录的协调器（127.0.0.1:61885，health 正常），正式实例在下次刷新时重连；测试用隔离数据目录已删除。用户在机上活动后即停止盲点击，未接管正式窗口。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 364 项通过、0 失败（新增 palette_page_size 测试，UI 39 项）。
+- **构建与安装**：installer/package.ps1 产出 dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.78 MB，sha256 a62ab6d5…7867d；未签名——本机无 GTT_SIGN_* 配置，脚本按设计跳过）。安装前旧 UI/CLI 备份至 target\diagnostics\preinstall-s156-20261024；正式实例先 WM_CLOSE（转入托盘未退出）后强制结束再安装。--quiet 安装完成，无 .gtt-new 残留，安装后 UI sha256 339f1a77…、CLI 0725e679… 与 target\release 产物逐字节一致，卸载器副本同步。新版启动后进程稳定（gtt_panic.log 未新增），总览数据与协调器（127.0.0.1:61885）连接正常。
+- **选中动效收敛（用户反馈）**：画布松开指针的公共尾部无条件 pulse，点选、移动、连线每次都闪；现把触发移入模型拖放分支，仅新建节点或替换绑定成功时闪一次，拖出画布外与本地节点拒绝路径不闪。fmt/clippy/test 364 项通过后重新打包安装：安装包 sha256 da92fc89…5a5069。本轮 --quiet 前两次卡在 UI 替换步骤（.gtt-new 残留，S153 已记录的同类现象），清理残留后第三次正常走完，安装后 UI sha256 08930ae4… 与产物一致、CLI 0725e679… 未变，无 .gtt-new 残留，新版已重启（进程稳定，协调器连接正常）。
+
+## S157 母节点、连线方向、节点右键菜单与设置面板排版（2026-10-24）
+
+- **母节点（工作流入口）**：原画布只有模型/职责节点，缺少设想中"上游的母节点"——即 Codex 协调的接口，按拓扑调用工作流完成任务。核心新增 `Workflow::add_master`（node_type=input，不绑定模型、可多个），映射到协调器已有的 input 节点类型（上游集合为空即自动完成并向下游传递，路由器词表原生支持，无需改 Python）。`can_connect` 拒绝指向母节点的连线（入口不接受上游），连线预览同样显示红色目标。"＋ 添加节点"菜单置顶"母节点 · Codex 接口"直接添加到画布中心。画布上母节点用绿色描边 + 绿色实心输出端口，无输入端口；状态带显示"● 入口"。
+- **连线方向性**：连线目标端新增实心箭头（PathBuilder 三角 + fill_path，随方向旋转），节点端口改为语义绘制——非母节点左侧空心输入端口 + 右侧空心输出端口，母节点仅右输出端口，方向无需读箭头也一目了然。
+- **节点右键菜单**：右键按下节点打开浮动快捷菜单（编辑节点 / 断开连线 / 删除节点 / 取消选择），锚点为按下位置（画布坐标即窗格单元格坐标，越界钳制）；右键空白处仍为平移。核心新增 `Workflow::disconnect`（保留节点、清除相关边）与 `Action::DisconnectNode`。
+- **设置面板排版**：工作流管理四个整宽按钮（新工作流/移除工作流/顺序串联/清空连线）改为 2×2 网格，不再在窄检查器里占满一屏。
+- **状态文字溢出修复（用户实测反馈）**：母节点状态"● 工作流入口 · 按拓扑分发"超宽折行溢出节点框。状态带改为专用 NoWrap 文本格式（右侧徽标同步），母节点标签缩短为"● 入口"，任何缩放下状态带都是单行。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 365 项通过（新增母节点语义测试：input 类型、入边拒绝、disconnect 保留节点、remove 连边清除）。隔离实例实测：自适应分页与端口渲染正常；因用户正在使用机器，母节点添加与右键菜单的实机点击验收留待用户进行。
+- **安装**：dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.79 MB，sha256 d8875a01…7745f56，未签名）。--quiet 首次即成功（无 .gtt-new 残留），安装后 UI 哈希 b6cd34a7… 与产物一致，正式版已重启。
+
+## S158 第三方输入法候选框不显示的调查（2026-10-24）
+
+- **现象与边界**：用户报告文本框输入中文时输入法候选框不弹出，且"微信输入法不行、系统输入法可以"——问题被限定在第三方输入法与 WinUI 3 输入站点的兼容层，而非应用代码路径。
+- **排查记录**（全部正常，无可修缺陷）：窗口结构实测（EnumWindows）为主窗口 WinUIDesktopWin32WindowClass + DesktopChildSiteBridge/InputSiteWindowClass 输入站点 + MSCTFIME UI/IME 关联窗口，IMM32 Default IME 关联存在；进程未提权（排除 UIPI 拦截第三方输入法候选窗）；UI 线程 CoInitializeEx(APARTMENTTHREADED) 正确；无键盘钩子；框架属性重建器按值 diff（planner/element.rs changed 判断），合成期间不会重发未变化的 TextBox.Text 而打断合成；WinAppSDK 运行时为本机最新的 Microsoft.WindowsAppRuntime.2 2.5.1。
+- **结论**：微软拼音走系统内输入宿主（TextInputHost）不受影响；微信输入法的候选窗走自身渲染路径，依赖应用侧 TSF 文本范围报告，WinUI 3 输入站点对第三方输入法的该路径存在已知缺口（microsoft-ui-xaml #12195 CandidateWindowBoundsChanged 不触发、#10319 InputSiteWindowClass 异常等）。应用层无可靠修复手段。
+- **用户侧缓解**（按优先序）：升级微信输入法（本机 3.0.0.38，检查其内置更新至更新补丁）；在其设置中关闭"应用内回显/内嵌"类选项改用候选框外挂；向微信输入法反馈（附 WinAppSDK 2.5.1 信息）；在本应用内临时使用微软拼音（功能完整可用）。
+
+## S159 调度页按 WinUI 规范重排、原生菜单与 macOS 分组表单（2026-10-24）
+
+- **问题（实测截图）**：三个子页结构不一致——画布页没有子导航（只能从"更多"里跳转），另两页是三个普通按钮当标签；"更多 / 添加节点 / 视图与帮助"是自绘浮层，每项 58 DIP 双行卡片、380 DIP 滚动上限把列表截断；"运行"与"保存"同时是强调色；模型库长名折成两行导致行距忽高忽低；检查器字段直接浮在页面底色上，没有可见边界。
+- **原生控件替代自绘**：框架已支持 `DropDownButton.menu(Menu)`（WinUI MenuFlyout）与 `Button.flyout_with(Flyout)`。三个菜单改为原生 DropDownButton + MenuFlyout（系统负责定位、轻触关闭、键盘导航与动画，选中即关闭）；菜单项只回传标签，新增 `Action::MenuPick` + `State::menu_action` 按标签常量解析，回调保持零尺寸类型以免每帧重建菜单。操作说明改为"?"按钮的原生 Flyout（两列"操作 / 说明"表）。仅画布右键节点菜单仍为页内浮层（画布是自绘表面），改成 MenuFlyout 样式：240 DIP、Subtle 行 36 DIP、图标列 + 标签、分隔线。`widgets::PANEL_W` 随之无引用，删除。
+- **统一顶带**：三个子页共用 `page_band`——左侧 SelectorBar（工作流画布 / 来源与模型池 / 调用配置），右侧同步状态 + 保存修改 + 更多，位置与宽度在各页一致；错误统一为顶带下的 Error InfoBar。主按钮规则：有未保存修改时"保存修改"为强调色、否则"运行工作流"为强调色，页面不再同时出现两个主按钮。"更多"去掉与 SelectorBar 重复的导航项和与"视图"重复的"输入与结果"；"重载设置"改名"放弃修改并重载"，无修改时禁用。
+- **画布页**：第二行"工作流选择 · 添加节点 · 视图 · ?"左对齐、"停止 / 运行"右对齐（SymbolIcon 16 DIP + 文字，不再用"▶"字符）；第三行模型库搜索与翻页左对齐、"N 个节点 · 缩放 x%"右对齐。底部"暂不能运行"改为 Informational InfoBar；输入与结果面板打开时底部状态让位、原因移到面板标题下，避免画布被压到只剩一条。检查器与输入面板包进卡片，标题行"标题 | ✕ 收起"同一组件（`pane_head`），说明整行显示；预算与并发并排两列；Luna 监工、付费风险确认改用 `label_actions` + `pages::switch`，开关贴右对齐；工作流管理四按钮用 `uniform_grid` 等宽。模型库每行固定两行（模型 / 来源，11pt 淡色），超长 ID 用 `ellipsize` 截断（Direct2D NoWrap 不裁剪，原先会溢出到画布区），新增单元测试。
+- **其他子页**：调用配置页拆成"预设 / 调用配置 JSON / 当前生效值"三节，预设按钮 3 列等宽网格；"调度开关"只保留在来源与模型池页（调用配置页原先重复显示）。`button()` 默认水平拉伸，使网格与竖排中的按钮共享边缘；空 tooltip 不再挂载。
+- **macOS（SchedulingView.swift）**：与 Settings / Devices 同一习惯，来源与模型池、调用配置、检查器改为 `Form(.grouped)`：开关与按钮统一落在行尾，分节标题与脚注说明。顶带为分段控件 + 状态 + 保存（⌘S，仅有修改时 borderedProminent）+ 更多（SF Symbols 分组菜单）；画布工具栏"工作流 · 添加节点 · 视图 | 概况 · 停止 · 运行（⌘↩）"。路线行改为"模型 / 来源 · 连通性"两行 + 行尾图标按钮（加入或续期、生成检测，含 tooltip）；模型池行加序号列、↑↓ 合并为 ControlGroup；节点编辑器分"节点 / 任务 / 备用路线 / 模板与高级参数 / 移除"五节，原先各占一行的 ↑、↓ 合为一组；职责与提示词改为多行 TextField；JSON 编辑器用等宽字体。数据与请求逻辑未改。
+- **实测（Windows，隔离实例：GTT_DATA_DIR 副本 + GTT_UI_TEST_INSTANCE，PrintWindow 截图）**：三个子页、工作流设置检查器、输入与结果面板在 1500×950 与 1100×800 窗口下截图核对对齐与间距。原生菜单弹窗不在 PrintWindow 截图范围内，改用 UIA 验证：视图菜单 6 项（"实际大小"在 100% 时禁用），选"放大"后状态变为"缩放 110%"；更多菜单 6 项（无修改时"放弃修改并重载"禁用），选"工作流设置"后检查器打开。未用 UIA 验证画布右键节点菜单（需要真实右键）。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 366 项通过、4 项既有 ignored（UI 41 项）。过程中 `pages::tests::a_price_row_tooltip_lays_out_every_sources_say` 有一次失败，之后连续 3 次全量与单独运行均通过，与本轮改动无关（本轮未改价格页），疑为并行测试间共享状态导致的偶发失败，留待单独排查。
+- **边界**：本机没有 Swift 工具链，macOS 改动未编译、未运行，需经 verify-branch 工作流（macos-26 runner）或 Mac 本机构建验证；macOS 端仍缺 Windows 已有的"母节点"入口，属功能差异，本轮未补。未打包、未安装、未提交。
+
+## S160 微信输入法候选框：补齐应用清单（2026-10-24）
+
+- **结论**：S158 认为"应用层无可靠修复手段"不成立。UI 可执行文件此前**没有任何应用清单**（RT_MANIFEST 缺失，进程加载的是 comctl32 5.82，系统按未声明 Windows 10 支持的兼容模式运行）；微软的非打包 WinUI 3 模板固定带清单。微信输入法（WeType，基于 Mozc）的 TIP `wetype_tip.dll` 以进程内方式加载，从本进程取光标位置再交给 `wetype_renderer.exe` 绘制候选框，其代码中有多条"取位失败即不显示"的分支（GetTextExt/GetScreenExt 失败、无目标窗口、光标与窗口不在同一显示器）。
+- **对照实验**（隔离实例，仅复制 ui.json；用户实际输入 nihao；外部 `.exe.manifest` 注入，comctl32 6.0 SxS 加载作为清单生效的标记）：原版·左屏 ✗、原版·右屏 ✗、**加清单·左屏 ✓**、加清单·右屏 ✗。左屏仅清单一项差异即让候选框出现，且候选框紧贴光标（坐标正确），确认清单为主因。两次右屏测试按日志各只获得约 1.5 秒焦点、且四次测试时间重叠，右屏结果不作为结论。录制脚本未捕获到候选框窗口（类名/所属进程不在筛选范围内），结论以用户目视为准。
+- **修复**：新增 `crates/ui/app.manifest`（与实验所用内容一致：supportedOS Windows 10/11、maxversiontested、PerMonitorV2 与 true/PM、Common-Controls v6 依赖），`build.rs` 经 winresource `set_manifest_file` 嵌入。DPI 声明与框架运行时 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 一致。
+- **踩坑**：清单注释里写了 windows-reactor 自包含部署的标记字符串，框架对整个清单资源做子串匹配，判定为自包含部署后报 "self-contained Windows App Runtime files are missing" 拒绝启动。改写注释并新增两项单元测试（清单含 Windows 10 声明与 PerMonitorV2；清单不含该标记）。
+- **验证**：嵌入后 debug 实例正常启动并加载 comctl32 6.0（清单生效）；`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored（UI 43 项）。嵌入版尚未由用户以微信输入法复测；未打包安装。
+- **提交与安装**：提交 2a15b9f 推送至 ui/scheduling-layout。installer/package.ps1 产出 dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.79 MB，sha256 71740b24…c533d4；未签名——本机无 GTT_SIGN_* 配置，脚本按设计跳过）；release UI 内含清单（supportedOS、PerMonitorV2 各 1 处）。安装前旧 UI/CLI 与 installed-build.json 备份至 target\diagnostics\preinstall-s160-20261024；正式实例 WM_CLOSE 后转入托盘，强制结束后 --quiet 安装首次即成功（退出码 0，无 .gtt-new 残留），安装后 UI d9cf2bf0…、CLI 637ac727… 与 targetelease 产物逐字节一致。安装器未自动拉起界面，手动启动后正式进程加载 comctl32 6.0（清单生效），gtt_panic.log 未新增。installed-build.json 仍是上次 CI 构建的出处记录，未改写。
+- **遗留**：右屏未复测（用户右屏被占用）。已排除本应用一侧的几何原因：隔离实例放到右屏时，主窗口、DesktopChildSiteBridge 与 0×0 隐藏的 InputSiteWindowClass 经 MonitorFromWindow/MonitorFromRect（NULL/NEAREST）全部解析到 DISPLAY2（物理 3840–7680），不存在"光标与窗口不在同一显示器"的条件；左屏候选框位置正确也排除了全局 DIP/物理像素混用。待右屏可用时，用 `ime-test.ps1 -Variant original -Monitor 2`（该 debug 产物已内嵌清单）单独复测，并以系统记事本在右屏作对照：都正常则清单已覆盖双屏；记事本也失败则属微信输入法自身问题。
+
+## S161 下拉菜单改为向下展开（2026-10-24）
+
+- **问题（用户截图）**：调度页"更多"等原生下拉菜单向上弹出、盖在按钮上方，视线需要反向移动，显得突兀。
+- **根因**：windows-reactor 0.100.0 的 `Command::SetOwnedMenu` 用 `MenuFlyout::new()` 在代码里创建 DropDownButton 的菜单，从不设置 Placement，于是沿用 FlyoutBase 的默认值 `Top`（XAML 模板里的 DropDownButton 会显式设置为向下，代码路径跳过了这一步）。框架的 `Menu` 不提供 placement 参数（只有富内容 `Flyout` 有），应用层无法设置。
+- **修复**：按 windows-canvas 的先例，把 windows-reactor 0.100.0 原样 vendor 到 `vendor/windows-reactor`，经 `[patch.crates-io]` 接入；唯一改动标注 `GTT PATCH`：仅对 `DropDownButtonFlyout` 设置 `BottomEdgeAlignedLeft`（向下展开、左边缘对齐，与 XAML DropDownButton/ComboBox 一致；空间不足时 WinUI 仍自动换边），普通 `Button.menu(..)` 保持上游行为。`vendor/windows-reactor/PATCH.md` 记录原因与移除条件。Cargo.lock 仅去掉该包的 registry source/checksum 两行。
+- **实测**（隔离调试实例，UIA 读取按钮与 MenuFlyout 菜单项的屏幕矩形；不发送键盘输入）：更多 按钮 y 422–476 → 菜单 y 489–775；＋ 添加节点 y 705–759 → 773–1480；视图 y 477–531 → 545–898，三者均为 BELOW，菜单左缘比按钮右移 8–9 px（弹出层阴影边距）；位于窗口右缘的"更多"同样完整向下展开。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored。macOS 端使用系统 `Menu`，默认即向下展开，无需改动。未提交、未打包安装。
+
+## S162 总览图例、价格页筛选带与速度页切换器排版（2026-10-24）
+
+- **总览占比图例（用户截图"数据离名称太远"）**：`donut_cell` 每行图例是一个拉满整列的 Auto | STAR | Auto 网格，名称在左、"百分比 · 数值"被 STAR 列推到列的最右缘，两者相距约 250 DIP。改为整张图例一个网格（色块 | 名称 | 百分比 | 数值，四列均 Auto、靠左），列宽按最长条目自适应，跨行自然对齐；百分比与数值拆成两列并右对齐，小数点上下对齐。宽版（横排）同样适用。
+- **价格页标题区**：原先搜索框横跨整页、"仅看有分歧的"与"刷新价目"在右侧上下错开，左右两块互不相关。改为两条带：标题 | 刷新价目（不变）；筛选带为"搜索框（360 DIP）+ 仅看有分歧的"靠左、"N 个模型 · 联网同步于…"靠右，同一中线。刷新失败信息仍单独换行。
+- **速度页分组/指标切换卡**：两条 SelectorBar 与两行说明上下堆叠，只占满宽卡片的左三分之一。改为一行"按模型 | 按工具 ┃ 输出 / 总吞吐 / 输入 / 预填 / 解码"（1 DIP 竖线分隔），两句说明并为一行说明文字（沿用原有翻译字符串，不改 i18n 表），卡片高度约减半。
+- **实测**（隔离实例，账本与 ui.json 副本，1770 宽 PrintWindow 截图）：三处均按预期；价格页截图中的"同步中…"为测试副本自身触发的价目同步，不涉及正式数据。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored。macOS 端未改动。与 S161 一并未提交、未打包安装。
+
+## S163 画布手势拆为移动 / 连线两种模式（2026-10-24）
+
+- **问题（用户反馈）**：拖动手势与连线手势容易冲突、误操作。根因在按下位置判定：按在节点右缘约 20 DIP、端口上下 18 DIP 的条带内即开始连线，其余位置开始移动；条带紧贴用户抓取节点的位置，拖节点靠右时误连线，瞄端口略偏又变成移动。
+- **改法**：新增 `connect_mode`。移动模式（默认）下按住节点任意位置只会移动；连线模式下按住节点任意位置只会连线（拖到下游节点松开），不再有命中条带。两种模式下空白处拖动都是平移，右键节点菜单不变。连线模式下单击节点（拖回自身松开）只选中，不再报"不能连接自身"。
+- **切换**：双击画布空白处切换（指针事件不带点击计数，按 500 ms / 8 DIP 自行判定，纯函数 `is_double_click` 带单元测试；点中节点、模型库或右/中键都会重置判定，"点节点再点空白"不会误切）。另在"视图"菜单提供"切换到连线模式 / 切换到移动模式"，方便不知道双击的用户；进入任一模式时关闭平移工具，避免其吞掉按下事件而看不出模式变化。
+- **可见性**：画布右上角常驻模式徽标（模式名 + 操作提示 + "双击空白处切换"），连线模式用强调色描边；模型库行右侧概况追加"· 移动模式 / · 连线模式"；选中节点提示与"?"操作说明同步改写。
+- **实测**（隔离调试实例）：默认显示移动模式徽标；经 UIA 调用"视图 › 切换到连线模式"后徽标变为强调色连线模式、概况同步。双击与实际拖动、连线未用真实指针验证（未接管鼠标），待用户上手确认。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 369 项通过、4 项既有 ignored（新增双击判定测试）。macOS 端连线本就是"点右端口再点下游左端口"，与拖动不冲突，未改。未提交、未安装。
+
+## S164 占比图例右缘对齐图表边框（2026-10-24）
+
+- **问题（用户反馈）**：S162 把图例收拢为按内容自适应宽度后，数值列在各图里停在不同位置，与上方环形图画布的右边框对不齐；单行的"本机 100.0% · $80.34"更是贴在名称后面。用户要求名称与数值的间距随图自适应，而不是统一缩短。
+- **规则**：堆叠图例宽度取 max(内容宽, 环形图画布宽 `DONUT_W` = 200 DIP)。图例网格改为 色块 Auto | 名称 STAR | 百分比 Auto | 数值 Auto，`min_width(DONUT_W)` 且靠左，于是按 max(内容, 下限) 排布：名称列正好吸收到边框为止的余量，数值列落在画布右边框上；内容更长（长模型名）时整体加宽而不截断。横排（宽版，图例在环形图旁）不设下限。画布宽改用同一常量，二者不会再各自漂移。
+- **实测**（隔离实例账本副本，150% 缩放，1770 宽截图逐像素测量色块左缘到最右文字像素）：四个上排图例与两个设备图例跨度均为 300 px（=200 DIP，设备·费用 299 px 为字形抗锯齿），全部止于画布右边框。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 369 项通过、4 项既有 ignored。
+
+## S165 连线模式锁定画布平移（2026-10-24）
+
+- **问题（用户反馈）**：连线模式下仍能拖动视图。根因是 S163 只让"按在节点上"的拖动随模式变化，空白处左键拖动按设计在两种模式下都保留为平移；连线拖拽稍稍错过目标节点就落在空白处，于是变成平移，正是用户要消除的误操作。
+- **全部平移入口**：按下处理里共三处会开始平移——空白处左键、空白处右键、中键或平移工具；另外"视图 › 平移工具"可在连线模式下重新打开。无滚轮平移。
+- **修复**：新增 `State::can_pan()`（连线模式下为 false），三处入口都经它判定，连线模式下左/右/中键拖动均不再移动视图；右键节点仍打开节点菜单。打开平移工具时自动回到移动模式（平移工具属于移动模式）。"适应全图"与缩放不经拖动，仍可在连线模式下调整视图。徽标第二行改为"从节点拖到下游节点 · 画布锁定 · 双击空白处切换"，"?"说明同步改写。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 370 项通过、4 项既有 ignored（新增 connect_mode_locks_panning）。隔离实例截图确认连线模式徽标文字在框内。真实指针拖动未由本机验证（未接管鼠标）。
+
+## S166 节点右键菜单：可用性一目了然与常用操作（2026-10-24）
+
+- **需求（用户）**：节点右键菜单应能一键检测连通性、直接看到可用状态，而不必翻找冗长的菜单；并补充其他常用功能。
+- **菜单重排**：标题区显示节点名与彩色可用性行（如"● 未验证 · zcode / deepseek-flash"；母节点"入口"，本地节点"本地节点 · 不调用模型"）。操作分三组：编辑节点 / **检测连通性** / **加入或续期模型池**；**从此节点连线**（进入连线模式，已在则为"退出连线模式"）/ 断开连线（无连线时置灰）；删除节点。对当前节点类型不适用的项置灰（未绑定模型的、母节点和本地节点不能检测或入池）。"取消选择"移出菜单（状态栏已有同名按钮）。图标改为 16 DIP，与 MenuFlyoutItem 一致。
+- **检测结果可见（根因）**：原先检测结果存进 `notice`，而画布页从不显示 `notice`，在画布发起检测没有任何可见回执。新增 `pending_check` / `check_feedback`：检测中显示"正在检测「节点」…"，返回后按路由器 `recheck` 的三种回答显示可关闭的 InfoBar——通过（成功）、失败（错误，附原因码中文说明与重试秒数）、未执行（警告：前台占用、每小时检测预算、Luna 监工等）；请求本身报错仍走错误条。
+- **连通性词表统一**：新增 `route_status`，覆盖路由器全部六种 connectivity（verified / stale / cooling_down / verification_required / unverified / 空）。画布状态带此前只认四种，**"stale"（验证已超过 24 小时）与"cooling_down"都显示为红色"连通异常"**；现为"待重新验证"（琥珀）与"冷却中"（红）。节点菜单、画布状态带与来源页模型列表共用同一张表（来源页原先直接显示 verified 等英文原值）。
+- **测试钩子**：仿照 GTT_DONUTTEST / GTT_TIPTEST 新增仅 debug 构建生效的 `GTT_NODEMENUTEST=<节点序号>`，首次加载后打开该节点菜单，用于截图验收（注入的指针输入到不了 WinUI3 内容岛）。
+- **实测**（隔离调试实例，指向正式协调器只读加载，不保存、不发起检测）：菜单标题、状态行配色、分组与置灰均符合预期。真实检测未在本机发起（会产生用量），反馈条文案由单元测试覆盖三种回答。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 375 项通过、4 项既有 ignored（新增 route_status 词表与 check_feedback 三种回答测试）。未提交、未安装。
+
+
+## S167 统一调度受理与 GTT 正式承接（2026-10-24）
+
+- **范围**：协调器 0.5.0 新增 router_dispatch，将 task/group/workflow 的计划和提交集中到持久受理日志；原六个提交/计划名称退出 MCP 工具发现并兼容转发。研究组的审批、续研、交接保持原职责，共用原执行、容量和计量路径。GTT core 统一 loopback 认证、dispatch_v1/contract=2 握手及旧 workflow 转换；FFI 开放新入口，CLI 新增 scheduling 七种动作，从文件读取材料。
+- **可靠性**：先落预分配目标和请求指纹，再执行；并发同 ID、完成后和重启后均查回原任务，修改内容冲突。未知付费结果换 ID 仍需显式接受风险；受理期间取消传递真实事件，尚未发出不建立付费目标。已保存工作流按 revision 解析。全文 report 分页带 SHA-256，工作流游标不越过未完成分支；预算纳入明确、估算和剩余预约。整图永久不兼容在付费上游前拒绝。
+- **GTT 承接**：Windows 报告响应早退前补 invalidate；两端仅恢复当前 workflow 的活动运行观察，不自动重提。保留本轮其他任务正在修改的节点菜单与 S166 记录，没有覆盖或提交其改动。macOS 仅源码核对，本机未编译/视觉验收。
+- **真实负载**：独立服务上的 Gemini Flash 两并行提取成功（13,113 + 12,218 tokens）；首次下游任务类型不被模型允许，触发整图预检修复。保留两个成功报告，仅补测允许的 summarize 节点（14,639 tokens）；合计三次原生调用 39,970 tokens，预约归零。新轮四个重复提交仍只有一个 dispatch；原生 native_backed/actual_model 和完整 JSON 留证。首轮 CLI 文件名错误已保留并将路径验证移至生成前。
+- **接入实测**：真实 GTT CLI 对独立实例执行 plan、同 ID submit、status/collect/report/list/cancel；服务重启后复用原 dispatch，原生 attempt 未增加。关闭独立实例外协后对账/取消仍通过，新 plan/submit 拒绝。正式配置 SHA-256 未变，正式 0.4.0 服务未切换。146 条历史作业的数据库副本迁移 dry-run 全部保留，保存的调度关闭状态保留。
+- **验证**：Python 协调器 391 项全套回归通过；cargo fmt --all -- --check、workspace Clippy -D warnings 通过；release CLI 构建通过。默认并行 Rust workspace 曾出现既有价格 tooltip 语言竞争（预期中文“未计票”，实际英文“not counted”），pages.rs/i18n.rs 未改，单项通过；失败日志保留。不跳过任何测试的完整串行回归 377 通过、4 项既有 ignored。未通过重试抹除原并行失败，未放宽阈值。
+- **交付边界**：GTT 内嵌协调器与独立源码按明确清单同步并核对字节相同；正式服务切换和安装 CLI/Skill 属共享环境变更，依用户 AGENTS 协议待明确确认。详细接口及证据边界见 integrations/model-router/docs/dispatch-intake.md 与 dispatch-verification.md。未提交、未推送。
+
+
+## S168 用户授权后的正式调度服务切换（2026-10-24）
+
+- **授权**：用户明确选择“确认切换服务并同步 CLI、Skill，保留当前开关”。实际维护仅切换模型协调器常驻进程、安装 release CLI 和同步三份 Skill 文档；没有安装 GUI、提交或推送其他并发 UI 修改。
+- **维护前**：确认普通/研究组/工作流无在途任务，备份 CLI、Skill、config.json、scheduling.json 和 SQLite 一致性副本。146 条历史作业的副本迁移预演保留全部记录。
+- **切换后**：正式入口仍为 integrations/model-router/router.py；health 返回 0.5.0、runtime_contract_version=2 与 dispatch_v1。正式 CLI 哈希等于验证过的 release 候选（f34a0498d4cc…），scheduling list 成功；已有 MCP 客户端读取配置成功。
+- **保留与门禁**：调度 enabled=false、revision=4、模型池和两个正式配置文件 SHA-256 均不变；历史作业仍为146、在途为0。正式 CLI 的验证提交被 scheduling_disabled 拒绝，新增 dispatch 与作业均为0。新协议已可用，实际生成仍需用户自行启用调度并配置有效路线池。
+- **证据**：协调器工作区 diagnostics/dispatch-activation-20261024-210540/activation.json 保存备份与正式验收，dispatch-verification.md 已区分源码、独立原生负载、正式安装和 macOS/GUI 验收边界。并行 Rust 回归的既有语言竞争失败日志仍保留。

@@ -19,6 +19,9 @@ from .processes import background_options
 from . import __version__
 
 RUNTIME_CONTRACT_VERSION = 2
+MANAGEMENT_METHODS = {"router_scheduling", "router_status", "router_collect", "router_cancel",
+                      "router_group_status", "router_group_collect", "router_group_cancel",
+                      "router_workflow_status", "router_workflow_cancel"}
 CONTRACT_METHODS = {"router_plan", "router_submit", "router_group_plan", "router_group_submit", "router_group_resume",
                     "router_group_extend", "router_group_adjust_seats", "router_group_merge", "router_recheck"}
 
@@ -151,7 +154,9 @@ class LocalClient:
 
     def _request(self, method=None, params=None, timeout=30):
         endpoint = self._endpoint()
-        url = "http://127.0.0.1:" + str(endpoint["port"]) + ("/rpc" if method else "/health")
+        from .dispatch import READ_ACTIONS
+        management = method in MANAGEMENT_METHODS or (method == "router_dispatch" and (params or {}).get("action") in READ_ACTIONS)
+        url = "http://127.0.0.1:" + str(endpoint["port"]) + ("/manage" if management else "/rpc" if method else "/health")
         body = json.dumps({"method": method, "params": params or {}}).encode() if method else None
         request = urllib.request.Request(url, data=body,
                                          headers={"Authorization": "Bearer " + endpoint["token"], "Content-Type": "application/json"})
@@ -190,6 +195,10 @@ class LocalClient:
 
     def call(self, method, params=None):
         try:
+            if method == "router_dispatch":
+                health = self.runtime_info()
+                if health.get("runtime_contract_version") != RUNTIME_CONTRACT_VERSION or "dispatch_v1" not in health.get("features", []):
+                    raise ValueError("resident_feature_missing: dispatch_v1; align the runtime before unified dispatch; no task dispatched")
             if method == "router_scheduling" or method.startswith("router_workflow_"):
                 if "scheduling_v1" not in self.runtime_info().get("features", []):
                     raise ValueError("resident_feature_missing: scheduling_v1; align the runtime before using visual dispatch")
@@ -234,7 +243,7 @@ def serve(config_path):
                 self.respond(403, {"error": "Unauthorized local request"})
             elif self.path == "/health":
                 self.respond(200, {"service": "gtt-model-router", "pid": os.getpid(), "version": __version__,
-                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION, "features": ["report_capacity_v1", "scheduling_v1", "runtime_limits_v1"]})
+                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION, "features": ["report_capacity_v1", "scheduling_v1", "runtime_limits_v1", "dispatch_v1"]})
             else:
                 self.respond(404, {"error": "Unknown local route"})
 

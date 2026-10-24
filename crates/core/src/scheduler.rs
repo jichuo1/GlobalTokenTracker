@@ -137,6 +137,18 @@ pub struct Snapshot {
     pub effective_profile: Value,
 }
 
+impl Snapshot {
+    /// Restore observation only; never resubmit a paid or interrupted run.
+    pub fn active_run(&self, workflow_id: &str) -> Option<&str> {
+        self.runs.iter().find_map(|run| {
+            (run["workflow_id"].as_str() == Some(workflow_id)
+                && matches!(run["state"].as_str(), Some("running" | "cancelling")))
+            .then(|| run["id"].as_str())
+            .flatten()
+        })
+    }
+}
+
 pub fn now_ms() -> u64 {
     u64::try_from(
         SystemTime::now()
@@ -258,6 +270,36 @@ impl Workflow {
         Ok(self.nodes.len() - 1)
     }
 
+    /// 母节点：工作流入口，即 Codex 协调的接口。不绑定模型、仅向下游
+    /// 分发；可以同时存在多个。映射到路由器的 "input" 节点类型——上游
+    /// 集合为空即自动完成，按拓扑向下游传递。
+    pub fn add_master(&mut self, x: f64, y: f64) -> Result<usize> {
+        if self.nodes.len() >= 256 {
+            bail!("最多 256 个节点，实际执行还受配置档约束");
+        }
+        let mut sequence = self.nodes.len() + 1;
+        while self
+            .nodes
+            .iter()
+            .any(|n| n.id == format!("node-{sequence}"))
+        {
+            sequence += 1;
+        }
+        self.nodes.push(Node {
+            id: format!("node-{sequence}"),
+            title: "母节点 · Codex 接口".into(),
+            route_id: String::new(),
+            node_type: "input".into(),
+            role: "工作流入口：按拓扑向下游分发任务与输入材料。".into(),
+            fallback_routes: Vec::new(),
+            tags: vec!["母节点".into()],
+            x: x.clamp(-10_000.0, 10_000.0),
+            y: y.clamp(-10_000.0, 10_000.0),
+            task: json!({"kind":"extract","prompt":"提供输入材料。"}),
+        });
+        Ok(self.nodes.len() - 1)
+    }
+
     /// Read-only connection preview; never clones prompts or edits the graph.
     pub fn can_connect(&self, from: usize, to: usize) -> Result<()> {
         self.order()?;
@@ -268,6 +310,9 @@ impl Workflow {
             || self.edges.iter().any(|e| e.from == *a && e.to == *b)
         {
             bail!("连线重复、连接自身或超出范围");
+        }
+        if self.nodes.get(to).is_some_and(|n| n.node_type == "input") {
+            bail!("母节点是工作流入口，不接受上游连线");
         }
         let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for edge in &self.edges {
@@ -302,6 +347,14 @@ impl Workflow {
         }
         let node = self.nodes.remove(index);
         self.edges.retain(|e| e.from != node.id && e.to != node.id);
+    }
+
+    /// Removes every edge touching the node; the node itself stays.
+    pub fn disconnect(&mut self, index: usize) {
+        if let Some(node) = self.nodes.get(index) {
+            let id = node.id.clone();
+            self.edges.retain(|e| e.from != id && e.to != id);
+        }
     }
 
     /// The same rectangles are used by Direct2D painting and pointer hit tests.
@@ -458,31 +511,18 @@ pub fn ensure_running() -> Result<()> {
 /// Sends only to an authenticated loopback endpoint owned by the local router.
 /// The endpoint token is never placed in process arguments, errors, or logs.
 pub fn call(method: &str, params: Value) -> Result<Value> {
-    let file = std::fs::File::open(endpoint_path()).context("协调器未运行，请先启动模型协调器")?;
-    let mut body = Vec::new();
-    file.take(4097).read_to_end(&mut body)?;
-    if body.len() > 4096 {
-        bail!("协调器端点文件无效");
+    let (method, params, legacy_plan) = adapt_legacy_workflow_call(method, params)?;
+    if method == "router_dispatch" {
+        verify_dispatch_runtime()?;
     }
-    let endpoint: Value = serde_json::from_slice(&body).context("协调器端点文件无效")?;
-    let port = endpoint["port"]
-        .as_u64()
-        .filter(|p| (1024..=65535).contains(p))
-        .context("协调器端口无效")?;
-    let token = endpoint["token"]
-        .as_str()
-        .filter(|s| {
-            (16..=512).contains(&s.len())
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        })
-        .context("协调器认证元数据无效")?;
-    let agent = ureq::Agent::config_builder()
-        .proxy(None)
-        .timeout_global(Some(Duration::from_secs(150)))
-        .build()
-        .new_agent();
-    let path = if method == "router_scheduling" {
+    let (port, token, agent) = local_client(Duration::from_secs(150))?;
+    let path = if method == "router_scheduling"
+        || matches!(method, "router_workflow_status" | "router_workflow_cancel")
+        || (method == "router_dispatch"
+            && matches!(
+                params["action"].as_str(),
+                Some("status" | "collect" | "cancel" | "list" | "report")
+            )) {
         "manage"
     } else {
         "rpc"
@@ -503,12 +543,150 @@ pub fn call(method: &str, params: Value) -> Result<Value> {
     if let Some(error) = result.get("error").and_then(Value::as_str) {
         bail!("{error}");
     }
-    result.get("result").cloned().context("协调器未返回结果")
+    let result = result.get("result").cloned().context("协调器未返回结果")?;
+    if legacy_plan {
+        return result
+            .get("plan")
+            .cloned()
+            .context("协调器未返回 workflow plan");
+    }
+    Ok(result)
+}
+
+fn adapt_legacy_workflow_call(method: &str, params: Value) -> Result<(&str, Value, bool)> {
+    if !matches!(method, "router_workflow_plan" | "router_workflow_submit") {
+        return Ok((method, params, false));
+    }
+    let action = if method == "router_workflow_plan" {
+        "plan"
+    } else {
+        "submit"
+    };
+    let definition = params
+        .get("definition")
+        .cloned()
+        .context("旧 workflow 调用缺少 definition")?;
+    let mut request = json!({
+        "kind": "workflow",
+        "definition": definition,
+        "workflow_id": params.get("workflow_id").cloned().unwrap_or_else(|| json!("default"))
+    });
+    if action == "submit" {
+        let request_id = params
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .context("旧 workflow submit 必须提供非空 request_id")?;
+        request["input_text"] = params
+            .get("input_text")
+            .cloned()
+            .unwrap_or_else(|| json!(""));
+        let mut dispatch_params = json!({
+            "request": request,
+            "request_id": request_id
+        });
+        if let Some(acknowledge) = params.get("acknowledge_unknown_risk") {
+            dispatch_params["acknowledge_unknown_risk"] = acknowledge.clone();
+        }
+        dispatch_params["action"] = json!(action);
+        Ok(("router_dispatch", dispatch_params, false))
+    } else {
+        Ok((
+            "router_dispatch",
+            json!({"action": action, "request": request}),
+            true,
+        ))
+    }
+}
+
+fn local_client(timeout: Duration) -> Result<(u16, String, ureq::Agent)> {
+    let file = std::fs::File::open(endpoint_path()).context("协调器未运行，请先启动模型协调器")?;
+    let mut body = Vec::new();
+    file.take(4097).read_to_end(&mut body)?;
+    if body.len() > 4096 {
+        bail!("协调器端点文件无效");
+    }
+    let endpoint: Value = serde_json::from_slice(&body).context("协调器端点文件无效")?;
+    let port = endpoint["port"]
+        .as_u64()
+        .filter(|p| (1024..=65535).contains(p))
+        .and_then(|p| u16::try_from(p).ok())
+        .context("协调器端口无效")?;
+    let token = endpoint["token"]
+        .as_str()
+        .filter(|s| {
+            (16..=512).contains(&s.len())
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .context("协调器认证元数据无效")?
+        .to_owned();
+    let agent = ureq::Agent::config_builder()
+        .proxy(None)
+        .timeout_global(Some(timeout))
+        .build()
+        .new_agent();
+    Ok((port, token, agent))
+}
+
+/// Call the versioned dispatch facade after proving that the resident service
+/// advertises the protocol this client needs. Management actions stay on
+/// `/manage`, so they remain available for reconciliation when dispatch is off.
+pub fn dispatch(action: &str, params: Value) -> Result<Value> {
+    if !matches!(
+        action,
+        "plan" | "submit" | "status" | "collect" | "cancel" | "list" | "report"
+    ) {
+        bail!("未知调度操作: {action}");
+    }
+    let mut params = params;
+    let fields = params
+        .as_object_mut()
+        .context("调度参数顶层必须是 JSON 对象")?;
+    fields.insert("action".into(), json!(action));
+    call("router_dispatch", params)
+}
+
+fn verify_dispatch_runtime() -> Result<()> {
+    let (port, token, agent) = local_client(Duration::from_secs(10))?;
+    let health: Value = agent
+        .get(&format!("http://127.0.0.1:{port}/health"))
+        .header("Authorization", &format!("Bearer {token}"))
+        .call()
+        .context("协调器健康握手失败")?
+        .body_mut()
+        .with_config()
+        .limit(64 * 1024)
+        .read_json()
+        .context("协调器健康响应无效")?;
+    if health["runtime_contract_version"].as_u64() != Some(2)
+        || !health["features"].as_array().is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("dispatch_v1"))
+        })
+    {
+        bail!("协调器缺少 dispatch_v1 或 runtime_contract_version=2，请更新服务后重试");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restore_only_observes_an_active_run_in_the_current_workflow() {
+        let snapshot = Snapshot {
+            runs: vec![
+                json!({"id":"other","workflow_id":"other","state":"running"}),
+                json!({"id":"unknown","workflow_id":"round","state":"interrupted"}),
+                json!({"id":"owned","workflow_id":"round","state":"cancelling"}),
+            ],
+            ..Snapshot::default()
+        };
+        assert_eq!(snapshot.active_run("round"), Some("owned"));
+        assert_eq!(snapshot.active_run("missing"), None);
+    }
     fn sample() -> Workflow {
         let mut g = Workflow::new("test".into());
         let route = Route {
@@ -521,6 +699,43 @@ mod tests {
         }
         g
     }
+    #[test]
+    fn legacy_workflow_calls_use_dispatch_v1_payloads_and_require_submit_id() {
+        let definition = json!({"id":"wf","nodes":[],"edges":[]});
+        let (method, plan, unwrap_plan) = adapt_legacy_workflow_call(
+            "router_workflow_plan",
+            json!({"definition":definition.clone(),"workflow_id":"team"}),
+        )
+        .unwrap();
+        assert_eq!(method, "router_dispatch");
+        assert!(unwrap_plan);
+        assert_eq!(plan["action"], "plan");
+        assert_eq!(plan["request"]["kind"], "workflow");
+        assert_eq!(plan["request"]["workflow_id"], "team");
+
+        let (method, submit, unwrap_plan) = adapt_legacy_workflow_call(
+            "router_workflow_submit",
+            json!({
+                "definition":definition.clone(),
+                "workflow_id":"team",
+                "input_text":"input",
+                "request_id":"stable-id",
+                "acknowledge_unknown_risk":true
+            }),
+        )
+        .unwrap();
+        assert_eq!(method, "router_dispatch");
+        assert!(!unwrap_plan);
+        assert_eq!(submit["action"], "submit");
+        assert_eq!(submit["request_id"], "stable-id");
+        assert_eq!(submit["acknowledge_unknown_risk"], true);
+        assert_eq!(submit["request"]["input_text"], "input");
+        assert!(
+            adapt_legacy_workflow_call("router_workflow_submit", json!({"definition":definition}))
+                .is_err()
+        );
+    }
+
     #[test]
     fn graph_order_rejects_cycles_and_keeps_previous_edges() {
         let mut g = sample();

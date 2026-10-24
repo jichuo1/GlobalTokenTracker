@@ -240,25 +240,35 @@ fn loading(theme: &Theme, scanning: bool) -> View {
 
 /// Top band of a page: title left, actions right.
 fn header(theme: &Theme, title: &str, actions: Vec<View>) -> View {
+    // Both sides center on the row: the title is a single line of 22pt text
+    // and the action strip is 36 DIP tall, so top-aligned cells left the title
+    // riding ~7 DIP above the buttons' optical center on every page.
     Grid::new()
         .columns([GridLength::STAR, GridLength::Auto])
+        .column_spacing(12.0)
         .children([
-            cell(
-                0,
-                TextBlock::new()
-                    .text(title)
-                    .font_size(theme.title_size)
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .foreground(theme.text)
-                    .into(),
-            ),
-            cell(
-                1,
-                StackPanel::new()
-                    .orientation(Orientation::Horizontal)
-                    .spacing(10.0)
-                    .keyed_children(keyed(actions)),
-            ),
+            Border::new()
+                .grid_column(0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    TextBlock::new()
+                        .text(title)
+                        .font_size(theme.title_size)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .foreground(theme.text)
+                        // Long titles ("价目表（$/1M tokens）") wrap instead of
+                        // squeezing the action strip to zero on narrow windows.
+                        .text_wrapping(TextWrapping::Wrap),
+                ),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(10.0)
+                        .keyed_children(keyed(actions)),
+                ),
         ])
 }
 
@@ -731,7 +741,9 @@ pub fn bounded_frame_page(theme: &Theme, gap: f64, blocks: Vec<View>, slide: &Sl
 
 pub fn canvas_frame_page(theme: &Theme, _gap: f64, blocks: Vec<View>, slide: &Slide) -> View {
     Border::new()
-        .padding(Thickness::xy(16.0, 12.0))
+        // Same page frame as every other page (16/12 made the workflow
+        // toolbar start 8 DIP left of the titles on the other eight pages).
+        .padding(Thickness::xy(24.0, 16.0))
         .background(
             theme
                 .page_bg
@@ -809,19 +821,44 @@ fn hidden_chip(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContex
 
 /// Trend card header: title on the left, moving-average switch on the right.
 fn trend_head(theme: &Theme, title: &str, on: bool, ctx: &mut ViewContext<Shell>) -> View {
-    let switch = StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(8.0)
-        .vertical_alignment(VerticalAlignment::Center)
+    let caption = |on: bool| {
+        TextBlock::new()
+            .text(if on { t!("开") } else { t!("关") })
+            .font_size(theme.label_size)
+            .vertical_alignment(VerticalAlignment::Center)
+    };
+    // Same track slot as `pages::switch`: a Pixel column — the control's
+    // 开/关 slot measures ~154 DIP while it draws ~44 (WinUI `width()` pins
+    // the drawn track but not the reported desired size), so a StackPanel set
+    // the caption ~110 DIP after the track and the group stopped short of the
+    // card edge.
+    let switch = Grid::new()
+        .columns([GridLength::Auto, GridLength::Pixel(44.0), GridLength::Auto])
+        .column_spacing(8.0)
         .children((
             TextBlock::new()
+                .grid_column(0)
                 .text(t!("折线趋势"))
                 .font_size(theme.label_size)
                 .foreground(theme.subtle)
                 .vertical_alignment(VerticalAlignment::Center),
             ToggleSwitch::new()
+                .grid_column(1)
                 .is_on(on)
-                .on_toggled(ctx.callback(Msg::SetTrendLine)),
+                .on_toggled(ctx.callback(Msg::SetTrendLine))
+                .width(44.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .slots([
+                    SlotView::new(
+                        ToggleSwitchSlot::OnContent,
+                        TextBlock::new().text("").font_size(theme.label_size),
+                    ),
+                    SlotView::new(
+                        ToggleSwitchSlot::OffContent,
+                        TextBlock::new().text("").font_size(theme.label_size),
+                    ),
+                ]),
+            caption(on).grid_column(2),
         ));
     Grid::new()
         .columns([GridLength::STAR, GridLength::Auto])
@@ -852,6 +889,7 @@ fn heat_card(
         })
         .collect();
     let selector: View = SelectorBar::new()
+        .horizontal_alignment(HorizontalAlignment::Right)
         .on_selected_text_changed(ctx.callback(|t: Option<String>| {
             // Items carry only text — map the localized label back.
             let want = t.unwrap_or_default();
@@ -1225,7 +1263,10 @@ fn overview_widget(
                 theme,
                 StackPanel::new()
                     .orientation(Orientation::Vertical)
-                    .spacing(8.0)
+                    // 10 like the trend/share/speed/heat cards — these three
+                    // used 8, so the air under the section rule differed by
+                    // 2 DIP from one card to the next on the same page.
+                    .spacing(10.0)
                     .children((
                         w::section_header(theme, Symbol::List, &tf!("{rl} · 按工具", rl)),
                         vstack(2.0, rows),
@@ -1287,7 +1328,7 @@ fn overview_widget(
                 theme,
                 StackPanel::new()
                     .orientation(Orientation::Vertical)
-                    .spacing(8.0)
+                    .spacing(10.0)
                     .children((
                         w::section_header(theme, Symbol::Remote, &tf!("{rl} · 按设备", rl)),
                         vstack(2.0, rows),
@@ -1341,7 +1382,7 @@ fn overview_widget(
                 theme,
                 StackPanel::new()
                     .orientation(Orientation::Vertical)
-                    .spacing(8.0)
+                    .spacing(10.0)
                     .children((
                         w::section_header(theme, Symbol::Clock, t!("订阅配额")),
                         vstack(2.0, rows),
@@ -1505,7 +1546,9 @@ pub fn filter_chrome(
     StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(PICKER_GAP)
-        .margin(Thickness::xy(CHROME_LEFT, 4.0))
+        // 4 DIP sat the pills right on the nav's hairline; the page below
+        // resumes with 16, so the strip reads as its own band at 8.
+        .margin(Thickness::xy(CHROME_LEFT, 8.0))
         .keyed_children(keyed(pickers))
 }
 
@@ -1574,11 +1617,11 @@ fn tools_menu_items(
     filter: &Option<Vec<String>>,
     ctx: &mut ViewContext<Shell>,
 ) -> Vec<View> {
-    let mut col: Vec<View> = Vec::with_capacity(s.vm.apps.len() + 2);
+    let mut checks: Vec<View> = Vec::with_capacity(s.vm.apps.len());
     for name in &s.vm.apps {
         let checked = filter.as_ref().is_none_or(|f| f.contains(name));
         let n = name.clone();
-        col.push(
+        checks.push(
             CheckBox::new()
                 .is_checked(checked)
                 .on_is_checked_changed(ctx.callback(move |on: bool| Msg::ToggleApp(n.clone(), on)))
@@ -1589,14 +1632,25 @@ fn tools_menu_items(
                 ),
         );
     }
-    col.push(
+    // Same shape as the model picker: the list scrolls inside a cap so the
+    // select-all/clear footer stays visible and the panel never runs past the
+    // window edge (the tools list had no cap at all).
+    vec![
+        ScrollViewer::new()
+            .max_height(300.0)
+            .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+            .content(
+                StackPanel::new()
+                    .orientation(Orientation::Vertical)
+                    .spacing(10.0)
+                    .keyed_children(keyed(checks)),
+            ),
         Border::new()
             .height(1.0)
             .background(theme.divider)
             .margin(Thickness::xy(0.0, 6.0))
             .into(),
-    );
-    col.push(
         StackPanel::new()
             .orientation(Orientation::Horizontal)
             .spacing(8.0)
@@ -1608,8 +1662,7 @@ fn tools_menu_items(
                     .on_click(ctx.callback(|_| Msg::SetApps(Some(Vec::new()))))
                     .content(t!("清空")),
             )),
-    );
-    col
+    ]
 }
 
 /// Model-checkbox rows plus the select-all / clear footer. The list is
@@ -1764,52 +1817,47 @@ pub fn dropdown_overlay(
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let g = chrome_geom(theme, s.vm.devices.len() > 1);
-    let (x, items) = match open {
-        MenuKind::Tools => (g.tools_x, tools_menu_items(s, theme, state.apps, ctx)),
-        MenuKind::Models => (g.models_x, models_menu_items(s, theme, state.models, ctx)),
+    let (x, title, items) = match open {
+        MenuKind::Tools => (
+            g.tools_x,
+            t!("工具筛选"),
+            tools_menu_items(s, theme, state.apps, ctx),
+        ),
+        MenuKind::Models => (
+            g.models_x,
+            t!("模型筛选"),
+            models_menu_items(s, theme, state.models, ctx),
+        ),
         MenuKind::Devices => (
             g.devices_x,
+            t!("设备筛选"),
             devices_menu_items(s, theme, state.devices, ctx),
         ),
         MenuKind::Refresh => (
             g.refresh_x,
+            t!("刷新频率"),
             refresh_menu_items(theme, state.refresh_secs, ctx),
         ),
     };
-    // Two-layer fill: `card_bg` is a *translucent* Fluent layer brush — over
-    // page content it lets the rows beneath bleed through (reads as a broken
-    // transparent popup). An opaque base under the tint composites to the
-    // same elevated-card look the cards get over the window surface.
-    let base = theme
-        .page_bg
-        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
     // Margin positions the card inside the content cell — plain Grid, no
     // Canvas (its empty-area hits can swallow presses meant for siblings).
-    let drop_base: View = Border::new()
-        .background(base)
-        .corner_radius(CornerRadius::uniform(theme.radius))
-        .into();
-    let drop_bg: View = Border::new()
-        .background(theme.card_bg)
-        .corner_radius(CornerRadius::uniform(theme.radius))
-        .into();
-    let drop_frame: View = Border::new()
-        .border_brush(theme.card_border)
-        .border_thickness(theme.card_border_thickness())
-        .corner_radius(CornerRadius::uniform(theme.radius))
-        .padding(Thickness::xy(12.0, 8.0))
-        .content(
-            StackPanel::new()
-                .orientation(Orientation::Vertical)
-                .spacing(10.0)
-                .keyed_children(keyed(items)),
-        );
+    let close = Button::new()
+        .on_click(ctx.callback(|_| Msg::CloseMenu))
+        .content(t!("收起"));
     Grid::new()
         .grid_row(3)
         .horizontal_alignment(HorizontalAlignment::Left)
         .vertical_alignment(VerticalAlignment::Top)
         .margin(Thickness::new(x, 4.0, 0.0, 0.0))
-        .children([drop_base, drop_bg, drop_frame])
+        .children([w::overlay_panel(
+            theme,
+            title,
+            close,
+            StackPanel::new()
+                .orientation(Orientation::Vertical)
+                .spacing(10.0)
+                .keyed_children(keyed(items)),
+        )])
 }
 
 /// Bundle for the overview page — keeps the signature under the arg limit
@@ -1895,7 +1943,7 @@ pub fn overview_page(
             ],
         );
 
-    let mut col: Vec<View> = vec![header(
+    let head = header(
         theme,
         t!("总览"),
         vec![
@@ -1909,7 +1957,10 @@ pub fn overview_page(
                     .vertical_alignment(VerticalAlignment::Center)
                     .into()
             } else {
-                Border::new().width(0.0).into()
+                // Same footprint as the ring: a zero-width stand-in made the
+                // 布局/刷新 buttons slide 28 DIP whenever a scan started or
+                // finished.
+                Border::new().width(18.0).height(18.0).into()
             },
             Button::new()
                 .on_click(ctx.callback(|_| Msg::ToggleEdit))
@@ -1920,7 +1971,7 @@ pub fn overview_page(
         ]
         .into_iter()
         .collect(),
-    )];
+    );
 
     // 1-DIP full-width ruler: its surface Metrics report the real content
     // width → column-count changes are quantized here so a resize drag
@@ -1942,12 +1993,16 @@ pub fn overview_page(
             Some(Box::new(move || drop(obs)))
         }
     });
-    col.push(
-        SwapChainPanel::new()
-            .element_ref(args.ruler)
-            .height(1.0)
-            .into(),
-    );
+    // The ruler rides inside the title block: as a block of its own it cost a
+    // full section gap above and below a 1-DIP line nobody can see.
+    let mut col: Vec<View> = vec![
+        Grid::new()
+            .rows([GridLength::Auto, GridLength::Auto])
+            .children((
+                head,
+                SwapChainPanel::new().element_ref(args.ruler).height(1.0),
+            )),
+    ];
 
     if let Range::Custom { start_ms, end_ms } = s.vm.range {
         col.push(custom_range_row(
@@ -2365,7 +2420,13 @@ pub fn detail_page(
     // (~25 of a 200-row page) — the old eager list mounted ~4000 elements
     // in one UI-thread turn and re-arranged them every slide frame. Keys are
     // row indices, so a page flip refreshes realized rows in place.
-    let list: View = virtual_rows(theme, d.rows.clone(), d.rows.len(), table.width, event_row);
+    let empty = d.rows.is_empty();
+    let list: View = if empty {
+        // An empty page used to show nothing at all under the title.
+        w::empty_state(theme, "这段时间没有事件")
+    } else {
+        virtual_rows(theme, d.rows.clone(), d.rows.len(), table.width, event_row)
+    };
     let ruler = table_ruler(ctx, "detail-ruler", table.ruler);
     let pages = (d.total as i64 + DETAIL_PAGE_SIZE - 1) / DETAIL_PAGE_SIZE;
     let page = d.page;
@@ -2422,7 +2483,11 @@ pub fn detail_page(
         ),
         w::card(
             theme,
-            vstack(0.0, vec![ruler, detail_header(theme, table.width), list]),
+            if empty {
+                list
+            } else {
+                vstack(0.0, vec![ruler, detail_header(theme, table.width), list])
+            },
         ),
     ]
 }
@@ -2644,54 +2709,63 @@ pub fn quota_page(
         let open = !collapsed.contains(&g.app);
         let worst = g.worst_pct.unwrap_or(0.0);
         let app_key = g.app.clone();
-        let header_btn = Button::new()
-            .automation_name(tf!("配额组 {}", g.display))
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .horizontal_content_alignment(HorizontalAlignment::Stretch)
-            .on_click(ctx.callback(move |_| Msg::ToggleQuotaGroup(app_key.clone())))
-            .content(
-                Grid::new()
-                    .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
-                    .column_spacing(8.0)
-                    .children([
-                        cell(
-                            0,
-                            StackPanel::new()
-                                .orientation(Orientation::Horizontal)
-                                .spacing(8.0)
-                                .children((
-                                    SymbolIcon::new().symbol(Symbol::Clock),
-                                    TextBlock::new()
-                                        .text(tf!("{} · {} 项配额", g.display, g.rows.len()))
-                                        .font_weight(FontWeight::SEMI_BOLD)
-                                        .vertical_alignment(VerticalAlignment::Center),
-                                )),
-                        ),
-                        cell(
-                            1,
-                            w::badge(
-                                theme,
-                                format!("{}%", fmt::trim_f(worst, 1)),
-                                if worst > 80.0 {
-                                    w::BadgeTone::Danger
-                                } else if worst > 50.0 {
-                                    w::BadgeTone::Warn
-                                } else {
-                                    w::BadgeTone::Muted
-                                },
-                            ),
-                        ),
-                        cell(
-                            2,
+        // In-page toggle rather than WinUI's `Expander`: that control measures
+        // its content at the content's own width and centres it, so the rows
+        // collapsed into a 147 DIP column in the middle of the page (Stretch
+        // and a Grid wrapper did not change it). Here the header is a button
+        // that stretches, and the rows simply follow it.
+        let header = Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
+            .column_spacing(8.0)
+            .children([
+                cell(
+                    0,
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(8.0)
+                        .children((
+                            SymbolIcon::new().symbol(Symbol::Clock),
+                            TextBlock::new()
+                                .text(tf!("{} · {} 项配额", g.display, g.rows.len()))
+                                .font_weight(FontWeight::SEMI_BOLD)
+                                .vertical_alignment(VerticalAlignment::Center),
+                        )),
+                ),
+                cell(
+                    1,
+                    Border::new()
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .content(w::badge(
+                            theme,
+                            format!("{}%", fmt::trim_f(worst, 1)),
+                            if worst > 80.0 {
+                                w::BadgeTone::Danger
+                            } else if worst > 50.0 {
+                                w::BadgeTone::Warn
+                            } else {
+                                w::BadgeTone::Muted
+                            },
+                        )),
+                ),
+                cell(
+                    2,
+                    Border::new()
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .content(
                             TextBlock::new()
                                 .text(if open { "▴" } else { "▾" })
                                 .font_size(theme.label_size)
                                 .foreground(theme.subtle)
-                                .vertical_alignment(VerticalAlignment::Center)
-                                .into(),
+                                .vertical_alignment(VerticalAlignment::Center),
                         ),
-                    ]),
-            );
+                ),
+            ]);
+        let header_btn = Button::new()
+            .automation_name(tf!("配额组 {}", g.display))
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .horizontal_content_alignment(HorizontalAlignment::Stretch)
+            .on_click(ctx.callback(move |_| Msg::SetQuotaGroup(app_key.clone(), !open)))
+            .content(header);
         let mut inner: Vec<View> = vec![header_btn];
         if open {
             // A hairline between windows keeps rows with and without a bar
@@ -2752,12 +2826,7 @@ pub fn quota_page(
         list.push(w::card(theme, vstack(10.0, inner)));
     }
     if list.is_empty() {
-        list.push(
-            TextBlock::new()
-                .text(t!("暂无配额数据"))
-                .foreground(theme.subtle)
-                .into(),
-        );
+        list.push(w::card(theme, w::empty_state(theme, "暂无配额数据")));
     }
     // Cards animate individually — flatten header+cards so each is its own
     // spring block rather than one static list stack.
@@ -2777,54 +2846,68 @@ pub fn sources_page(
     };
     let mut list: Vec<View> = Vec::new();
     for h in list_src {
-        let state = h
-            .last_error
-            .as_ref()
-            .map(|e| tf!("⚠ {e}", e))
-            .unwrap_or_else(|| t!("正常").into());
         let err = h.last_error.is_some();
+        // The status column carries a compact word, not the whole message: a
+        // long error used to sit in an Auto column and squeeze the source name
+        // to zero. The message gets its own wrapping line in the left column.
+        let status = if err { t!("异常") } else { t!("正常") };
+        let mut rows: Vec<View> = vec![
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .children((
+                    SymbolIcon::new().symbol(Symbol::World),
+                    TextBlock::new()
+                        .text(app_display(&h.source).to_string())
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .vertical_alignment(VerticalAlignment::Center),
+                )),
+            TextBlock::new()
+                .text(tf!(
+                    "{} 文件 · 累计 {} 行 · 游标 {} · 上次 {}",
+                    h.files_seen,
+                    h.rows_ingested,
+                    h.cursors,
+                    fmt::ts_short(h.last_synced_at)
+                ))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        ];
+        if let Some(e) = &h.last_error {
+            rows.push(
+                TextBlock::new()
+                    .text(tf!("⚠ {e}", e))
+                    .font_size(theme.label_size)
+                    .foreground(theme.danger)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .into(),
+            );
+        }
         list.push(w::card(
             theme,
             Grid::new()
                 .columns([GridLength::STAR, GridLength::Auto])
+                .column_spacing(12.0)
                 .children([
                     cell(
                         0,
                         StackPanel::new()
                             .orientation(Orientation::Vertical)
                             .spacing(4.0)
-                            .children((
-                                StackPanel::new()
-                                    .orientation(Orientation::Horizontal)
-                                    .spacing(8.0)
-                                    .children((
-                                        SymbolIcon::new().symbol(Symbol::World),
-                                        TextBlock::new()
-                                            .text(app_display(&h.source).to_string())
-                                            .font_weight(FontWeight::SEMI_BOLD)
-                                            .vertical_alignment(VerticalAlignment::Center),
-                                    )),
-                                TextBlock::new()
-                                    .text(tf!(
-                                        "{} 文件 · 累计 {} 行 · 游标 {} · 上次 {}",
-                                        h.files_seen,
-                                        h.rows_ingested,
-                                        h.cursors,
-                                        fmt::ts_short(h.last_synced_at)
-                                    ))
-                                    .font_size(theme.label_size)
-                                    .foreground(theme.subtle),
-                            )),
+                            .keyed_children(keyed(rows)),
                     ),
                     cell(
                         1,
                         if err {
-                            w::badge(theme, state, w::BadgeTone::Danger)
+                            w::badge(theme, status.to_string(), w::BadgeTone::Danger)
                         } else {
                             TextBlock::new()
-                                .text(state)
+                                .text(status)
                                 .font_size(theme.label_size)
                                 .foreground(theme.ok)
+                                .vertical_alignment(VerticalAlignment::Center)
                                 .into()
                         },
                     ),
@@ -2832,12 +2915,7 @@ pub fn sources_page(
         ));
     }
     if list.is_empty() {
-        list.push(
-            TextBlock::new()
-                .text(t!("尚未扫描"))
-                .foreground(theme.subtle)
-                .into(),
-        );
+        list.push(w::card(theme, w::empty_state(theme, "尚未扫描")));
     }
     std::iter::once(header(theme, t!("数据源"), vec![]))
         .chain(list)
@@ -2982,35 +3060,39 @@ pub fn devices_page(
     let mut blocks: Vec<View> = vec![header(theme, t!("设备"), vec![sync_btn])];
 
     // This PC.
-    blocks.push(w::section_header(theme, Symbol::Home, t!("本机")));
-    blocks.push(w::card(
+    blocks.push(w::section(
         theme,
-        vstack(
-            6.0,
-            vec![
-                TextBlock::new()
-                    .text(crate::devices::local_label(&info.local_name))
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .into(),
-                subtle_text(
-                    theme,
-                    tf!(
-                        "设备 ID {}",
-                        info.local_id.chars().take(8).collect::<String>()
-                    ),
-                ),
-                subtle_text(
-                    theme,
-                    t!("在“设置 → 局域网共享”中开启后，其他设备即可与本机配对并查看本机用量。")
+        Symbol::Home,
+        t!("本机"),
+        vec![w::card(
+            theme,
+            vstack(
+                6.0,
+                vec![
+                    TextBlock::new()
+                        .text(crate::devices::local_label(&info.local_name))
+                        .font_weight(FontWeight::SEMI_BOLD)
                         .into(),
-                ),
-            ],
-        ),
+                    subtle_text(
+                        theme,
+                        tf!(
+                            "设备 ID {}",
+                            info.local_id.chars().take(8).collect::<String>()
+                        ),
+                    ),
+                    subtle_text(
+                        theme,
+                        t!("在“设置 → 局域网共享”中开启后，其他设备即可与本机配对并查看本机用量。")
+                            .into(),
+                    ),
+                ],
+            ),
+        )],
     ));
 
     // Paired devices.
-    blocks.push(w::section_header(theme, Symbol::Link, t!("已配对的设备")));
     let range_label = snap.map_or_else(String::new, |s| tr(s.vm.range.label()).to_string());
+    let mut paired: Vec<View> = Vec::new();
     if has_peers {
         for p in &info.peers {
             let span = snap.and_then(|s| {
@@ -3019,10 +3101,10 @@ pub fn devices_page(
                     .find(|d| d.device_id == p.device_id)
                     .map(|d| &d.span)
             });
-            blocks.push(paired_device_card(theme, p, span, &range_label, ctx));
+            paired.push(paired_device_card(theme, p, span, &range_label, ctx));
         }
     } else {
-        blocks.push(w::card(
+        paired.push(w::card(
             theme,
             subtle_text(
                 theme,
@@ -3032,16 +3114,15 @@ pub fn devices_page(
         ));
     }
     if let Some(e) = args.error {
-        blocks.push(warn_text(theme, crate::devices::message(e)));
+        // Inside a card: a bare paragraph between two sections read as part of
+        // whichever section happened to be above it.
+        paired.push(w::card(theme, warn_text(theme, crate::devices::message(e))));
     }
+    blocks.push(w::section(theme, Symbol::Link, t!("已配对的设备"), paired));
 
     // Possible double counting.
     if !info.warnings.is_empty() {
-        let mut rows: Vec<View> = vec![w::section_header(
-            theme,
-            Symbol::Important,
-            t!("可能重复计算"),
-        )];
+        let mut rows: Vec<View> = Vec::new();
         for wr in &info.warnings {
             rows.push(warn_text(
                 theme,
@@ -3054,12 +3135,16 @@ pub fn devices_page(
                 ),
             ));
         }
-        blocks.push(w::card(theme, vstack(8.0, rows)));
+        blocks.push(w::section(
+            theme,
+            Symbol::Important,
+            t!("可能重复计算"),
+            vec![w::card(theme, vstack(8.0, rows))],
+        ));
     }
 
     // Add device.
     let pair = args.pair;
-    blocks.push(w::section_header(theme, Symbol::Add, t!("添加设备")));
     let mut form: Vec<View> = vec![
         subtle_text(
             theme,
@@ -3101,7 +3186,12 @@ pub fn devices_page(
                 .into(),
         );
     }
-    blocks.push(w::card(theme, vstack(10.0, form)));
+    blocks.push(w::section(
+        theme,
+        Symbol::Add,
+        t!("添加设备"),
+        vec![w::card(theme, vstack(10.0, form))],
+    ));
 
     // Nearby (Bonjour).
     let find_btn: View = Button::new()
@@ -3112,14 +3202,6 @@ pub fn devices_page(
         } else {
             t!("查找设备")
         });
-    blocks.push(
-        Grid::new()
-            .columns([GridLength::STAR, GridLength::Auto])
-            .children([
-                cell(0, w::section_header(theme, Symbol::Globe, t!("附近"))),
-                cell(1, find_btn),
-            ]),
-    );
     let mut nearby: Vec<View> = Vec::new();
     for d in args.nearby {
         let mut left: Vec<View> = vec![
@@ -3165,10 +3247,17 @@ pub fn devices_page(
         theme,
         t!("没有列出？访客 Wi-Fi、VLAN 和客户端隔离会阻止发现——请改用地址添加设备，例如 192.168.1.20:4319。").into(),
     ));
-    blocks.push(w::card(theme, vstack(10.0, nearby)));
-    blocks.push(subtle_text(
+    nearby.push(card_rule(theme));
+    nearby.push(subtle_text(
         theme,
         t!("设备之间只共享按小时汇总的用量，从不共享提示词、会话、项目或路径。额度按账号计算，绝不跨设备相加。").into(),
+    ));
+    blocks.push(w::section_with(
+        theme,
+        Symbol::Globe,
+        t!("附近"),
+        vec![find_btn],
+        vec![w::card(theme, vstack(10.0, nearby))],
     ));
     blocks
 }
@@ -3405,11 +3494,12 @@ pub fn prices_page(
 
     // Search box (fed back its own text — see `Shell::price_query`) + the
     // dispute filter.
+    // Stretches with the row: a fixed 380 DIP box overflowed a narrow window
+    // (the checkbox beside it is Auto-sized).
     let search_box: View = TextBox::new()
         .text(search.query.to_string())
         .placeholder_text(t!("搜索模型，如 opus 4.6 或 gpt mini"))
         .on_text_changed(ctx.callback(Msg::PriceQuery))
-        .width(380.0)
         .into();
     let only_disputed: View = CheckBox::new()
         .is_checked(search.disputed)
@@ -3426,14 +3516,11 @@ pub fn prices_page(
         ),
         None => t!("仅本地种子，尚未联网同步").to_string(),
     };
-    let mut summary = if filtering {
+    let summary = if filtering {
         tf!("匹配 {} / {} 个模型 · {}", shown, total, sync)
     } else {
         tf!("{} 个模型 · {}", total, sync)
     };
-    if let Some(e) = refresh.error {
-        summary = format!("{summary} · {}", tf!("上次刷新失败：{}", e));
-    }
     let mut actions: Vec<View> = Vec::new();
     if refresh.active {
         actions.push(
@@ -3460,20 +3547,56 @@ pub fn prices_page(
             .on_click(ctx.callback(|_| Msg::RefreshPrices))
             .content(t!("刷新价目")),
     );
-    let controls: View = vstack(
-        8.0,
-        vec![
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(16.0)
-                .children((search_box, only_disputed)),
-            TextBlock::new()
-                .text(summary)
-                .font_size(theme.body_size)
-                .foreground(theme.subtle)
-                .into(),
-        ],
-    );
+    // Errors get their own wrapping line: appended to the one-line summary a
+    // long feed error was simply cut off at the card edge.
+    // One filter band under the title: the filters (search + dispute toggle)
+    // as one group on the left, the result summary right-aligned on the same
+    // centerline. The box used to stretch across the page with the checkbox
+    // pinned under 刷新价目, so the two halves read as unrelated blocks.
+    let summary: View = TextBlock::new()
+        .text(summary)
+        .font_size(theme.label_size)
+        .foreground(theme.subtle)
+        .text_wrapping(TextWrapping::Wrap)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into();
+    let controls: View = Grid::new()
+        .columns([GridLength::Auto, GridLength::Auto, GridLength::STAR])
+        .column_spacing(16.0)
+        .children((
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                // Wide enough for the placeholder, small enough to leave the
+                // summary its line on a 1000 DIP window.
+                .width(360.0)
+                .content(search_box),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(only_disputed),
+            Border::new()
+                .grid_column(2)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(summary),
+        ));
+    // Errors keep their own wrapping line: appended to the summary a long
+    // feed error was simply cut off.
+    let controls = match refresh.error {
+        Some(e) => vstack(
+            6.0,
+            vec![
+                controls,
+                TextBlock::new()
+                    .text(tf!("上次刷新失败：{}", e))
+                    .font_size(theme.label_size)
+                    .foreground(theme.danger)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .into(),
+            ],
+        ),
+        None => controls,
+    };
 
     let body: Vec<View> = if shown == 0 {
         vec![
@@ -3588,22 +3711,27 @@ fn setting_row(
             GridLength::Pixel(300.0 * font_scale(theme)),
             GridLength::STAR,
         ])
+        // Same gutter as `setting_row_wide` (which had 16 while this one had
+        // none) and the same label stack rhythm — two row builders in one card
+        // put their controls on two different left edges.
+        .column_spacing(16.0)
         .children([
             cell(
                 0,
                 StackPanel::new()
-                    .spacing(2.0)
+                    .spacing(3.0)
                     .vertical_alignment(VerticalAlignment::Center)
                     .keyed_children(keyed(left)),
             ),
-            cell(
-                1,
-                StackPanel::new()
-                    .orientation(Orientation::Horizontal)
-                    .horizontal_alignment(HorizontalAlignment::Left)
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .children([control]),
-            ),
+            Border::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .horizontal_alignment(HorizontalAlignment::Left)
+                        .children([control]),
+                ),
         ])
 }
 
@@ -3659,14 +3787,45 @@ fn size_control(theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
         .children([slider, readout])
 }
 
-/// Toggle whose On/Off captions follow the UI language — the control's own
-/// captions come from the OS locale, which left "开"/"关" next to English rows.
-fn switch(theme: &Theme, is_on: bool, toggled: Callback<bool>) -> View {
-    let caption = |text: &str| TextBlock::new().text(text).font_size(theme.body_size);
-    ToggleSwitch::new().is_on(is_on).on_toggled(toggled).slots([
-        SlotView::new(ToggleSwitchSlot::OnContent, caption(t!("开"))),
-        SlotView::new(ToggleSwitchSlot::OffContent, caption(t!("关"))),
-    ])
+/// Toggle whose On/Off caption follows the UI language — and sits *outside*
+/// the control. A ToggleSwitch with OnContent/OffContent slots measures
+/// ~150 DIP while it only draws ~64 (the hidden slot still counts toward the
+/// desired size), which overflowed its column and pinned the switch to the
+/// left edge instead of the right on every row.
+pub(crate) fn switch(theme: &Theme, is_on: bool, toggled: Callback<bool>) -> View {
+    // Caption suppressed and the track slot a Pixel column: the control's
+    // 开/关 slot measures ~154 DIP while it draws ~44 — WinUI `width()` pins
+    // the drawn track but not the desired size reported to the parent — so a
+    // StackPanel kept ~110 DIP of phantom space between track and caption and
+    // overflowed every fixed switch column (the caption landed past the card
+    // edge, the track pinned to the column's left). Pixel columns are honored
+    // in both measure and arrange, so the caption sits right after the track.
+    Grid::new()
+        .columns([GridLength::Pixel(44.0), GridLength::Auto])
+        .column_spacing(8.0)
+        .children((
+            ToggleSwitch::new()
+                .grid_column(0)
+                .is_on(is_on)
+                .on_toggled(toggled)
+                .width(44.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .slots([
+                    SlotView::new(
+                        ToggleSwitchSlot::OnContent,
+                        TextBlock::new().text("").font_size(theme.body_size),
+                    ),
+                    SlotView::new(
+                        ToggleSwitchSlot::OffContent,
+                        TextBlock::new().text("").font_size(theme.body_size),
+                    ),
+                ]),
+            TextBlock::new()
+                .grid_column(1)
+                .text(if is_on { t!("开") } else { t!("关") })
+                .font_size(theme.body_size)
+                .vertical_alignment(VerticalAlignment::Center),
+        ))
 }
 
 /// A settings row whose value column gets the full width (setting_row
@@ -3698,9 +3857,12 @@ fn setting_row_wide(
         .children([
             cell(
                 0,
+                // Centered like `setting_row`: the two builders sit in the same
+                // cards, and Top here made one card's labels jump against the
+                // next one's.
                 StackPanel::new()
                     .spacing(3.0)
-                    .vertical_alignment(VerticalAlignment::Top)
+                    .vertical_alignment(VerticalAlignment::Center)
                     .keyed_children(keyed(left)),
             ),
             Border::new()
@@ -4039,26 +4201,44 @@ pub fn update_banner(
             .on_click(ctx.callback(|_| Msg::DismissUpdateBanner))
             .content(SymbolIcon::new().symbol(Symbol::Cancel)),
     );
+    // A grid, not a horizontal stack: inside a stack the error text measured at
+    // its full width, so a long message pushed the update buttons out of the
+    // banner instead of trimming. The star column clips it with an ellipsis.
     let mut left: Vec<View> = vec![
-        SymbolIcon::new().symbol(Symbol::Download).into(),
-        TextBlock::new()
-            .text(tf!("发现新版本 {}", rel.tag))
-            .font_size(theme.body_size)
-            .font_weight(FontWeight::SEMI_BOLD)
+        Border::new()
+            .grid_column(0)
             .vertical_alignment(VerticalAlignment::Center)
-            .into(),
+            .content(SymbolIcon::new().symbol(Symbol::Download)),
+        Border::new()
+            .grid_column(1)
+            .vertical_alignment(VerticalAlignment::Center)
+            .content(
+                TextBlock::new()
+                    .text(tf!("发现新版本 {}", rel.tag))
+                    .font_size(theme.body_size)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+            ),
     ];
     if let Some(e) = error.filter(|_| matches!(state, UpdateState::Available(_))) {
         left.push(
-            TextBlock::new()
-                .text(tf!("更新失败：{}", short_error(e)))
-                .font_size(theme.label_size)
-                .foreground(theme.danger)
-                .text_trimming(TextTrimming::CharacterEllipsis)
+            Border::new()
+                .grid_column(2)
                 .vertical_alignment(VerticalAlignment::Center)
-                .into(),
+                .content(
+                    TextBlock::new()
+                        .text(tf!("更新失败：{}", short_error(e)))
+                        .font_size(theme.label_size)
+                        .foreground(theme.danger)
+                        .text_trimming(TextTrimming::CharacterEllipsis)
+                        .vertical_alignment(VerticalAlignment::Center),
+                ),
         );
     }
+    let left_grid = Grid::new()
+        .columns([GridLength::Auto, GridLength::Auto, GridLength::STAR])
+        .column_spacing(8.0)
+        .keyed_children(keyed(left));
     let base = theme
         .page_bg
         .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
@@ -4081,11 +4261,9 @@ pub fn update_banner(
                 .children([
                     cell(
                         0,
-                        StackPanel::new()
-                            .orientation(Orientation::Horizontal)
-                            .spacing(8.0)
+                        Border::new()
                             .vertical_alignment(VerticalAlignment::Center)
-                            .keyed_children(keyed(left)),
+                            .content(left_grid),
                     ),
                     cell(
                         1,
@@ -4308,36 +4486,58 @@ pub fn settings_page(
             TextBlock::new()
                 .text(tr(error))
                 .font_size(theme.body_size)
+                .foreground(theme.danger)
+                .text_wrapping(TextWrapping::Wrap)
                 .into(),
         ));
     }
 
     vec![
         header(theme, tr("设置"), vec![]),
-        w::section_header(theme, Symbol::FontColor, tr("外观")),
-        w::card(
+        w::section(
             theme,
-            vstack(theme.gap, vec![theme_row, accent_row, font_row, scale_row]),
+            Symbol::FontColor,
+            tr("外观"),
+            vec![w::card(
+                theme,
+                vstack(theme.gap, vec![theme_row, accent_row, font_row, scale_row]),
+            )],
         ),
-        w::section_header(theme, Symbol::Setting, tr("通用")),
-        w::card(
+        w::section(
             theme,
-            vstack(
-                theme.gap,
-                vec![lang_row, currency_row, fx_row, autostart_row, close_row],
-            ),
+            Symbol::Setting,
+            tr("通用"),
+            vec![w::card(
+                theme,
+                vstack(
+                    theme.gap,
+                    vec![lang_row, currency_row, fx_row, autostart_row, close_row],
+                ),
+            )],
         ),
-        w::section_header(theme, Symbol::Setting, tr("外部协同")),
-        w::card(theme, vstack(theme.gap, interface_rows)),
-        w::section_header(theme, Symbol::Permissions, tr("局域网共享")),
-        w::card(theme, vstack(theme.gap, share_rows)),
-        w::section_header(theme, Symbol::Sync, tr("更新")),
-        w::card(
+        w::section(
             theme,
-            vstack(
-                theme.gap,
-                vec![version_row, channel_row, auto_row, status_row],
-            ),
+            Symbol::Setting,
+            tr("外部协同"),
+            vec![w::card(theme, vstack(theme.gap, interface_rows))],
+        ),
+        w::section(
+            theme,
+            Symbol::Permissions,
+            tr("局域网共享"),
+            vec![w::card(theme, vstack(theme.gap, share_rows))],
+        ),
+        w::section(
+            theme,
+            Symbol::Sync,
+            tr("更新"),
+            vec![w::card(
+                theme,
+                vstack(
+                    theme.gap,
+                    vec![version_row, channel_row, auto_row, status_row],
+                ),
+            )],
         ),
     ]
 }

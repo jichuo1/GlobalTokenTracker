@@ -7,8 +7,11 @@ default-members = ["crates/core", "crates/cli", "crates/ffi"]
 
 # Vendored windows-canvas with a shared GPU device for demand canvases —
 # see vendor/windows-canvas/PATCH.md (5 chart devices → 1: -168 threads, -75MB).
+# Vendored windows-reactor so DropDownButton menus open downward —
+# see vendor/windows-reactor/PATCH.md.
 [patch.crates-io]
 windows-canvas = { path = "vendor/windows-canvas" }
+windows-reactor = { path = "vendor/windows-reactor" }
 
 [workspace.package]
 version = "0.8.6"

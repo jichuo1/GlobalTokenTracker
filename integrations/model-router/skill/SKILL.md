@@ -7,6 +7,12 @@ description: Coordinate bounded tasks and visual workflows through GTT's model r
 
 通过 `gtt-router` MCP 提前获取主线需要的辅助信息。Codex 保留任务定义、源码核对、最终决策、修改、测试和集成的责任。外部报告和交叉检查是候选证据。
 
+## 正式受理入口（0.5.0）
+
+所有新计划/提交使用 `router_dispatch`，`request.kind` 为 `task`、`group` 或 `workflow`；分别携带 `task`、`request` 或 `definition` / `saved_workflow_id`。`action="submit"` 必须给稳定 `request_id`，拿到 `dispatch_id` 后以它或原 request_id 查询 `status`、`collect`、`cancel`。网络返回不明确时先查原身份，不换 ID 重放。`report` 带 worker、工作流 node_id 与 offset，无损读取大报告并核对 sha256。旧 router_plan/submit、router_group_plan/submit、router_workflow_plan/submit 已从工具发现中退役，仅为缓存客户端兼容转发；下文这些旧名指对应动作，新调用全部换成统一入口。GTT CLI 的 `scheduling` 命令也复用这一协议，详见 [统一接入](references/dispatch-intake.md)。
+
+外协或调度开关关闭时停止新派发；认证的本机管理入口仍允许 status/collect/report/list/cancel，以回收已发生的用量和取消存量。统一入口不自动启用开关、更新过期池、恢复未知付费请求或增大预算。普通任务与研究组保留真实监工要求，工作流按保存的 luna_supervision 执行。
+
 ## 分配与 token 效率
 
 普通任务默认 `timeout_mode=activity`，原 `deadline_s` 是首次响应期待窗。真实正文、推理增量、工具阶段或原生状态变化可继续执行；随后按 `idle_s + stall_grace_s` 判断停滞，总执行仍受默认3600秒的 `hard_deadline_s` 限制。用户给定硬截止时用 `timeout_mode=hard`。进程存活、重复心跳、空帧和轮询时间戳不能续期。当前ZCode RPC仅返回最终结果，无法可靠观察思考进度；按材料规模配置 `ttft_s`，不要伪造活动。组总截止和token预算仍是硬边界。

@@ -350,8 +350,8 @@ pub enum Msg {
     /// Pointer pressed outside an open picker (click-away backdrop / a
     /// filter-strip label) — light-dismiss.
     CloseMenu,
-    /// Quota group header clicked — fold/unfold the app's quota windows.
-    ToggleQuotaGroup(String),
+    /// Quota group expanded/collapsed (app key, new expanded state).
+    SetQuotaGroup(String, bool),
     /// Width-ruler observer: overview grids should use this many columns.
     SetOverviewCols(usize),
     /// Table-card ruler: virtualized rows must span this many DIPs.
@@ -1373,8 +1373,13 @@ impl Component for Shell {
                     Some(kind)
                 };
             }
-            Msg::ToggleQuotaGroup(app) => {
-                if !self.quota_collapsed.remove(&app) {
+            Msg::SetQuotaGroup(app, expanded) => {
+                // The Expander reports the state it moved to; mirroring it
+                // verbatim keeps the control and the store from disagreeing
+                // when a click lands mid-animation.
+                if expanded {
+                    self.quota_collapsed.remove(&app);
+                } else {
                     self.quota_collapsed.insert(app);
                 }
             }
@@ -2622,12 +2627,13 @@ impl Shell {
         }
     }
 
-    /// Top-level block spacing — Overview/Settings use the section gap,
-    /// the list pages pack tighter (10 DIP, their historical rhythm).
+    /// Top-level block spacing — card-composed pages use the section gap, the
+    /// list pages the base gap. Both come from the theme so a skin or a font
+    /// change rescales the rhythm (the list pages used a hardcoded 10).
     fn page_gap(&self, page: Page) -> f64 {
         match page {
             Page::Overview | Page::Speed | Page::Settings | Page::Devices => self.theme.section_gap,
-            _ => 10.0,
+            _ => self.theme.gap,
         }
     }
 
@@ -3224,5 +3230,27 @@ fn main() {
     if let Err(e) = App::run_component::<Shell>(()) {
         eprintln!("fatal: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    const MANIFEST: &str = include_str!("../app.manifest");
+
+    /// Third-party in-process input methods (WeChat IME) only show their
+    /// candidate window once the process declares Windows 10 support.
+    #[test]
+    fn manifest_declares_windows_10_and_per_monitor_v2() {
+        assert!(MANIFEST.contains("{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"));
+        assert!(MANIFEST.contains("PerMonitorV2"));
+    }
+
+    /// windows-reactor treats any RT_MANIFEST containing this string as a
+    /// self-contained deployment and refuses to start without the runtime
+    /// DLLs beside the exe — even when the string is only in a comment.
+    #[test]
+    fn manifest_never_carries_the_self_contained_marker() {
+        let marker = ["windows", "reactor", "self", "contained"].join("-");
+        assert!(!MANIFEST.contains(&marker));
     }
 }

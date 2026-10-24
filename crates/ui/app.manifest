@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+  Application manifest, embedded by build.rs. The same declarations Microsoft's
+  unpackaged WinUI 3 template ships. Without any manifest Windows ran the UI in
+  OS-compatibility mode, and third-party TSF input methods that load into the
+  process (WeChat IME / WeType) never showed their candidate window; with this
+  manifest they do (docs/REVIEW.md S160). Keep `supportedOS` — it is the part
+  that changes how in-process TIPs see the system.
+
+  Never put windows-reactor's self-contained marker string anywhere in this
+  file, not even in a comment: the framework substring-searches the whole
+  manifest resource for it and then refuses to start unless the Windows App
+  Runtime DLLs sit next to the exe. Without it, the runtime framework package
+  is bootstrapped as before.
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="GlobalTokenTracker.UI"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
+                        processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <maxversiontested Id="10.0.26100.0"/>
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <!-- Same awareness the framework already sets at runtime
+           (SetProcessDpiAwarenessContext PER_MONITOR_AWARE_V2). -->
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

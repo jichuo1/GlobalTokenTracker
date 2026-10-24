@@ -110,10 +110,11 @@ codex mcp add gtt-router -- "<Python绝对路径>" "<仓库绝对路径>/router.
 
 `routing_strategy` 默认 `auto`；可按目的选择 `quality`、`speed`、`reliability` 或 `token_efficiency`。这是合格路线之间的排名偏好，不绕过质量、额度和能力门槛。低 token 偏好只采用足够同类实际用量，未知用量不当作低消耗，也不等于低费用。
 
-以下 JSON 是 `router_plan` 和 `router_submit` 的完整参数；保存为本机私有参数文件后可使用本地 API：
+以下 JSON 是正式 GTT 调度 CLI 的请求文件；普通任务、研究组和工作流都经同一个 `router_dispatch` 受理层：
 
 ```json
 {
+  "kind": "task",
   "task": {
     "kind": "research",
     "prompt": "核对公开文档中的取消与超时语义，列出证据、分歧和仍需确认的问题。",
@@ -127,15 +128,15 @@ codex mcp add gtt-router -- "<Python绝对路径>" "<仓库绝对路径>/router.
 
 ```powershell
 # 只查看计划，不生成模型报告
-python .\router.py call --method router_plan --params-file "<私有参数文件绝对路径>"
+globaltokentracker-cli scheduling plan --request-file "<私有请求文件绝对路径>"
 
 # 实际提交：会调用配置的模型，并可能产生费用
-python .\router.py call --method router_submit --params-file "<私有参数文件绝对路径>"
+globaltokentracker-cli scheduling submit --request-file "<私有请求文件绝对路径>" --request-id "example:cancellation:1"
 ```
 
 `fanout` 可为 1–4；大于 1 且未指定 `verify` 时，默认追加交叉检查。不要机械复制检索方向，多份报告引用同一网页也不算独立证据。
 
-提交返回 `job_id` 后继续主线。通过 `router_status` 查询紧凑进度，通过 `router_collect` 回收报告，并保留返回的 `next_cursor`。回收每次最多等待 5 秒，`max_chars` 限制本次回收量，不是模型生成上限。普通作业的 `succeeded` 表示报告生成完成；Codex 核对后再通过 `router_feedback` 记录是否采纳。
+提交返回 `dispatch_id` 和实际 `job_id` 后继续主线。用 `router_dispatch(action="status"|"collect", dispatch_id=...)` 查询、回收，并保留 `next_cursor`；同一请求 ID 在完成或重启后仍指向原任务。大报告通过 `action="report"` 按 offset 无损读取。普通作业的 `succeeded` 表示报告生成完成；Codex 核对后再通过 `router_feedback` 记录是否采纳。完整协议及迁移说明见[统一调度接入](docs/dispatch-intake.md)。
 
 ## 分组研究
 
@@ -147,6 +148,7 @@ python .\router.py call --method router_submit --params-file "<私有参数文�
 
 ```json
 {
+  "kind": "group",
   "request": {
     "topic": "研究公开 API 的长任务取消、恢复与幂等方案",
     "context": "交付官方来源、候选方案、反例和验证步骤。记录未解决问题，由 Codex 最终核对。",
@@ -161,10 +163,10 @@ python .\router.py call --method router_submit --params-file "<私有参数文�
 
 ```powershell
 # 编组计划；不生成模型报告
-python .\router.py call --method router_group_plan --params-file "<私有组参数文件绝对路径>"
+globaltokentracker-cli scheduling plan --request-file "<私有组请求文件绝对路径>"
 
 # 启动研究；会调用配置的模型，并可能产生费用
-python .\router.py call --method router_group_submit --params-file "<私有组参数文件绝对路径>"
+globaltokentracker-cli scheduling submit --request-file "<私有组请求文件绝对路径>" --request-id "example:group:1"
 ```
 
 研究流程为：
@@ -231,14 +233,14 @@ python .\router.py call --method router_group_submit --params-file "<私有组�
 
 ## MCP 与本地 API
 
-当前服务提供 21 个工具，MCP 与 `router.py call` 共用同一套方法和状态：
+MCP、GTT 原生 CLI、Windows 和 macOS 界面共用同一受理层与执行状态。新客户端只发现一个计划/提交入口；旧客户端的六个 plan/submit 名称保留兼容转发，不再独立派发：
 
 | 普通工具 | 用途 |
 |---|---|
 | `router_inventory` | 紧凑模型目录、来源健康与脱敏额度信号 |
 | `router_recheck` | 认证/额度恢复后，对指定路线做有界生成复检 |
 | `router_preferences` | 创建、更新、读取、清除本轮来源/模型偏好及并发目标 |
-| `router_plan` / `router_submit` | 查看路由计划 / 异步提交普通任务 |
+| `router_dispatch` | 统一 plan / submit / status / collect / report / cancel / list；task、group、workflow 共用持久请求身份 |
 | `router_status` / `router_collect` / `router_cancel` | 进度 / 分页回收 / 取消本次作业 |
 | `router_feedback` | 独立核对后记录报告是否采纳 |
 | `router_sync_codex_agents` | 登记真实子代理状态及覆盖键的短期租约 |
@@ -247,7 +249,7 @@ python .\router.py call --method router_group_submit --params-file "<私有组�
 
 | 研究组工具 | 用途 |
 |---|---|
-| `router_group_plan` / `router_group_submit` | 查看编组计划 / 异步启动研究 |
+| `router_dispatch` 的 `request.kind="group"` | 查看编组计划 / 异步启动研究 |
 | `router_group_status` / `router_group_collect` | 紧凑状态与待确认动作 / 分页回收报告 |
 | `router_group_cancel` | 取消本组，仍保留迟到的明确用量 |
 | `router_group_extend` | 批准目标总预算，最高 1 亿 |

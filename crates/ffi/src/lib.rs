@@ -763,7 +763,8 @@ pub unsafe extern "C" fn gtt_scheduler(req_json: *const c_char) -> *mut c_char {
         }
         if !matches!(
             method,
-            "router_collect"
+            "router_dispatch"
+                | "router_collect"
                 | "router_scheduling"
                 | "router_workflow_plan"
                 | "router_workflow_submit"

@@ -248,10 +248,52 @@ pub fn speed_page(
                 })
                 .collect::<Vec<_>>(),
         );
-    blocks.push(w::card(theme,vstack(10.0,vec![groups,metrics,
-        TextBlock::new().text(t!("按有效计时加权；缺少计时的记录不参与速度排名。请求数为筛选范围内的总请求数。")).font_size(theme.label_size).foreground(theme.subtle).text_wrapping(TextWrapping::Wrap).into(),
-        TextBlock::new().text(t!("每页 25 项；≈ 表示包含时间戳估算，未报告的分项显示 —。")).font_size(theme.label_size).foreground(theme.subtle).text_wrapping(TextWrapping::Wrap).into(),
-    ])));
+    // Grouping and metric switchers on one row with a divider between them,
+    // the two notes as one caption under it. Stacked, they filled a third of
+    // a full-width card and left the rest of it empty.
+    let switchers = Grid::new()
+        .columns([
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::STAR,
+        ])
+        .column_spacing(16.0)
+        .children((
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(groups),
+            Border::new()
+                .grid_column(1)
+                .width(1.0)
+                .height(24.0)
+                .background(theme.divider)
+                .vertical_alignment(VerticalAlignment::Center),
+            Border::new()
+                .grid_column(2)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(metrics),
+        ));
+    let notes = format!(
+        "{} {}",
+        t!("按有效计时加权；缺少计时的记录不参与速度排名。请求数为筛选范围内的总请求数。"),
+        t!("每页 25 项；≈ 表示包含时间戳估算，未报告的分项显示 —。")
+    );
+    blocks.push(w::card(
+        theme,
+        vstack(
+            6.0,
+            vec![
+                switchers,
+                TextBlock::new()
+                    .text(notes)
+                    .font_size(theme.label_size)
+                    .foreground(theme.subtle)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .into(),
+            ],
+        ),
+    ));
     let peak = ranking
         .first()
         .and_then(|r| args.metric.value(r))
@@ -260,25 +302,46 @@ pub fn speed_page(
     let page = args.page.min(ranking.len().saturating_sub(1) / 25);
     let start = page * 25;
     if !ranking.is_empty() {
-        blocks.push(header(
-            theme,
-            &tf!(
-                "第 {}–{} 项 / 共 {} 项",
-                start + 1,
-                (start + 25).min(ranking.len()),
-                ranking.len()
-            ),
-            vec![
-                Button::new()
-                    .is_enabled(page > 0)
-                    .on_click(ctx.callback(move |_| Msg::SpeedPage(page.saturating_sub(1))))
-                    .content(t!("上一页")),
-                Button::new()
-                    .is_enabled(start + 25 < ranking.len())
-                    .on_click(ctx.callback(move |_| Msg::SpeedPage(page + 1)))
-                    .content(t!("下一页")),
-            ],
-        ));
+        // A range caption, not a page heading: the 22pt `header` used here
+        // read as a second page title in the middle of the list.
+        blocks.push(
+            Grid::new()
+                .columns([GridLength::STAR, GridLength::Auto])
+                .column_spacing(12.0)
+                .min_height(36.0)
+                .children((
+                    TextBlock::new()
+                        .text(tf!(
+                            "第 {}–{} 项 / 共 {} 项",
+                            start + 1,
+                            (start + 25).min(ranking.len()),
+                            ranking.len()
+                        ))
+                        .font_size(theme.body_size)
+                        .foreground(theme.subtle)
+                        .vertical_alignment(VerticalAlignment::Center),
+                    Border::new()
+                        .grid_column(1)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .content(
+                            StackPanel::new()
+                                .orientation(Orientation::Horizontal)
+                                .spacing(8.0)
+                                .children((
+                                    Button::new()
+                                        .is_enabled(page > 0)
+                                        .on_click(ctx.callback(move |_| {
+                                            Msg::SpeedPage(page.saturating_sub(1))
+                                        }))
+                                        .content(t!("上一页")),
+                                    Button::new()
+                                        .is_enabled(start + 25 < ranking.len())
+                                        .on_click(ctx.callback(move |_| Msg::SpeedPage(page + 1)))
+                                        .content(t!("下一页")),
+                                )),
+                        ),
+                )),
+        );
     }
     let mut items = Vec::new();
     for (index, r) in ranking.iter().enumerate().skip(start).take(25) {
@@ -380,11 +443,7 @@ pub fn speed_page(
     if items.is_empty() {
         items.push(w::card(
             theme,
-            TextBlock::new()
-                .text(t!("当前筛选下没有可用于此项排名的计时数据。"))
-                .foreground(theme.subtle)
-                .font_size(theme.body_size)
-                .into(),
+            w::empty_state(theme, "当前筛选下没有可用于此项排名的计时数据。"),
         ));
     }
     blocks.push(vstack(theme.gap, items));

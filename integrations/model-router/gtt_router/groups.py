@@ -168,11 +168,15 @@ class ResearchGroups:
                 "warnings": ["initial_slice_estimate_exceeds_record_budget"] if req.slice_mode == "adaptive" and len(req.context) > req.slice_target_chars * req.max_slices else [],
                 "note": "Routing is advisory; native model/context/transport limits still apply"}
 
-    def submit(self, request):
+    def submit(self, request, *, _job_id=None, _cancellation_event=None):
         req = GroupRequest.parse(request)
+        if _cancellation_event is not None and _cancellation_event.is_set():
+            raise ValueError("workflow_cancelled")
         self.service.require_dispatch(req.workflow_id)
         self.service.ensure_catalog()
         with self.service.capacity, self.lock:
+            if _cancellation_event is not None and _cancellation_event.is_set():
+                raise ValueError("workflow_cancelled")
             if self.stopping or self.service.stopping:
                 raise ValueError("Coordinator is stopping")
             active = [j for j in self.jobs.values() if j.state in {"queued", "running", "cancelling", "needs_codex"}]
@@ -186,6 +190,10 @@ class ResearchGroups:
             for old in completed[:-int(self.service.limits.get("max_retained_groups",32))]:
                 self.jobs.pop(old.id,None)
             job = GroupJob(req)
+            if _job_id is not None:
+                job.id = _job_id
+            if _cancellation_event is not None:
+                job.cancel = _cancellation_event
             covered = self.service._covered(job.task)
             self.jobs[job.id] = job
             if covered:

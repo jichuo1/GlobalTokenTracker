@@ -132,6 +132,8 @@ class RouterService:
         self.groups = ResearchGroups(self)
         from .coordination import Coordination
         self.coordination = Coordination(self)
+        from .dispatch import Dispatch
+        self.dispatcher = Dispatch(self)
         self.call_profile()
         self.applied_coordinator_threads = int(self.limits.get("max_active_jobs", 4))
         # Executor threads are lazy. Only the configured number of dispatch
@@ -463,7 +465,7 @@ class RouterService:
             self.coordination.on_save(job)
             job.changed.notify_all()
 
-    def submit(self, data, *, _supervision_required=True, _cancellation_event=None):
+    def submit(self, data, *, _supervision_required=True, _cancellation_event=None, _job_id=None):
         task = self.parse_task(data)
         task._cancellation_event = _cancellation_event
         task._workflow_supervision_opt_out = not _supervision_required
@@ -493,6 +495,8 @@ class RouterService:
             if active >= self.limits.get("max_queued_jobs", 16):
                 raise ValueError("Job queue is full")
             job = Job(task)
+            if _job_id is not None:
+                job.id = _job_id
             self.jobs[job.id] = job
         self._save(job)
         self.pending_jobs.put((-task.priority, next(self.sequence), job))
