@@ -207,6 +207,8 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 
 “调度”页提供来源状态、开关与生成检测、限时定向模型池，以及带职责模板、主备路线和可选 Luna 的拖拽工作流。调用上限与兼容选项可通过七种配置档调整。新接入需要配套协调器 0.5.0 或更新版（`dispatch_v1`）；GUI、FFI、MCP 与原生 CLI 共用统一受理和持久请求身份。CLI 使用 `scheduling plan|submit|status|collect|report|cancel|list`，从请求文件承接普通任务、研究组或已保存工作流。详见[统一调度接入](integrations/model-router/docs/dispatch-intake.md)与[可视调度说明](integrations/model-router/docs/visual-scheduling.md)。
 
+0.6.0 的[操作员与回报拓扑](integrations/model-router/docs/operator-workflows.md)增加真实 Codex 母节点、高速操作员、审阅者，以及异色任务/回报线和双向快捷连线。运行时显式授权工作区与精确文件清单，Codex 通过 `scheduling topology|coordinate|events` 提供完整拓扑分片、修正确认与验收。该能力要求协调器声明 `operator_workflow_v1`，不在旧服务上执行新图。
+
 GUI 开箱即用（Windows：开始菜单 → GlobalTokenTracker；macOS：“应用程序”或菜单栏图标）。Windows 安装包同时附带 CLI（安装时勾选"加入用户 PATH"后可直接调用）；macOS 的 DMG 只含应用，CLI 需从源码构建（见[构建项目](#构建项目)）：
 
 「设置 → 外部协同 → 外部协同接口」可同时关闭协同观察与新模型调度。已经发出的请求允许完成并正常计量，排队、重试与后台恢复探测不再发出新请求。若使用配套模型调度器，请同时更新调度器与 Skill；普通任务与研究组默认要求真实 Luna 监工；可视工作流和手动生成检测可按需关闭。完整安装包包含 GUI、CLI 和安装器，模型调度器单独部署。

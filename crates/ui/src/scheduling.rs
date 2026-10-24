@@ -1,7 +1,9 @@
 //! Native dispatch page and demand-rendered Direct2D workflow editor.
 
 use crate::{Msg, Shell, theme::Theme, widgets as w};
-use globaltokentracker_core::scheduler::{self as model, Route, Settings, Snapshot, Workflow};
+use globaltokentracker_core::scheduler::{
+    self as model, EdgeKind, Route, Settings, Snapshot, Workflow,
+};
 use serde_json::{Value, json};
 use windows_reactor::*;
 
@@ -29,6 +31,9 @@ const M_PAN_ON: &str = "平移工具";
 const M_PAN_OFF: &str = "退出平移工具";
 const M_MODE_CONNECT: &str = "切换到连线模式";
 const M_MODE_MOVE: &str = "切换到移动模式";
+const M_LINK_TASK: &str = "任务线：分发与依赖";
+const M_LINK_REPORT: &str = "回报线：进度与审阅";
+const M_LINK_BOTH: &str = "双向：任务与回报";
 const M_RUN_SHOW: &str = "显示输入与结果";
 const M_RUN_HIDE: &str = "隐藏输入与结果";
 
@@ -66,6 +71,7 @@ pub enum Action {
     Name(String),
     Budget(String),
     Parallel(String),
+    MaxRounds(String),
     Supervision(bool),
     AddMaster,
     DisconnectNode,
@@ -86,6 +92,7 @@ pub enum Action {
     ToggleRun,
     TogglePan,
     ToggleConnectMode,
+    LinkMode(LinkMode),
     CheckNode,
     PoolNode,
     ConnectFromNode,
@@ -111,6 +118,8 @@ pub enum Action {
     Palette(i32),
     WorkflowId(String),
     Input(String),
+    ExecutionRoot(String),
+    WritablePaths(String),
     Run,
     Poll(String),
     Cancel,
@@ -121,8 +130,44 @@ pub enum Action {
 enum Drag {
     Model(usize),
     Node(usize, f64, f64),
-    Edge(usize),
+    Edge(usize, LinkMode),
     Pan(f64, f64),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkMode {
+    #[default]
+    Task,
+    Report,
+    Bidirectional,
+}
+
+impl LinkMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Task => "任务线",
+            Self::Report => "回报线",
+            Self::Bidirectional => "双向连线",
+        }
+    }
+
+    fn can_connect(self, workflow: &Workflow, from: usize, to: usize) -> Result<(), String> {
+        match self {
+            Self::Task => workflow.can_connect_kind(from, to, EdgeKind::Task),
+            Self::Report => workflow.can_connect_kind(from, to, EdgeKind::Report),
+            Self::Bidirectional => workflow.can_connect_bidirectional(from, to),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn connect(self, workflow: &mut Workflow, from: usize, to: usize) -> Result<(), String> {
+        match self {
+            Self::Task => workflow.connect_kind(from, to, EdgeKind::Task),
+            Self::Report => workflow.connect_kind(from, to, EdgeKind::Report),
+            Self::Bidirectional => workflow.connect_bidirectional(from, to),
+        }
+        .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Default)]
@@ -178,6 +223,8 @@ pub struct State {
     palette: usize,
     workflow_id: String,
     input: String,
+    execution_root: String,
+    writable_paths: String,
     run_id: String,
     detail: Option<Value>,
     report_detail: Option<Value>,
@@ -207,6 +254,7 @@ pub struct State {
     /// from anywhere on a node draws an edge. One gesture per mode — the old
     /// 20 DIP port strip beside the move area made each misfire as the other.
     connect_mode: bool,
+    link_mode: LinkMode,
     /// Connectivity check started from the node menu: (route id, node title).
     pending_check: Option<(String, String)>,
     /// Result of that check, shown as a closable bar above the canvas.
@@ -241,6 +289,8 @@ impl Default for State {
             palette: 0,
             workflow_id: String::new(),
             input: String::new(),
+            execution_root: String::new(),
+            writable_paths: String::new(),
             run_id: String::new(),
             detail: None,
             report_detail: None,
@@ -264,6 +314,7 @@ impl Default for State {
             show_run: false,
             pan_tool: false,
             connect_mode: false,
+            link_mode: LinkMode::Task,
             pending_check: None,
             check_feedback: None,
             last_blank_press: None,
@@ -297,9 +348,12 @@ impl State {
         });
     }
     fn active_run(&self) -> bool {
-        self.detail
-            .as_ref()
-            .is_some_and(|d| matches!(d["state"].as_str(), Some("running" | "cancelling")))
+        self.detail.as_ref().is_some_and(|d| {
+            matches!(
+                d["state"].as_str(),
+                Some("running" | "cancelling" | "awaiting_codex")
+            )
+        })
     }
     fn run_disabled_reason(&self) -> Option<&'static str> {
         if !self.loaded {
@@ -317,9 +371,14 @@ impl State {
         if self.dirty {
             return Some("请先保存修改，再运行工作流。");
         }
+        if w.nodes.iter().any(|n| n.node_type == "operator")
+            && execution_grant(&self.execution_root, &self.writable_paths).is_err()
+        {
+            return Some("操作员需要本次工作区根目录和精确可写文件清单，请在输入与结果中填写。");
+        }
         if w.nodes
             .iter()
-            .any(|n| n.node_type == "model" && n.route_id.is_empty())
+            .any(|n| n.is_model_backed() && n.route_id.is_empty())
         {
             return Some("请先为模型节点选择模型，或从模型库拖入节点框。");
         }
@@ -403,6 +462,9 @@ impl State {
             M_ZOOM_RESET => Action::Zoom(1.0 - self.zoom),
             M_PAN_ON | M_PAN_OFF => Action::TogglePan,
             M_MODE_CONNECT | M_MODE_MOVE => Action::ToggleConnectMode,
+            M_LINK_TASK => Action::LinkMode(LinkMode::Task),
+            M_LINK_REPORT => Action::LinkMode(LinkMode::Report),
+            M_LINK_BOTH => Action::LinkMode(LinkMode::Bidirectional),
             M_RUN_SHOW | M_RUN_HIDE => Action::ToggleRun,
             _ => Action::AddTemplate(self.templates.iter().position(|t| t.title == label)?),
         })
@@ -416,6 +478,12 @@ impl State {
     fn toggle_connect_mode(&mut self) {
         self.connect_mode = !self.connect_mode;
         // The pan tool would swallow every press and hide the new mode.
+        self.pan_tool = false;
+        self.drag.cancel();
+    }
+    fn set_link_mode(&mut self, mode: LinkMode) {
+        self.link_mode = mode;
+        self.connect_mode = true;
         self.pan_tool = false;
         self.drag.cancel();
     }
@@ -527,11 +595,12 @@ impl State {
             // mode instead of silently re-enabling drags that move the view.
             Action::TogglePan => { self.pan_tool = !self.pan_tool; if self.pan_tool { self.connect_mode = false; } self.drag.cancel(); },
             Action::ToggleConnectMode => self.toggle_connect_mode(),
+            Action::LinkMode(mode) => self.set_link_mode(mode),
             Action::CheckNode => {
                 let target = self
                     .node
                     .and_then(|i| self.workflow().and_then(|w| w.nodes.get(i)))
-                    .filter(|n| n.node_type == "model" && !n.route_id.is_empty())
+                    .filter(|n| n.is_model_backed() && !n.route_id.is_empty())
                     .map(|n| (n.route_id.clone(), n.title.clone()));
                 if let Some((route, title)) = target {
                     self.check_feedback = None;
@@ -543,7 +612,7 @@ impl State {
                 let route = self
                     .node
                     .and_then(|i| self.workflow().and_then(|w| w.nodes.get(i)))
-                    .filter(|n| n.node_type == "model" && !n.route_id.is_empty())
+                    .filter(|n| n.is_model_backed() && !n.route_id.is_empty())
                     .map(|n| n.route_id.clone());
                 if let Some(route) = route {
                     self.add_pool(route);
@@ -553,7 +622,7 @@ impl State {
             Action::DismissCheck => self.check_feedback = None,
             Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
             Action::CloseInspector => {self.show_params=false;self.show_node_details=false;},
-            Action::AddFallback(id) => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)) && n.node_type=="model" && id!=n.route_id && !n.fallback_routes.contains(&id) && n.fallback_routes.len()<8 {n.fallback_routes.push(id);self.dirty=true;}}
+            Action::AddFallback(id) => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)) && n.is_model_backed() && id!=n.route_id && !n.fallback_routes.contains(&id) && n.fallback_routes.len()<8 {n.fallback_routes.push(id);self.dirty=true;}}
             Action::ClearFallback => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)){n.fallback_routes.clear();self.dirty=true;}}
             Action::Acknowledge(v) => self.acknowledge=v,
             Action::Collect(id) => self.request("router_collect",json!({"job_id":id,"max_chars":12000}),ctx),
@@ -647,7 +716,7 @@ impl State {
                         }
                         self.notice = value["state"].as_str().unwrap_or("已返回").into();
                         let active =
-                            matches!(value["state"].as_str(), Some("running" | "cancelling"));
+                            matches!(value["state"].as_str(), Some("running" | "cancelling" | "awaiting_codex"));
                         self.detail_text = bounded_pretty(&value);
                         self.detail = Some(value);
                         if active && !self.run_id.is_empty() {
@@ -713,6 +782,12 @@ impl State {
             Action::Parallel(v) => {
                 if let (Some(w), Ok(p)) = (self.workflow_mut(), v.parse())
                     && w.max_parallel != p { w.max_parallel = p; self.dirty = true; }
+            }
+            Action::MaxRounds(v) => {
+                if let Ok(value) = v.parse::<usize>() && (1..=64).contains(&value) && let Some(w) = self.workflow_mut() {
+                    w.max_rounds = value;
+                    self.dirty = true;
+                }
             }
             Action::SelectNode(i) => self.node = Some(i),
             Action::Supervision(value) => { self.probe_supervision=value; if let Some(w)=self.workflow_mut()&& w.luna_supervision!=value {w.luna_supervision=value;self.dirty=true;} }
@@ -859,7 +934,7 @@ impl State {
                             // The mode decides, not where on the node the press
                             // landed: no hit strip to miss or to graze.
                             let drag = if self.connect_mode {
-                                Drag::Edge(i)
+                                Drag::Edge(i, self.link_mode)
                             } else {
                                 Drag::Node(i, x - n.x, y - n.y)
                             };
@@ -902,7 +977,7 @@ impl State {
                                 let hit = self.workflow().and_then(|w| w.hit(x, y));
                                 if let Some(w) = self.workflow_mut() {
                                     if let Some(i) = hit {
-                                        if w.nodes[i].node_type!="model" { self.error=Some("本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板".into()); return; }
+                                        if !w.nodes[i].is_model_backed() { self.error=Some("本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板".into()); return; }
                                         w.nodes[i].route_id.clone_from(&route.route_id);
                                         self.node = Some(i);
                                         landed = true;
@@ -920,14 +995,14 @@ impl State {
                             }
                         }
                     }
-                    Some(Drag::Edge(from)) => {
+                    Some(Drag::Edge(from, mode)) => {
                         let to = self
                             .workflow()
                             .and_then(|w| w.hit(x, y))
                             .filter(|to| *to != from);
                         if let (Some(w), Some(to)) = (self.workflow_mut(), to) {
-                            if let Err(e) = w.connect(from, to) {
-                                self.error = Some(e.to_string());
+                            if let Err(e) = mode.connect(w, from, to) {
+                                self.error = Some(e);
                             } else {
                                 self.dirty = true;
                             }
@@ -938,15 +1013,25 @@ impl State {
             }
             Action::WorkflowId(v) => self.workflow_id = v,
             Action::Input(v) => self.input = v,
+            Action::ExecutionRoot(v) => self.execution_root = v,
+            Action::WritablePaths(v) => self.writable_paths = v,
             Action::Run => {
                 self.show_run=true;
                 if self.dirty {
                     self.error = Some("请先保存工作流和模型池".into());
                 } else if let Some(w) = self.workflow().cloned() {
-                    let signature=serde_json::to_string(&json!({"definition":w,"input":self.input,"workflow":self.workflow_id})).unwrap_or_default();
+                    let execution = if w.nodes.iter().any(|n| n.node_type == "operator") {
+                        match execution_grant(&self.execution_root, &self.writable_paths) {
+                            Ok(value) => Some(value),
+                            Err(error) => { self.error=Some(error);return; }
+                        }
+                    } else { None };
+                    let signature=serde_json::to_string(&json!({"definition":w,"input":self.input,"workflow":self.workflow_id,"execution":execution})).unwrap_or_default();
                     let finished=self.detail.as_ref().and_then(|d|d["state"].as_str()).is_some_and(|s|matches!(s,"succeeded"|"failed"|"cancelled"|"interrupted"));
                     if self.submit_key.is_empty() || signature!=self.submit_signature || finished {self.submit_key=format!("desktop-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());self.submit_signature=signature;}
-                    self.request("router_workflow_submit",json!({"definition":w,"input_text":self.input,"workflow_id":self.workflow_id,"request_id":self.submit_key,"acknowledge_unknown_risk":self.acknowledge}),ctx);
+                    let mut params=json!({"definition":w,"input_text":self.input,"workflow_id":self.workflow_id,"request_id":self.submit_key,"acknowledge_unknown_risk":self.acknowledge});
+                    if let Some(execution)=execution {params["execution"]=execution;}
+                    self.request("router_workflow_submit",params,ctx);
                 }
             }
             Action::Poll(id) | Action::Detail(id) => {
@@ -988,6 +1073,89 @@ fn bounded_pretty(value: &Value) -> String {
         text.chars().take(24000).collect::<String>() + "\n[界面摘录；完整报告请按作业 ID 分页回收]"
     } else {
         text
+    }
+}
+
+fn execution_grant(root: &str, paths: &str) -> Result<Value, String> {
+    let root = root.trim();
+    if !std::path::Path::new(root).is_absolute() {
+        return Err("请填写操作员本次执行的绝对工作区根目录。".into());
+    }
+    let files: Vec<&str> = paths
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if files.is_empty()
+        || files.iter().any(|path| {
+            path.contains(['\\', ':', '*', '?'])
+                || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+                || path.starts_with('/')
+        })
+    {
+        return Err("可写清单须逐行填写精确的 POSIX 相对文件路径，例如 src/main.py；不能授权整个目录或父级。".into());
+    }
+    Ok(json!({"root":root,"writable_paths":files}))
+}
+
+/// Task lines run from the source's right port into the target's left port,
+/// report lines from the source's left port into the target's right port —
+/// separate ports, so a reciprocal pair never shares a lane. The route itself
+/// goes around every card on the canvas (`edge_route`) and is drawn with
+/// rounded corners. Rendering and the drag preview use this same geometry.
+fn edge_path(
+    from: (f64, f64),
+    to: (f64, f64),
+    kind: EdgeKind,
+    cards: &[(f64, f64)],
+) -> Vec<(f64, f64)> {
+    use crate::edge_route::{CARD_W, Port, Side, route};
+    let (tail, tip) = if kind == EdgeKind::Task {
+        (
+            Port {
+                at: (from.0 + CARD_W, from.1 + 44.0),
+                side: Side::Right,
+            },
+            Port {
+                at: (to.0, to.1 + 44.0),
+                side: Side::Left,
+            },
+        )
+    } else {
+        (
+            Port {
+                at: (from.0, from.1 + 80.0),
+                side: Side::Left,
+            },
+            Port {
+                at: (to.0 + CARD_W, to.1 + 80.0),
+                side: Side::Right,
+            },
+        )
+    };
+    route(tail, tip, cards)
+}
+
+/// Shared clock for the flowing dots, so every line moves in step and the
+/// motion survives canvas rebuilds without jumping.
+fn flow_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+/// Kept for the geometry regressions below (routing lives in `edge_route`).
+#[cfg(test)]
+fn segment_crosses_card(start: (f64, f64), end: (f64, f64), card: (f64, f64)) -> bool {
+    if start.1 == end.1 {
+        start.1 > card.1
+            && start.1 < card.1 + 112.0
+            && start.0.max(end.0) > card.0
+            && start.0.min(end.0) < card.0 + 220.0
+    } else {
+        start.0 > card.0
+            && start.0 < card.0 + 220.0
+            && start.1.max(end.1) > card.1
+            && start.1.min(end.1) < card.1 + 112.0
     }
 }
 /// Compact glyph button for table action columns — the column header carries
@@ -1307,6 +1475,10 @@ fn view_menu(state: &State, ctx: &ViewContext<Shell>) -> View {
                 true,
             )),
             Some((if state.pan_tool { M_PAN_OFF } else { M_PAN_ON }, true)),
+            None,
+            Some((M_LINK_TASK, true)),
+            Some((M_LINK_REPORT, true)),
+            Some((M_LINK_BOTH, true)),
             Some((
                 if state.show_run {
                     M_RUN_HIDE
@@ -1335,12 +1507,12 @@ fn help_button(theme: &Theme) -> View {
         ("移动模式", "拖动节点移动它；空白处拖动平移画布。"),
         (
             "连线模式",
-            "从任意节点拖到下游节点建立依赖，箭头指向下游。画布锁定，任何拖动都不会平移；适应全图与缩放仍可用。",
+            "在视图中选择任务线、回报线或双向；从节点拖到目标建立连接。任务线分发工作，回报线反馈进度与审阅；双向一次添加两类线。",
         ),
         ("节点菜单", "右键节点：编辑、断开连线、删除。"),
         (
             "运行",
-            "连线决定依赖，独立分支并行。预检不生成内容；运行按已保存配置占用预算。",
+            "仅任务线决定执行依赖。回报线单独传递结果，修正须由真实 Codex 调用方确认；软件不会自行启动 Codex。",
         ),
     ];
     let mut cells: Vec<View> = Vec::new();
@@ -1391,7 +1563,7 @@ const NODE_MENU_W: f64 = 260.0;
 /// Header = the node's name and its availability line, so opening the menu
 /// already answers "is this node usable"; the rows are the node's frequent
 /// actions, greyed out where they do not apply to this node type.
-fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
+fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Shell>) -> View {
     let workflow = state.workflow();
     let node = state
         .node
@@ -1403,11 +1575,15 @@ fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             .iter()
             .find(|r| r.route_id == n.route_id)
     });
-    let is_model = node.is_some_and(|n| n.node_type == "model");
+    let is_model = node.is_some_and(model::Node::is_model_backed);
     let bound = is_model && node.is_some_and(|n| !n.route_id.is_empty());
     let (tone, status) = match node {
-        Some(n) if n.node_type == "input" => (Tone::Good, "入口 · 按拓扑向下游分发".to_owned()),
-        Some(n) if n.node_type != "model" => (Tone::Muted, "本地节点 · 不调用模型".to_owned()),
+        Some(n) if n.node_type == "codex" => (
+            Tone::Info,
+            "Codex 接口 · 等待真实调用方规划与验收".to_owned(),
+        ),
+        Some(n) if n.node_type == "input" => (Tone::Good, "材料输入 · 本地节点".to_owned()),
+        Some(n) if !n.is_model_backed() => (Tone::Muted, "本地节点 · 不调用模型".to_owned()),
         Some(_) => {
             let (tone, label) = route_status(route);
             let target =
@@ -1536,6 +1712,30 @@ fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             ctx,
         ),
         command(
+            Symbol::Link,
+            "从此节点分发任务线",
+            "任务线指向执行下游。",
+            || Action::LinkMode(LinkMode::Task),
+            true,
+            ctx,
+        ),
+        command(
+            Symbol::Link,
+            "从此节点连接回报线",
+            "回报可以经多个审阅模型传给 Codex 母节点。",
+            || Action::LinkMode(LinkMode::Report),
+            true,
+            ctx,
+        ),
+        command(
+            Symbol::Link,
+            "从此节点建立双向线",
+            "一次添加正向任务线和反向回报线，校验通过后一起保存。",
+            || Action::LinkMode(LinkMode::Bidirectional),
+            true,
+            ctx,
+        ),
+        command(
             Symbol::DisconnectDrive,
             "断开连线",
             "移除与该节点相关的全部上下游连线，保留节点。",
@@ -1571,9 +1771,18 @@ fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 .corner_radius(CornerRadius::uniform(theme.radius))
                 .padding(Thickness::uniform(4.0))
                 .content(
-                    StackPanel::new()
-                        .spacing(2.0)
-                        .keyed_children(crate::pages::keyed(items)),
+                    // The menu grew past the canvas height; it scrolls inside
+                    // the space left below its anchor instead of being cut off.
+                    ScrollViewer::new()
+                        .max_height(max_height)
+                        .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
+                        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                        .content(
+                            StackPanel::new()
+                                .spacing(2.0)
+                                .margin(Thickness::new(0.0, 0.0, 8.0, 0.0))
+                                .keyed_children(crate::pages::keyed(items)),
+                        ),
                 ),
         ])
 }
@@ -1616,7 +1825,8 @@ fn line(
                 label.contains("提示词")
                     || label.contains("职责")
                     || label.contains("材料")
-                    || label.contains("JSON"),
+                    || label.contains("JSON")
+                    || label.contains("逐行"),
             )
             .min_height(if label.contains("JSON") { 140.0 } else { 32.0 })
             // Never a sliver: a TextBox with no width in a horizontal stack
@@ -2523,7 +2733,10 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
         let (px, py) = state.menu_at;
         let (vw, vh) = state.viewport.get();
         let left = px.clamp(0.0, (vw - NODE_MENU_W - 12.0).max(0.0));
-        let top = py.clamp(0.0, (vh - 330.0).max(0.0));
+        // Open at the pointer, lifted only far enough that a useful part of
+        // the menu shows; whatever does not fit below scrolls.
+        let top = py.clamp(0.0, (vh - 280.0).max(0.0));
+        let max_height = (vh - top - 20.0).max(160.0);
         layers.push(KeyedView::new(
             "menu",
             Border::new()
@@ -2531,7 +2744,7 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
                 .horizontal_alignment(HorizontalAlignment::Left)
                 .vertical_alignment(VerticalAlignment::Top)
                 .margin(Thickness::new(left, top, 0.0, 0.0))
-                .content(node_menu(state, theme, ctx)),
+                .content(node_menu(state, theme, max_height, ctx)),
         ));
     }
     Grid::new()
@@ -2636,6 +2849,33 @@ fn run_panel(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             ),
         ),
     ];
+    if state
+        .workflow()
+        .is_some_and(|w| w.nodes.iter().any(|n| n.node_type == "operator"))
+    {
+        blocks.push(secondary(
+            "操作员仅能修改本次授权的精确文件；此授权不会保存进工作流模板。",
+        ));
+        blocks.push(line(
+            "执行工作区绝对路径",
+            state.execution_root.clone(),
+            Action::ExecutionRoot,
+            ctx,
+        ));
+        blocks.push(line(
+            "可写文件清单（逐行，相对路径）",
+            state.writable_paths.clone(),
+            Action::WritablePaths,
+            ctx,
+        ));
+    }
+    if state
+        .detail
+        .as_ref()
+        .is_some_and(|v| v["state"].as_str() == Some("awaiting_codex"))
+    {
+        blocks.push(secondary("等待真实 Codex 调用方查看完整拓扑、分配任务、确认修正或验收；请使用统一调度 coordinate 接口回报决策。"));
+    }
     let runs: Vec<View> = state
         .snapshot
         .runs
@@ -2666,7 +2906,7 @@ fn run_panel(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                     Some(button(
                         &format!(
                             "节点 {id} · {} · 查看报告",
-                            node["state"].as_str().unwrap_or("未知")
+                            run_tone(node["state"].as_str().unwrap_or("未知")).1
                         ),
                         move || Action::Collect(job.clone()),
                         ctx,
@@ -2737,6 +2977,12 @@ fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
     if state.show_params {
         if let Some(w) = state.workflow() {
             blocks.push(line("工作流名称", w.name.clone(), Action::Name, ctx));
+            blocks.push(line(
+                "最多协调轮数（1–64）",
+                w.max_rounds.to_string(),
+                Action::MaxRounds,
+                ctx,
+            ));
             // Two numbers side by side: they are short, and one column of
             // full-width boxes read as a form twice its real length.
             blocks.push(
@@ -2841,7 +3087,7 @@ fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             Action::Role,
             ctx,
         ));
-        if n.node_type == "model" {
+        if n.is_model_backed() {
             blocks.push(
                 TextBlock::new()
                     .text(format!(
@@ -3096,7 +3342,15 @@ fn check_feedback(
 /// anything non-final reads as waiting.
 fn run_tone(state: &str) -> (Tone, String) {
     let s = state.to_ascii_lowercase();
-    if s.contains("run") || s.contains("dispatch") {
+    if s == "awaiting_plan" {
+        (Tone::Warn, "待母节点规划".into())
+    } else if s == "awaiting_assignment" {
+        (Tone::Warn, "待分片分配".into())
+    } else if s == "executing" {
+        (Tone::Info, "操作执行中".into())
+    } else if s == "awaiting_codex" || s == "awaiting_approval" {
+        (Tone::Warn, "待 Codex 确认".into())
+    } else if s.contains("run") || s.contains("dispatch") {
         (Tone::Info, "运行中".into())
     } else if s.contains("succeed") || s.contains("complete") || s.contains("done") {
         (Tone::Good, "已完成".into())
@@ -3180,7 +3434,6 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         .and_then(|d| d["nodes"].as_object())
         .map(|m| {
             m.iter()
-                .filter(|(_, v)| v["job_id"].as_str().is_some())
                 .filter_map(|(k, v)| v["state"].as_str().map(|s| (k.clone(), s.to_string())))
                 .collect()
         })
@@ -3191,11 +3444,13 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             w.nodes
                 .iter()
                 .map(|n| {
-                    let light = if n.node_type == "input" {
+                    let light = if n.node_type == "codex" {
+                        Some((Tone::Info, "真实 Codex 接口".into()))
+                    } else if n.node_type == "input" {
                         // 母节点：工作流入口，恒为绿色提示而非模型连通性。
                         // 状态带只有一行高——标签必须短到任何缩放都不折行。
                         Some((Tone::Good, "入口".into()))
-                    } else if n.node_type != "model" {
+                    } else if !n.is_model_backed() {
                         None
                     } else {
                         // Router vocabulary: "verified" / "unverified" /
@@ -3218,8 +3473,20 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         .workflow()
         .map(|w| w.edges.clone())
         .unwrap_or_default();
+    // Routes are planned once per rebuild: while lines flow the canvas draws
+    // every frame, and a grid search per edge per frame would not keep up.
+    let cards: Vec<(f64, f64)> = nodes.iter().map(|n| (n.3, n.4)).collect();
+    let routed: Vec<(EdgeKind, Vec<(f64, f64)>)> = edges
+        .iter()
+        .filter_map(|e| {
+            let (from, to) = (positions.get(&e.from)?, positions.get(&e.to)?);
+            Some((e.kind, edge_path(*from, *to, e.kind, &cards)))
+        })
+        .collect();
+    let flow = !routed.is_empty() && crate::edge_route::system_animations_enabled();
     let (pan, zoom, selected) = (state.pan, state.zoom, state.node);
     let connect_mode = state.connect_mode;
+    let link_mode = state.link_mode;
     let (bg, card, ink, accent, grid) = (
         theme.card_cf,
         theme.card_cf,
@@ -3234,7 +3501,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
     let pointer = state.pointer;
     let hover = state.hover;
     let flash = state.flash;
-    let animate = flash.is_some();
+    let animate = flash.is_some() || flow;
     let model_title = if let Some(Drag::Model(i)) = &drag {
         state
             .routes()
@@ -3254,16 +3521,16 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
     };
     let valid_target = target.is_some_and(|to| {
         state.workflow().is_some_and(|w| match drag {
-            Some(Drag::Model(_)) => w.nodes[to].node_type == "model",
-            Some(Drag::Edge(from)) => w.can_connect(from, to).is_ok(),
+            Some(Drag::Model(_)) => w.nodes[to].is_model_backed(),
+            Some(Drag::Edge(from, mode)) => mode.can_connect(w, from, to).is_ok(),
             _ => false,
         })
     });
     let state_palette = palette_page * page_size;
     let draw = move |c: &windows_canvas::DrawContext<'_>| {
         use windows_canvas::{
-            Ellipse, PathBuilder, Rect, RoundedRect, TextAlignment, TextFormat, Vector2,
-            WordWrapping,
+            CapStyle, Ellipse, LineJoin, PathBuilder, Rect, RoundedRect, StrokeStyleBuilder,
+            TextAlignment, TextFormat, Vector2, WordWrapping,
         };
         viewport.set((f64::from(c.width), f64::from(c.height)));
         c.clear(bg);
@@ -3316,29 +3583,75 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         let point = |x: f64, y: f64| {
             Vector2::new((210.0 + pan.0 + x * zoom) as f32, (pan.1 + y * zoom) as f32)
         };
-        for e in &edges {
-            if let (Some(a), Some(b)) = (positions.get(&e.from), positions.get(&e.to)) {
-                let tail = point(a.0 + 220.0, a.1 + 56.0);
-                let tip = point(b.0, b.1 + 56.0);
-                c.draw_line(tail, tip, &hi, 2.0);
-                // Arrowhead at the target end: the bare line read as an
-                // undirected association; the chevron makes from→to legible
-                // at any zoom.
-                let (dx, dy) = (tip.x - tail.x, tip.y - tail.y);
-                let len = (dx * dx + dy * dy).sqrt();
-                if len > 26.0 {
-                    let (ux, uy) = (dx / len, dy / len);
-                    let bx = tip.x - ux * 12.0;
-                    let by = tip.y - uy * 12.0;
-                    let arrow = PathBuilder::new(c.device())?.polygon([
-                        Vector2::new(tip.x, tip.y),
-                        Vector2::new(bx - uy * 5.0, by + ux * 5.0),
-                        Vector2::new(bx + uy * 5.0, by - ux * 5.0),
-                    ])?;
-                    c.fill_path(&arrow, &hi);
-                }
+        // A line = the rounded route in a softened tone, bright dots flowing
+        // from source to target on top, and a filled arrowhead on the final
+        // straight stub. The dots carry direction at a glance; the arrow
+        // still does when motion is off.
+        let task_base = c.create_solid_brush(windows_canvas::ColorF { a: 0.65, ..accent })?;
+        let report_base =
+            c.create_solid_brush(windows_canvas::ColorF::from_rgba8(232, 176, 84, 170))?;
+        let round = c.device().create_stroke_style(
+            &StrokeStyleBuilder::new()
+                .caps(CapStyle::Round)
+                .line_join(LineJoin::Round),
+        )?;
+        // World units per second; one dot every 64 world units — sparse enough
+        // to read as motion, not as a dotted line.
+        let phase = flow_epoch().elapsed().as_secs_f64() * 46.0;
+        let dot = (2.6 * zoom).clamp(1.8, 3.2) as f32;
+        let draw_connection = |world: &[(f64, f64)], kind: EdgeKind, moving: bool| {
+            if world.len() < 2 {
+                return Ok(());
             }
+            let screen = |p: (f64, f64)| point(p.0, p.1);
+            let segs = crate::edge_route::rounded(world);
+            let mut figure = PathBuilder::new(c.device())?.begin_hollow(screen(world[0]));
+            for seg in &segs {
+                figure = match *seg {
+                    crate::edge_route::Seg::Line(p) => figure.line_to(screen(p)),
+                    crate::edge_route::Seg::Curve(a, b, p) => {
+                        figure.bezier_to(screen(a), screen(b), screen(p))
+                    }
+                };
+            }
+            let path = figure.end_open().build()?;
+            let (base, bright) = if kind == EdgeKind::Report {
+                (&report_base, &warn)
+            } else {
+                (&task_base, &hi)
+            };
+            c.draw_path_styled(&path, base, 2.0, &round);
+            let line = crate::edge_route::flatten(world[0], &segs);
+            for at in crate::edge_route::dots(&line, 64.0, if moving { phase } else { 0.0 }) {
+                c.fill_ellipse(&Ellipse::new(screen(at), dot, dot), bright);
+            }
+            let (tail, tip) = (screen(line[line.len() - 2]), screen(line[line.len() - 1]));
+            let (dx, dy) = (tip.x - tail.x, tip.y - tail.y);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.5 {
+                let (ux, uy) = (dx / len, dy / len);
+                let size = (9.0 * zoom as f32).clamp(6.0, 10.0);
+                let (bx, by) = (tip.x - ux * size, tip.y - uy * size);
+                let half = size * 0.5;
+                let head = PathBuilder::new(c.device())?.polygon([
+                    tip,
+                    Vector2::new(bx - uy * half, by + ux * half),
+                    Vector2::new(bx + uy * half, by - ux * half),
+                ])?;
+                c.fill_path(&head, bright);
+            }
+            windows_canvas::Result::Ok(())
+        };
+        for (kind, world) in &routed {
+            draw_connection(world, *kind, flow)?;
         }
+        c.draw_text("任务线 →", &text, &Rect::new(226.0, 12.0, 306.0, 30.0), &hi);
+        c.draw_text(
+            "回报线 →",
+            &text,
+            &Rect::new(312.0, 12.0, 392.0, 30.0),
+            &warn,
+        );
         for (i, n) in nodes.iter().enumerate() {
             let p = point(n.3, n.4);
             let w = (220.0 * zoom) as f32;
@@ -3346,7 +3659,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             if p.x + w < 210.0 || p.x > c.width || p.y + h < 0.0 || p.y > c.height {
                 continue;
             }
-            let master = n.5 == "input";
+            let master = matches!(n.5.as_str(), "input" | "codex");
             let rect = Rect::new(p.x, p.y, p.x + w, p.y + h);
             let rounded = RoundedRect::new(rect, 8.0, 8.0);
             c.fill_rounded_rect(&rounded, &fill);
@@ -3457,42 +3770,31 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                     );
                 }
             }
-            // Ports: masters are entry points — a filled output port only;
-            // every other node shows a hollow output port on the right and a
-            // hollow input port on the left, so edge direction reads even
-            // without following the arrowheads.
-            if master {
-                c.fill_ellipse(
-                    &Ellipse {
-                        center: Vector2::new(p.x + w + 3.0, p.y + h / 2.0),
-                        radius_x: 4.5,
-                        radius_y: 4.5,
-                    },
-                    &good,
-                );
-            } else if zoom >= 0.6 {
-                c.draw_ellipse(
-                    &Ellipse {
-                        center: Vector2::new(p.x + w + 2.0, p.y + h / 2.0),
-                        radius_x: 4.5,
-                        radius_y: 4.5,
-                    },
-                    &hi,
-                    1.5,
-                );
-                c.draw_ellipse(
-                    &Ellipse {
-                        center: Vector2::new(p.x - 2.0, p.y + h / 2.0),
-                        radius_x: 4.5,
-                        radius_y: 4.5,
-                    },
-                    &line,
-                    1.5,
-                );
+            // Task ports sit above report ports. Codex accepts reports but
+            // never task dependencies; legacy material inputs only emit tasks.
+            let task_y = p.y + (44.0 * zoom) as f32;
+            let report_y = p.y + (80.0 * zoom) as f32;
+            let port = |x: f32, y: f32| Ellipse {
+                center: Vector2::new(x, y),
+                radius_x: 4.5,
+                radius_y: 4.5,
+            };
+            c.fill_ellipse(
+                &port(p.x + w + 2.0, task_y),
+                if master { &good } else { &hi },
+            );
+            if !master && zoom >= 0.6 {
+                c.draw_ellipse(&port(p.x - 2.0, task_y), &hi, 1.5);
+            }
+            if n.5 != "input" && zoom >= 0.6 {
+                c.draw_ellipse(&port(p.x + w + 2.0, report_y), &warn, 1.5);
+                if n.5 != "codex" {
+                    c.fill_ellipse(&port(p.x - 2.0, report_y), &warn);
+                }
             }
         }
         if let Some(to) = target
-            && matches!(drag, Some(Drag::Model(_) | Drag::Edge(_)))
+            && matches!(drag, Some(Drag::Model(_) | Drag::Edge(_, _)))
         {
             let n = &nodes[to];
             let p = point(n.3, n.4);
@@ -3511,19 +3813,33 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 3.0,
             );
         }
-        if let Some(Drag::Edge(from)) = drag
+        if let Some(Drag::Edge(from, mode)) = drag
             && let Some(n) = nodes.get(from)
         {
-            c.draw_line(
-                point(n.3 + 220.0, n.4 + 56.0),
-                Vector2::new(pointer.0 as f32, pointer.1 as f32),
-                if target.is_some() {
-                    if valid_target { &good } else { &bad }
+            let kind = if mode == LinkMode::Report {
+                EdgeKind::Report
+            } else {
+                EdgeKind::Task
+            };
+            let to = target.map(|i| (nodes[i].3, nodes[i].4)).unwrap_or_else(|| {
+                let at = (
+                    (pointer.0 - 210.0 - pan.0) / zoom,
+                    (pointer.1 - pan.1) / zoom,
+                );
+                if kind == EdgeKind::Report {
+                    (at.0 - 220.0, at.1 - 80.0)
                 } else {
-                    &hi
-                },
-                2.5,
-            );
+                    (at.0, at.1 - 44.0)
+                }
+            });
+            draw_connection(&edge_path((n.3, n.4), to, kind, &cards), kind, false)?;
+            if mode == LinkMode::Bidirectional {
+                draw_connection(
+                    &edge_path(to, (n.3, n.4), EdgeKind::Report, &cards),
+                    EdgeKind::Report,
+                    false,
+                )?;
+            }
         }
         if matches!(drag, Some(Drag::Model(_))) && pointer.0 >= 210.0 {
             let x = pointer.0 as f32;
@@ -3621,7 +3937,10 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         // performs right now, and how to switch. Accent-framed in connect
         // mode so the riskier mode is never mistaken for the default.
         let (mode, how) = if connect_mode {
-            ("连线模式", "从节点拖到下游节点 · 画布锁定 · 双击空白处切换")
+            (
+                link_mode.label(),
+                "拖到目标建立所选连线 · 画布锁定 · 双击切换移动",
+            )
         } else {
             ("移动模式", "拖动节点或平移画布 · 双击空白处切换")
         };
@@ -3665,7 +3984,10 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
 
 #[cfg(test)]
 mod gesture_tests {
-    use super::{Drag, Gesture};
+    use super::{
+        Drag, EdgeKind, Gesture, LinkMode, State, edge_path, execution_grant, run_tone,
+        segment_crosses_card,
+    };
 
     #[test]
     fn winui_capture_loss_before_release_preserves_exactly_one_model_drop() {
@@ -3691,10 +4013,16 @@ mod gesture_tests {
         let mut gesture = Gesture::default();
         gesture.begin(Drag::Model(4));
         gesture.lost();
-        gesture.begin(Drag::Edge(1));
-        assert!(matches!(gesture.movement(), Some(Drag::Edge(1))));
+        gesture.begin(Drag::Edge(1, LinkMode::Task));
+        assert!(matches!(
+            gesture.movement(),
+            Some(Drag::Edge(1, LinkMode::Task))
+        ));
         gesture.lost();
-        assert!(matches!(gesture.release(), Some(Drag::Edge(1))));
+        assert!(matches!(
+            gesture.release(),
+            Some(Drag::Edge(1, LinkMode::Task))
+        ));
     }
     #[test]
     fn primary_run_explains_empty_unsaved_and_unsupervised_workflows() {
@@ -3881,7 +4209,7 @@ mod gesture_tests {
         assert_eq!(state.palette_page_size(), 10);
     }
     #[test]
-    fn master_node_is_an_entry_point_and_refuses_inbound_edges() {
+    fn master_node_accepts_reports_but_never_task_dependencies() {
         let mut workflow = globaltokentracker_core::scheduler::Workflow::new("fixture".into());
         let master = workflow.add_master(10.0, 10.0).unwrap();
         let route = globaltokentracker_core::scheduler::Route {
@@ -3889,11 +4217,16 @@ mod gesture_tests {
             ..Default::default()
         };
         let model = workflow.add_route(&route, 300.0, 10.0).unwrap();
-        assert_eq!(workflow.nodes[master].node_type, "input");
+        assert_eq!(workflow.nodes[master].node_type, "codex");
         assert_eq!(workflow.nodes[master].route_id, "");
         // 母节点是工作流入口：出边合法，入边拒绝。
         assert!(workflow.can_connect(master, model).is_ok());
         assert!(workflow.can_connect(model, master).is_err());
+        assert!(
+            workflow
+                .can_connect_kind(model, master, EdgeKind::Report)
+                .is_ok()
+        );
         workflow.connect(master, model).unwrap();
         // disconnect clears the node's edges but keeps every node.
         workflow.disconnect(model);
@@ -3904,5 +4237,92 @@ mod gesture_tests {
         workflow.remove(model);
         assert_eq!(workflow.edges.len(), 0);
         assert_eq!(workflow.nodes.len(), 1);
+    }
+
+    #[test]
+    fn link_kind_is_frozen_in_a_drag_and_switching_it_cancels_the_drag() {
+        let mut state = State::default();
+        state.set_link_mode(LinkMode::Report);
+        state.drag.begin(Drag::Edge(1, state.link_mode));
+        assert!(matches!(
+            state.drag.release(),
+            Some(Drag::Edge(1, LinkMode::Report))
+        ));
+        state.drag.begin(Drag::Edge(1, LinkMode::Report));
+        state.set_link_mode(LinkMode::Bidirectional);
+        assert!(state.drag.release().is_none());
+        assert!(state.connect_mode);
+        assert!(!state.can_pan());
+    }
+
+    #[test]
+    fn reciprocal_edge_paths_use_different_ports_and_return_bends() {
+        let cards = [(10.0, 10.0), (300.0, 10.0)];
+        let task = edge_path((10.0, 10.0), (300.0, 10.0), EdgeKind::Task, &cards);
+        let report = edge_path((300.0, 10.0), (10.0, 10.0), EdgeKind::Report, &cards);
+        assert_eq!(task[0], (230.0, 54.0));
+        assert_eq!(*report.last().unwrap(), (230.0, 90.0));
+        assert_ne!(*task.last().unwrap(), report[0]);
+        let outward = edge_path((10.0, 10.0), (300.0, 10.0), EdgeKind::Report, &cards);
+        assert!(outward.iter().any(|p| p.1 < 10.0 || p.1 > 122.0));
+    }
+
+    #[test]
+    fn execution_access_is_explicit_and_not_a_directory_or_parent_grant() {
+        assert!(execution_grant("D:/workspace", "src/main.rs\nREADME.md").is_ok());
+        for paths in [
+            "",
+            ".",
+            "../outside",
+            "src/",
+            "src\\main.rs",
+            "/outside",
+            "C:/outside",
+            "src/*",
+            "file?",
+        ] {
+            assert!(execution_grant("D:/workspace", paths).is_err(), "{paths}");
+        }
+        assert!(execution_grant("relative", "src/main.rs").is_err());
+        assert_eq!(run_tone("awaiting_codex").1, "待 Codex 确认");
+        assert_eq!(run_tone("awaiting_plan").1, "待母节点规划");
+        assert_eq!(run_tone("awaiting_assignment").1, "待分片分配");
+        assert_eq!(run_tone("executing").1, "操作执行中");
+    }
+
+    #[test]
+    fn report_paths_leave_and_enter_horizontally_without_crossing_either_card() {
+        for (from, to) in [
+            ((20.0, 20.0), (340.0, 20.0)),
+            ((340.0, 20.0), (20.0, 20.0)),
+            ((20.0, 300.0), (340.0, 20.0)),
+            ((340.0, 300.0), (20.0, 20.0)),
+            ((20.0, 20.0), (20.0, 300.0)),
+            ((20.0, 300.0), (20.0, 20.0)),
+            ((200.0, 20.0), (20.0, 300.0)),
+            ((20.0, 300.0), (200.0, 20.0)),
+            ((244.0, 20.0), (20.0, 20.0)),
+        ] {
+            let path = edge_path(from, to, EdgeKind::Report, &[from, to]);
+            assert!(path.len() >= 2, "{from:?} -> {to:?}");
+            assert_eq!(path[0], (from.0, from.1 + 80.0));
+            assert_eq!(*path.last().unwrap(), (to.0 + 220.0, to.1 + 80.0));
+            assert_eq!(path[0].1, path[1].1);
+            assert!(path[1].0 < path[0].0);
+            let last = path.len() - 1;
+            assert_eq!(path[last].1, path[last - 1].1);
+            assert!(path[last - 1].0 > path[last].0);
+            for segment in path.windows(2) {
+                assert!(segment[0].0 == segment[1].0 || segment[0].1 == segment[1].1);
+                assert!(
+                    !segment_crosses_card(segment[0], segment[1], from),
+                    "source crossed: {from:?}->{to:?}: {segment:?}"
+                );
+                assert!(
+                    !segment_crosses_card(segment[0], segment[1], to),
+                    "target crossed: {from:?}->{to:?}: {segment:?}"
+                );
+            }
+        }
     }
 }

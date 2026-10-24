@@ -9,6 +9,8 @@ description: Coordinate bounded tasks and visual workflows through GTT's model r
 
 ## 正式受理入口（0.5.0）
 
+0.6.0 的 Codex 母节点 / 高速操作员见 [操作员与回报拓扑](references/operator-workflows.md)。用户明确要把文件操作交给高速模型时，Codex 负责完整拓扑、分片、审批和验收；使用 operator 节点及本次 execution 工作区授权承接具体修改，不再把实现工作一律留给主线。原生模型工具仍禁用，操作由 GTT 的可信执行器完成。
+
 所有新计划/提交使用 `router_dispatch`，`request.kind` 为 `task`、`group` 或 `workflow`；分别携带 `task`、`request` 或 `definition` / `saved_workflow_id`。`action="submit"` 必须给稳定 `request_id`，拿到 `dispatch_id` 后以它或原 request_id 查询 `status`、`collect`、`cancel`。网络返回不明确时先查原身份，不换 ID 重放。`report` 带 worker、工作流 node_id 与 offset，无损读取大报告并核对 sha256。旧 router_plan/submit、router_group_plan/submit、router_workflow_plan/submit 已从工具发现中退役，仅为缓存客户端兼容转发；下文这些旧名指对应动作，新调用全部换成统一入口。GTT CLI 的 `scheduling` 命令也复用这一协议，详见 [统一接入](references/dispatch-intake.md)。
 
 外协或调度开关关闭时停止新派发；认证的本机管理入口仍允许 status/collect/report/list/cancel，以回收已发生的用量和取消存量。统一入口不自动启用开关、更新过期池、恢复未知付费请求或增大预算。普通任务与研究组保留真实监工要求，工作流按保存的 luna_supervision 执行。
@@ -114,7 +116,7 @@ GTT 设置里的「外部协同接口」同时控制原生协同观察（capabil
 
 ## 扩展与参考
 
-0.4.0 的可视调度与配置档见 [定向工作流](references/visual-workflows.md)。先读取 `router_scheduling`，遵守来源开关、定向池有效期和 `effective_profile`，不绕过用户选定模型。`allowed_routes` 是有顺序的硬池，空列表禁止所有路线，不能通过 Codex 回退逃出池。节点可配置职责、类型、备用路线与调用参数，11 个职责模板包括不生成模型内容的输入、合并、门禁和输出节点。
+可视调度与配置档见 [定向工作流](references/visual-workflows.md)。先读取 `router_scheduling`，遵守来源开关、定向池有效期和 `effective_profile`，不绕过用户选定模型。`allowed_routes` 是有顺序的硬池，空列表禁止所有路线，不能通过 Codex 回退逃出池。节点可配置职责、类型、备用路线与调用参数，14 个职责模板包括 Codex 母节点、操作员、操作审阅员，以及不生成模型内容的输入、合并、门禁和输出节点。
 
 工作流提交使用稳定 `request_id`；网络返回不明确时先查同一请求与运行状态。未知节点不自动重放；明确接受重复付费风险后才使用新请求 ID 和 `acknowledge_unknown_risk=true`。输出、等待、重试、并发、预算和协议容量以配置档及模型原生能力共同约束，schema 的实现范围不等于当前已启用上限。默认 512k 输出策略保持，修改配置不构成大输出能力验收。
 

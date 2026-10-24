@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
+use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
@@ -22,6 +23,28 @@ pub enum Command {
     },
     /// Read the current state and detail for a dispatch.
     Status(DispatchId),
+    /// Read the complete task/report topology for the real caller Codex.
+    Topology(DispatchId),
+    /// Read durable progress and operation/review reports.
+    Events {
+        #[command(flatten)]
+        id: DispatchId,
+        #[arg(long, default_value_t = 0)]
+        cursor: u64,
+        #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..=64))]
+        limit: u32,
+    },
+    /// Return an actual Codex assignment, correction approval or acceptance.
+    Coordinate {
+        #[command(flatten)]
+        id: DispatchId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        event_id: String,
+        #[arg(long)]
+        decision_file: PathBuf,
+    },
     /// Read a bounded page of dispatch results.
     Collect {
         #[command(flatten)]
@@ -107,6 +130,32 @@ pub fn run(command: &Command) -> Result<()> {
             ("submit", params)
         }
         Command::Status(id) => ("status", id.params()),
+        Command::Topology(id) => ("topology", id.params()),
+        Command::Events { id, cursor, limit } => {
+            let mut params = id.params();
+            params["cursor"] = json!(cursor);
+            params["limit"] = json!(limit);
+            ("events", params)
+        }
+        Command::Coordinate {
+            id,
+            expected_revision,
+            event_id,
+            decision_file,
+        } => {
+            if event_id.trim().is_empty() {
+                bail!("--event-id 不能为空");
+            }
+            let decision = read_json(decision_file)?;
+            if !decision.is_object() {
+                bail!("母节点决策文件必须是 JSON 对象");
+            }
+            let mut params = id.params();
+            params["expected_revision"] = json!(expected_revision);
+            params["event_id"] = json!(event_id);
+            params["decision"] = decision;
+            ("coordinate", params)
+        }
         Command::Collect {
             id,
             cursor,
@@ -158,15 +207,26 @@ pub fn run(command: &Command) -> Result<()> {
 }
 
 fn read_request(input: &RequestFile) -> Result<Value> {
-    let data = std::fs::read(&input.request_file)
-        .with_context(|| format!("无法读取请求文件 {}", input.request_file.display()))?;
-    let value: Value = serde_json::from_slice(&data)
-        .with_context(|| format!("请求文件 {} 不是有效 JSON", input.request_file.display()))?;
+    let value = read_json(&input.request_file)?;
     if !value.is_object() {
         bail!("请求文件顶层必须是 JSON 对象");
     }
     validate_dispatch_request(&value)?;
     Ok(value)
+}
+
+fn read_json(path: &std::path::Path) -> Result<Value> {
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let mut data = Vec::new();
+    std::fs::File::open(path)
+        .with_context(|| format!("无法读取请求文件 {}", path.display()))?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut data)?;
+    if data.len() > MAX_BYTES as usize {
+        bail!("请求文件超过 16 MiB 协议上限");
+    }
+    serde_json::from_slice(&data)
+        .with_context(|| format!("请求文件 {} 不是有效 JSON", path.display()))
 }
 
 fn validate_dispatch_request(value: &Value) -> Result<()> {
@@ -216,7 +276,16 @@ mod tests {
         TestCli::command().write_long_help(&mut help).unwrap();
         let help = String::from_utf8(help).unwrap();
         for expected in [
-            "plan", "submit", "status", "collect", "report", "cancel", "list",
+            "plan",
+            "submit",
+            "status",
+            "collect",
+            "report",
+            "cancel",
+            "list",
+            "topology",
+            "coordinate",
+            "events",
         ] {
             assert!(
                 help.contains(expected),

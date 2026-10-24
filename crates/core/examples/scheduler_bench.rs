@@ -1,6 +1,6 @@
 //! Run with cargo run --release -p globaltokentracker-core --example scheduler_bench.
 //! Pure graph operations: no discovery, model generation, or production state.
-use globaltokentracker_core::scheduler::{Edge, Route, Workflow};
+use globaltokentracker_core::scheduler::{Edge, EdgeKind, Route, Workflow};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -15,6 +15,7 @@ fn main() {
                 graph.edges.push(Edge {
                     from: graph.nodes[a].id.clone(),
                     to: graph.nodes[b].id.clone(),
+                    kind: EdgeKind::Task,
                 });
             }
         }

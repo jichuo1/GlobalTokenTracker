@@ -11,6 +11,7 @@ mod autostart;
 mod close_hook;
 mod config;
 mod devices;
+mod edge_route;
 mod fonts;
 mod gpu_slide;
 mod heat;

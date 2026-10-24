@@ -71,8 +71,32 @@ private struct ScheduleNode: Codable, Identifiable {
     var x: Double
     var y: Double
     var task: SchedulerJSON
+    var usesModel: Bool { ["model", "operator", "reviewer"].contains(nodeType) }
 }
-private struct ScheduleEdge: Codable { var from: String; var to: String }
+private enum ScheduleEdgeKind: String, Codable { case task, report }
+private enum ScheduleConnectionMode: String, CaseIterable, Identifiable {
+    case task, report, bidirectional
+    var id: String { rawValue }
+    var title: String { switch self {case .task: return "任务线";case .report: return "回报线";case .bidirectional: return "任务 + 回报"} }
+    var kind: ScheduleEdgeKind { self == .report ? .report : .task }
+}
+private struct ScheduleEdge: Codable {
+    var from: String
+    var to: String
+    var kind: ScheduleEdgeKind = .task
+    init(from: String, to: String, kind: ScheduleEdgeKind = .task) { self.from = from; self.to = to; self.kind = kind }
+    private enum CodingKeys: String, CodingKey { case from, to, kind }
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        from = try box.decode(String.self, forKey: .from); to = try box.decode(String.self, forKey: .to)
+        kind = try box.decodeIfPresent(ScheduleEdgeKind.self, forKey: .kind) ?? .task
+    }
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(from, forKey: .from); try box.encode(to, forKey: .to)
+        if kind != .task { try box.encode(kind, forKey: .kind) }
+    }
+}
 private struct ScheduleGraph: Codable, Identifiable {
     var id = UUID().uuidString
     var name = "定向工作流"
@@ -81,6 +105,34 @@ private struct ScheduleGraph: Codable, Identifiable {
     var tokenBudget: UInt64 = 200000
     var maxParallel = 2
     var lunaSupervision = true
+    var maxRounds = 8
+    init() {}
+    private enum CodingKeys: String, CodingKey { case id, name, nodes, edges, tokenBudget, maxParallel, lunaSupervision, maxRounds }
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        id = try box.decode(String.self, forKey: .id); name = try box.decode(String.self, forKey: .name)
+        nodes = try box.decode([ScheduleNode].self, forKey: .nodes); edges = try box.decodeIfPresent([ScheduleEdge].self, forKey: .edges) ?? []
+        tokenBudget = try box.decodeIfPresent(UInt64.self, forKey: .tokenBudget) ?? 200000
+        maxParallel = try box.decodeIfPresent(Int.self, forKey: .maxParallel) ?? 2
+        lunaSupervision = try box.decodeIfPresent(Bool.self, forKey: .lunaSupervision) ?? true
+        maxRounds = try box.decodeIfPresent(Int.self, forKey: .maxRounds) ?? 8
+    }
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(id, forKey: .id); try box.encode(name, forKey: .name)
+        try box.encode(nodes, forKey: .nodes); try box.encode(edges, forKey: .edges)
+        try box.encode(tokenBudget, forKey: .tokenBudget); try box.encode(maxParallel, forKey: .maxParallel)
+        try box.encode(lunaSupervision, forKey: .lunaSupervision)
+        if maxRounds != 8 { try box.encode(maxRounds, forKey: .maxRounds) }
+    }
+    mutating func chainTasks() {
+        let codex = nodes.filter { $0.nodeType == "codex" }
+        let inputs = nodes.filter { $0.nodeType == "input" }
+        let head = codex.count == 1 ? codex.first : (codex.isEmpty && inputs.count == 1 ? inputs.first : nil)
+        var ordered = nodes.filter { !["codex", "input"].contains($0.nodeType) }
+        if let head { ordered.insert(head, at: 0) }
+        edges = edges.filter { $0.kind == .report } + zip(ordered, ordered.dropFirst()).map { ScheduleEdge(from: $0.0.id, to: $0.1.id) }
+    }
 }
 private struct ScheduleTemplate: Decodable, Identifiable {
     var id: String
@@ -101,6 +153,7 @@ private struct ScheduleSettings: Codable {
 }
 
 struct SchedulingView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ViewState private var settings = ScheduleSettings()
     @ViewState private var routes: [ScheduleRoute] = []
     @ViewState private var sources: [String] = []
@@ -108,6 +161,8 @@ struct SchedulingView: View {
     @ViewState private var selected = 0
     @ViewState private var nodeId: String?
     @ViewState private var from: String?
+    @ViewState private var connectionMode: ScheduleConnectionMode = .task
+    @ViewState private var fromMode: ScheduleConnectionMode = .task
     @ViewState private var query = ""
     @ViewState private var minutes = 120
     @ViewState private var busy = false
@@ -116,6 +171,8 @@ struct SchedulingView: View {
     @ViewState private var notice = ""
     @ViewState private var workflowId = ""
     @ViewState private var input = ""
+    @ViewState private var executionRoot = ""
+    @ViewState private var writablePaths = ""
     @ViewState private var runId = ""
     @ViewState private var detail = ""
     @ViewState private var zoom = 1.0
@@ -152,6 +209,26 @@ struct SchedulingView: View {
     private var nodeIndex: Int? { graph?.nodes.firstIndex { $0.id == nodeId } }
     private var filtered: [ScheduleRoute] { routes.filter { query.isEmpty || "\($0.source) \($0.model)".localizedCaseInsensitiveContains(query) } }
     private var now: UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+    private var hasOperators: Bool { graph?.nodes.contains { $0.nodeType == "operator" } ?? false }
+    private var operatorPaths: [String] {
+        writablePaths.split(whereSeparator: { $0.isNewline }).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+    private var operatorAccessError: String? {
+        guard hasOperators else { return nil }
+        let root = executionRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !root.hasPrefix("/") { return "操作员需要本次授权的绝对工作区目录。" }
+        if operatorPaths.isEmpty { return "请逐行指定本次允许操作员修改的精确文件路径。" }
+        if operatorPaths.contains(where: { path in
+            path.hasPrefix("/") || path.contains("\\") || path.hasSuffix("/") || path.contains("*") || path.contains("?") ||
+                path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0.isEmpty || $0 == "." || $0 == ".." })
+        }) { return "可写路径须为精确的 POSIX 相对文件名，不接受目录、通配符或上级路径。" }
+        return nil
+    }
+    private var executionGrant: SchedulerJSON? {
+        guard hasOperators else { return nil }
+        return .object(["root": .string(executionRoot.trimmingCharacters(in: .whitespacesAndNewlines)),
+                        "writable_paths": .array(operatorPaths.map { .string($0) })])
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -181,11 +258,12 @@ struct SchedulingView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for:.seconds(1))
                 if busy {continue}
-                guard ["running","cancelling"].contains(detailValue["state"].text) else {break}
+                guard running else {break}
                 poll(id)
             }
         }
         .onChange(of: nodeId) { _, _ in taskText = nodeIndex.flatMap { graph?.nodes[$0].task.pretty } ?? "" }
+        .onChange(of: connectionMode) { _, _ in from = nil }
     }
 
     /// Page switcher on the left; sync state, 保存修改 and 更多 on the right —
@@ -211,7 +289,19 @@ struct SchedulingView: View {
             .help("保存节点和配置（⌘S）；保存本身不会调用模型。")
         if dirty { button.buttonStyle(.borderedProminent) } else { button }
     }
-    private var running: Bool { ["running","cancelling"].contains(detailValue["state"].text) }
+    private var running: Bool { ["running", "cancelling", "awaiting_codex"].contains(detailValue["state"].text) }
+    private var codexWaiting: Bool {
+        detailValue["state"].text == "awaiting_codex" || detailValue["nodes"].fields.values.contains { $0["state"].text == "awaiting_codex" }
+    }
+    private func runtimeStateText(_ state: String) -> String {
+        switch state {
+        case "awaiting_plan": return "待母节点规划"
+        case "awaiting_assignment": return "待分片分配"
+        case "executing": return "操作执行中"
+        case "awaiting_codex": return "待Codex确认"
+        default: return state
+        }
+    }
     private func connectivityLabel(_ value: String) -> String {
         switch value {
         case "verified": return "已连通"
@@ -329,6 +419,9 @@ struct SchedulingView: View {
                 workflowPicker
                 addMenu
                 viewMenu
+                Picker("连线", selection: $connectionMode) {
+                    ForEach(ScheduleConnectionMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }.fixedSize().help("任务线分配工作；回报线传递进度和结果；任务 + 回报一次建立双向通道。")
                 Spacer(minLength: 12)
                 Text(verbatim: "\(graph?.nodes.count ?? 0) 个节点 · 缩放 \(Int((zoom * 100).rounded()))%")
                     .font(.callout).monospacedDigit().foregroundStyle(.secondary)
@@ -348,7 +441,7 @@ struct SchedulingView: View {
             HStack(alignment:.center,spacing:12) {
                 VStack(alignment:.leading,spacing:2) {
                     Text("已选中：\(node.title)").fontWeight(.semibold).foregroundStyle(Color.accentColor).lineLimit(1)
-                    Text("拖动节点主体移动 · 从右端口连接下游").font(.caption).foregroundStyle(.secondary)
+                    Text(connectionMode == .report ? "拖动主体移动 · 左端口发起回报，右端口接收回报" : "拖动主体移动 · 右端口发起任务，左端口接收任务").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 12)
                 Button("编辑节点") {workflowSettings=false;showInspector=true}.help("查看当前节点的职责、提示词和参数。")
@@ -362,10 +455,11 @@ struct SchedulingView: View {
     }
     private var runReason: String? {
         if busy {return "正在处理请求，请稍候。"}
-        if ["running","cancelling"].contains(detailValue["state"].text) {return "已有运行进行中，可查看结果或停止。"}
+        if running {return "已有运行进行中，可查看结果或停止。"}
         guard let g=graph,!g.nodes.isEmpty else {return "先从模型库拖入模型，或通过添加节点选择职责模板。"}
         if dirty {return "请先保存修改，再运行工作流。"}
         if !settings.enabled {return "调度总开关已关闭，请在来源与模型池中检查。"}
+        if let reason = operatorAccessError { return reason }
         if g.lunaSupervision && !supervisorWorkflows.contains(workflowId) {return "需要同一工作流的在线 Luna；可在工作流设置中关闭监工。"}
         return nil
     }
@@ -389,11 +483,14 @@ struct SchedulingView: View {
     private var workflowPicker: some View {
         Picker("工作流", selection: $selected) {
             ForEach(Array(settings.workflows.enumerated()), id: \.element.id) { i,g in Text(g.name).tag(i) }
-        }.labelsHidden().frame(width: 220).onChange(of:selected) { _,_ in nodeId=nil }
+        }.labelsHidden().frame(width: 220).onChange(of:selected) { _,_ in nodeId=nil; from=nil }
     }
     private var addMenu: some View {
         Menu {
-            ForEach(templates) {t in Button(t.title) {addTemplate(t)}.help(t.role)}
+            Button("母节点 · Codex 接口", systemImage: "cpu") {addCodex()}
+                .help("等待真实 Codex 调用方规划、切片与验收；本机调度器不会自行启动 Codex。")
+            Divider()
+            ForEach(templates.filter { $0.nodeType != "codex" }) {t in Button(t.title) {addTemplate(t)}.help(t.role)}
         } label: { Label("添加节点", systemImage: "plus") }
         .fixedSize().help("选择职责模板，或直接从模型库拖入模型。")
     }
@@ -407,10 +504,13 @@ struct SchedulingView: View {
             Toggle("平移工具", systemImage: "hand.raised", isOn: $panTool)
             Toggle("显示模型库", systemImage: "sidebar.left", isOn: $showLibrary)
             Toggle("显示输入与结果", systemImage: "rectangle.bottomthird.inset.filled", isOn: $showRun)
+            Button("取消当前连线", systemImage: "xmark") {from=nil}.disabled(from == nil)
             Divider()
             Section("操作说明") {
                 Text("空白处拖动平移；拖节点主体移动。")
-                Text("点击右端口后，再点击下游左端口连线。")
+                Text("任务：右端口 → 左端口；回报：左端口 → 右端口。")
+                Text("任务线为强调色；回报线为橙色，并独立校验方向。")
+                Text("任务 + 回报一次建立正向任务与反向回报，校验失败时不修改图。")
                 Text("蓝色外框和底部名称表示已选中。")
             }
         } label: { Label("视图", systemImage: "eye") }
@@ -485,6 +585,7 @@ struct SchedulingView: View {
                 TextField("名称",text:graphBinding(\.name))
                 TextField("总 Token 预算",value:graphBinding(\.tokenBudget),format:.number)
                 Stepper("并发目标：\(graph?.maxParallel ?? 2)",value:graphBinding(\.maxParallel),in:1...32)
+                Stepper("最多调度轮次：\(graph?.maxRounds ?? 8)",value:graphBinding(\.maxRounds),in:1...64)
             }
         }
         Section {
@@ -495,7 +596,7 @@ struct SchedulingView: View {
         Section("工作流管理") {
             Button("新建工作流") {settings.workflows.append(ScheduleGraph());selected=settings.workflows.count-1;nodeId=nil;dirty=true}
             if graph != nil {
-                Button("按顺序串联") {mutate {g in g.edges=zip(g.nodes,g.nodes.dropFirst()).map {ScheduleEdge(from:$0.0.id,to:$0.1.id)}}}
+                Button("按顺序串联任务") {mutate { $0.chainTasks() }}.help("只重建任务线，保留已有回报线；母节点不接收任务线。")
                 Button("清空连线") {mutate {$0.edges=[]}}
                 Button("移除工作流",role:.destructive) {if graph != nil {settings.workflows.remove(at:selected);selected=0;nodeId=nil;dirty=true}}
             }
@@ -519,6 +620,22 @@ struct SchedulingView: View {
                             Text("本次输入材料")
                             TextEditor(text:$input).frame(minHeight:60).overlay(RoundedRectangle(cornerRadius:5).stroke(Color(nsColor:.separatorColor)))
                         }
+                        if hasOperators {
+                            GridRow {
+                                Text("本次操作工作区")
+                                TextField("绝对目录", text: $executionRoot, prompt: Text("/Users/name/project"))
+                                    .labelsHidden().textFieldStyle(.roundedBorder)
+                            }
+                            GridRow(alignment: .top) {
+                                Text("精确可写文件")
+                                VStack(alignment: .leading, spacing: 4) {
+                                    TextEditor(text: $writablePaths).font(.system(.caption, design: .monospaced)).frame(minHeight: 60)
+                                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(nsColor: .separatorColor)))
+                                    Text("每行一个 POSIX 相对文件名，例如 src/main.rs；仅授权本次运行，不保存到模板，也不授权整个仓库。")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
                         GridRow {
                             Text("付费风险")
                             Toggle("新建未知结果的运行前，接受重复付费风险",isOn:$acknowledge)
@@ -527,7 +644,7 @@ struct SchedulingView: View {
                     if !runs.isEmpty {
                         Text("最近运行").font(.subheadline.weight(.semibold))
                         LazyVGrid(columns:[GridItem(.adaptive(minimum:200),spacing:8)],alignment:.leading,spacing:8) {
-                            ForEach(runs.indices,id:\.self) {i in Button("\(runs[i]["name"].text) · \(runs[i]["state"].text)") {runId=runs[i]["id"].text;poll(runId)}}
+                            ForEach(runs.indices,id:\.self) {i in Button("\(runs[i]["name"].text) · \(runtimeStateText(runs[i]["state"].text))") {runId=runs[i]["id"].text;poll(runId)}}
                         }
                     }
                     let jobs = detailValue["nodes"].fields.keys.sorted().filter {!detailValue["nodes"][$0]["job_id"].text.isEmpty}
@@ -536,6 +653,10 @@ struct SchedulingView: View {
                         LazyVGrid(columns:[GridItem(.adaptive(minimum:200),spacing:8)],alignment:.leading,spacing:8) {
                             ForEach(jobs,id:\.self) {id in Button("查看节点 \(id) 报告") {request("router_collect",params:.object(["job_id":detailValue["nodes"][id]["job_id"],"max_chars":.number(12000)]))}}
                         }
+                    }
+                    if codexWaiting {
+                        Label("等待真实 Codex 调用方规划或验收回执；操作员修正须先获得母节点确认。", systemImage: "clock")
+                            .font(.callout).foregroundStyle(.orange)
                     }
                     Text(report.isEmpty ? detail:report).font(.system(.caption,design:.monospaced)).textSelection(.enabled)
                 }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading)
@@ -551,16 +672,38 @@ struct SchedulingView: View {
                 Color.secondary.opacity(0.06).contentShape(Rectangle()).gesture(DragGesture(minimumDistance:3).onChanged {v in
                     if panOrigin==nil {panOrigin=pan};guard let start=panOrigin else {return};pan=CGPoint(x:start.x+v.translation.width,y:start.y+v.translation.height)
                 }.onEnded {_ in panOrigin=nil})
-                Canvas {context,size in
-                    let grid=Color.secondary.opacity(0.15)
-                    for x in stride(from:pan.x.truncatingRemainder(dividingBy:24),to:size.width,by:24) {var p=Path();p.move(to:CGPoint(x:x,y:0));p.addLine(to:CGPoint(x:x,y:size.height));context.stroke(p,with:.color(grid),lineWidth:0.5)}
-                    for y in stride(from:pan.y.truncatingRemainder(dividingBy:24),to:size.height,by:24) {var p=Path();p.move(to:CGPoint(x:0,y:y));p.addLine(to:CGPoint(x:size.width,y:y));context.stroke(p,with:.color(grid),lineWidth:0.5)}
-                    if let g=graph {let points=Dictionary(uniqueKeysWithValues:g.nodes.map {($0.id,$0)});if let from,let a=points[from],let pointer=hoverPoint {var p=Path();p.move(to:CGPoint(x:pan.x+(a.x+220)*zoom,y:pan.y+(a.y+56)*zoom));p.addLine(to:pointer);context.stroke(p,with:.color(.accentColor),style:StrokeStyle(lineWidth:2,dash:[5,4]))};for e in g.edges {if let a=points[e.from],let b=points[e.to] {
-                        var p=Path();p.move(to:CGPoint(x:pan.x+(a.x+220)*zoom,y:pan.y+(a.y+56)*zoom));p.addLine(to:CGPoint(x:pan.x+b.x*zoom,y:pan.y+(b.y+56)*zoom));context.stroke(p,with:.color(.accentColor),lineWidth:2)
-                    }}}
+                // Routes are planned once per body evaluation; TimelineView only
+                // re-runs the Canvas closure each frame to move the flow dots.
+                let routed = routedEdges()
+                TimelineView(.animation(paused: reduceMotion || routed.isEmpty)) { timeline in
+                    Canvas {context,size in
+                        let grid=Color.secondary.opacity(0.15)
+                        for x in stride(from:pan.x.truncatingRemainder(dividingBy:24),to:size.width,by:24) {var p=Path();p.move(to:CGPoint(x:x,y:0));p.addLine(to:CGPoint(x:x,y:size.height));context.stroke(p,with:.color(grid),lineWidth:0.5)}
+                        for y in stride(from:pan.y.truncatingRemainder(dividingBy:24),to:size.height,by:24) {var p=Path();p.move(to:CGPoint(x:0,y:y));p.addLine(to:CGPoint(x:size.width,y:y));context.stroke(p,with:.color(grid),lineWidth:0.5)}
+                        let phase = reduceMotion ? 0 : CGFloat(timeline.date.timeIntervalSinceReferenceDate * 46)
+                        for edge in routed { drawEdge(edge.kind, world: edge.path, context: context, phase: phase) }
+                        if let from, let g = graph, let a = g.nodes.first(where: { $0.id == from }), let pointer = hoverPoint {
+                            let cards = g.nodes.map { CGPoint(x: $0.x, y: $0.y) }
+                            let z = CGFloat(zoom)
+                            let world = CGPoint(x: (pointer.x - pan.x) / z, y: (pointer.y - pan.y) / z)
+                            let kind = fromMode.kind
+                            let tip = EdgeRouting.Port(at: world, out: kind == .report ? 1 : -1)
+                            drawEdge(kind, world: EdgeRouting.route(from: port(a, kind: kind, source: true), to: tip, cards: cards), context: context, phase: nil)
+                            if fromMode == .bidirectional {
+                                let back = EdgeRouting.Port(at: CGPoint(x: world.x, y: world.y + 34), out: -1)
+                                drawEdge(.report, world: EdgeRouting.route(from: back, to: port(a, kind: .report, source: false), cards: cards), context: context, phase: nil)
+                            }
+                        }
+                    }
                 }.allowsHitTesting(false)
                 if let g=graph {ForEach(g.nodes) {n in nodeCard(n).scaleEffect(zoom,anchor:.topLeading).offset(x:pan.x+n.x*zoom,y:pan.y+n.y*zoom).allowsHitTesting(!panTool)}}
             }.frame(width:geometry.size.width,height:geometry.size.height).clipped()
+            .overlay(alignment: .topTrailing) {
+                HStack(spacing: 12) {
+                    Label("任务 →", systemImage: "arrow.right").foregroundStyle(Color.accentColor)
+                    Label("回报 →", systemImage: "arrow.turn.up.left").foregroundStyle(.orange)
+                }.font(.caption).padding(8).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6)).padding(8)
+            }
             .overlay(Rectangle().stroke(canvasTargeted ? Color.accentColor.opacity(0.6):Color.clear,lineWidth:2))
             .onContinuousHover {phase in switch phase {case .active(let point):hoverPoint=point;case .ended:hoverPoint=nil}}
             .onAppear {viewport=geometry.size}.onChange(of:geometry.size) {_,v in viewport=v}
@@ -573,16 +716,120 @@ struct SchedulingView: View {
             } isTargeted: {canvasTargeted=$0}
         }
     }
+    private func edgePoint(_ node: ScheduleNode, kind: ScheduleEdgeKind, source: Bool) -> CGPoint {
+        let right = kind == .report ? !source : source
+        return CGPoint(x: pan.x + (node.x + (right ? 220 : 0)) * zoom,
+                       y: pan.y + (node.y + (kind == .report ? 78 : 44)) * zoom)
+    }
+    /// Task lines leave the source's right port for the target's left port;
+    /// report lines leave the left port for the target's right port. The
+    /// route goes around every card (EdgeRouting, shared with Windows).
+    private func port(_ node: ScheduleNode, kind: ScheduleEdgeKind, source: Bool) -> EdgeRouting.Port {
+        let right = kind == .report ? !source : source
+        return EdgeRouting.Port(at: CGPoint(x: node.x + (right ? 220 : 0), y: node.y + (kind == .report ? 78 : 44)), out: right ? 1 : -1)
+    }
+    private func routedEdges() -> [(kind: ScheduleEdgeKind, path: [CGPoint])] {
+        guard let g = graph else { return [] }
+        let cards = g.nodes.map { CGPoint(x: $0.x, y: $0.y) }
+        let byId = Dictionary(g.nodes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return g.edges.compactMap { e in
+            guard let a = byId[e.from], let b = byId[e.to] else { return nil }
+            return (kind: e.kind, path: EdgeRouting.route(from: port(a, kind: e.kind, source: true), to: port(b, kind: e.kind, source: false), cards: cards))
+        }
+    }
+    /// The rounded route in a softened tone, bright dots flowing toward the
+    /// target on top, and a filled arrowhead on the final straight stub.
+    /// `phase == nil` draws the dashed drag preview without dots.
+    private func drawEdge(_ kind: ScheduleEdgeKind, world: [CGPoint], context: GraphicsContext, phase: CGFloat?) {
+        guard world.count >= 2 else { return }
+        let z = CGFloat(zoom)
+        let toScreen = CGAffineTransform(a: z, b: 0, c: 0, d: z, tx: pan.x, ty: pan.y)
+        let color: Color = kind == .report ? .orange : .accentColor
+        let path = EdgeRouting.roundedPath(world).applying(toScreen)
+        context.stroke(path, with: .color(color.opacity(phase == nil ? 0.9 : 0.65)),
+                       style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: phase == nil ? [5, 4] : []))
+        let line = EdgeRouting.flatten(world).map { $0.applying(toScreen) }
+        if let phase {
+            let r = min(3.2, max(1.8, 2.6 * z))
+            for p in EdgeRouting.dots(line, spacing: 64 * z, phase: phase * z) {
+                context.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)), with: .color(color))
+            }
+        }
+        let tip = line[line.count - 1], tail = line[line.count - 2]
+        let dx = tip.x - tail.x, dy = tip.y - tail.y
+        let len = (dx * dx + dy * dy).squareRoot()
+        guard len > 0.5 else { return }
+        let ux = dx / len, uy = dy / len
+        let size = min(10, max(6, 9 * z)), half = size / 2
+        let bx = tip.x - ux * size, by = tip.y - uy * size
+        var head = Path()
+        head.move(to: tip)
+        head.addLine(to: CGPoint(x: bx - uy * half, y: by + ux * half))
+        head.addLine(to: CGPoint(x: bx + uy * half, y: by - ux * half))
+        head.closeSubpath()
+        context.fill(head, with: .color(color))
+    }
+    /// Right-click menu for a node, matching the Windows node menu: name and
+    /// availability first, then the node's frequent actions. Native menus
+    /// scroll on their own when they outgrow the screen.
+    @ViewBuilder private func nodeMenu(_ n: ScheduleNode) -> some View {
+        let bound = n.usesModel && !n.routeId.isEmpty
+        let route = routes.first { $0.id == n.routeId }
+        let pooled = settings.pool.contains { $0.id == n.routeId && $0.expiresAt > now }
+        let linked = graph?.edges.contains { $0.from == n.id || $0.to == n.id } ?? false
+        let target = route.map { $0.source + " / " + $0.model } ?? n.routeId
+        let status = connectivityLabel(route?.connectivity ?? "") + " · " + target
+        Text(n.title)
+        if bound { Text(status) }
+        Divider()
+        Button("编辑节点", systemImage: "pencil") { nodeId = n.id; workflowSettings = false; showInspector = true }
+        Button("检测连通性", systemImage: "arrow.clockwise") {
+            request(params: .object(["action": .string("check"), "route_id": .string(n.routeId), "workflow_id": .string(workflowId), "luna_supervision": .bool(graph?.lunaSupervision ?? probeSupervision)]))
+        }.disabled(!bound || busy || !settings.enabled || dirty)
+        if bound && (!settings.enabled || dirty) {
+            Text(settings.enabled ? "保存修改后才能检测" : "调度总开关已关闭，需在「来源与模型池」开启并保存后才能检测")
+        }
+        Button(pooled ? "续期模型池" : "加入模型池", systemImage: "plus") { pool(n.routeId) }.disabled(!bound)
+        Divider()
+        Button("从此节点发起任务线", systemImage: "arrow.right") { nodeId = n.id; connectionMode = .task; beginConnection(n.id, mode: .task) }
+        Button("从此节点发起回报线", systemImage: "arrow.turn.up.left") { nodeId = n.id; connectionMode = .report; beginConnection(n.id, mode: .report) }
+        Button("断开连线", systemImage: "scissors") {
+            mutate { g in g.edges.removeAll { $0.from == n.id || $0.to == n.id } }
+        }.disabled(!linked)
+        Divider()
+        Button("删除节点", systemImage: "trash", role: .destructive) {
+            mutate { g in g.nodes.removeAll { $0.id == n.id }; g.edges.removeAll { $0.from == n.id || $0.to == n.id } }
+            if nodeId == n.id { nodeId = nil; showInspector = false }
+        }
+    }
     private func nodeCard(_ n:ScheduleNode)->some View {
         VStack(alignment:.leading,spacing:6) {
             Text(n.title).font(.headline).lineLimit(1)
-            Text(routes.first {$0.id==n.routeId}?.model ?? n.nodeType).font(.caption).lineLimit(1)
+            Text(n.nodeType == "codex" ? "真实调用方 · 规划与验收" : (routes.first {$0.id==n.routeId}?.model ?? n.nodeType)).font(.caption).lineLimit(1)
             Text(n.tags.joined(separator:" · ")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
         }.padding(12).frame(width:220,height:112,alignment:.leading)
         .background(nodeId==n.id ? Color.accentColor.opacity(0.14):Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:10))
-        .overlay(RoundedRectangle(cornerRadius:10).stroke(dropTarget==n.id ? (n.nodeType=="model" ? Color.green:Color.red):(nodeId==n.id ? Color.accentColor:Color.secondary),lineWidth:nodeId==n.id || dropTarget==n.id ? 3:1.5))
-        .overlay(alignment:.leading) {Circle().fill(Color.accentColor).frame(width:14,height:14).onTapGesture {connect(to:n.id)}}
-        .overlay(alignment:.trailing) {Circle().fill(from==n.id ? Color.orange:Color.accentColor).frame(width:14,height:14).onTapGesture {from=n.id}}
+        .overlay(RoundedRectangle(cornerRadius:10).stroke(dropTarget==n.id ? (n.usesModel ? Color.green:Color.red):(nodeId==n.id ? Color.accentColor:Color.secondary),lineWidth:nodeId==n.id || dropTarget==n.id ? 3:1.5))
+        .overlay(alignment: .leading) {
+            ZStack {
+                Circle().fill(Color.accentColor).frame(width: 14, height: 14).offset(y: -12)
+                    .opacity(["input", "codex"].contains(n.nodeType) || connectionMode == .report ? 0.2 : 1)
+                    .allowsHitTesting(connectionMode != .report && !["input", "codex"].contains(n.nodeType))
+                    .onTapGesture { if !["input", "codex"].contains(n.nodeType) { connect(to: n.id, kind: .task) } }
+                Circle().fill(from == n.id && fromMode.kind == .report ? Color.green : Color.orange).frame(width: 14, height: 14).offset(y: 22)
+                    .opacity(connectionMode == .report ? 1 : 0.3).allowsHitTesting(connectionMode == .report)
+                    .onTapGesture { beginConnection(n.id, mode: .report) }
+            }.frame(width: 14, height: 112).offset(x: -7)
+        }
+        .overlay(alignment: .trailing) {
+            ZStack {
+                Circle().fill(from == n.id && fromMode.kind == .task ? Color.green : Color.accentColor).frame(width: 14, height: 14).offset(y: -12)
+                    .opacity(connectionMode == .report ? 0.3 : 1).allowsHitTesting(connectionMode != .report)
+                    .onTapGesture { beginConnection(n.id, mode: connectionMode == .bidirectional ? .bidirectional : .task) }
+                Circle().fill(Color.orange).frame(width: 14, height: 14).offset(y: 22).opacity(n.nodeType == "input" ? 0.2 : 1)
+                    .onTapGesture { if n.nodeType != "input" { connect(to: n.id, kind: .report) } }
+            }.frame(width: 14, height: 112).offset(x: 7)
+        }
         .overlay(alignment:.bottomTrailing) {if nodeId==n.id {Text("✓ 已选中").font(.caption2).foregroundStyle(Color.accentColor).padding(8)}}
         .scaleEffect(draggedNode==n.id ? 1.035:1.0)
         .shadow(color:Color.accentColor.opacity(draggedNode==n.id ? 0.28:0),radius:12,y:5)
@@ -592,8 +839,9 @@ struct SchedulingView: View {
             if origin==nil {origin=CGPoint(x:n.x,y:n.y);nodeId=n.id;withAnimation(.easeOut(duration:0.12)){draggedNode=n.id}};guard let start=origin else {return}
             mutate {g in if let i=g.nodes.firstIndex(where:{$0.id==n.id}) {g.nodes[i].x=min(10000,max(-10000,start.x+v.translation.width/zoom));g.nodes[i].y=min(10000,max(-10000,start.y+v.translation.height/zoom))}}
         }.onEnded {_ in origin=nil;withAnimation(.easeOut(duration:0.16)){draggedNode=nil}})
-        .dropDestination(for:String.self) {values,_ in guard let id=values.first,routes.contains(where:{$0.id==id}) else {return false};guard n.nodeType=="model" else {error="本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板";return true};mutate {g in if let i=g.nodes.firstIndex(where:{$0.id==n.id}) {g.nodes[i].routeId=id}};pool(id);return true} isTargeted: {active in if active {dropTarget=n.id} else if dropTarget==n.id {dropTarget=nil}}
-        .help("点击选中；拖动主体移动，从右端口连接下游。")
+        .dropDestination(for:String.self) {values,_ in guard let id=values.first,routes.contains(where:{$0.id==id}) else {return false};guard n.usesModel else {error="本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板";return true};mutate {g in if let i=g.nodes.firstIndex(where:{$0.id==n.id}) {g.nodes[i].routeId=id}};pool(id);return true} isTargeted: {active in if active {dropTarget=n.id} else if dropTarget==n.id {dropTarget=nil}}
+        .contextMenu { nodeMenu(n) }
+        .help("任务端口：强调色右出左入；回报端口：橙色左出右入。拖动主体移动，右键打开节点菜单。")
     }
     private func fitCanvas() {
         guard let nodes=graph?.nodes,!nodes.isEmpty else {pan=CGPoint(x:24,y:24);zoom=1;return}
@@ -631,7 +879,7 @@ struct SchedulingView: View {
         } header: { Text("任务") } footer: {
             Text("职责说明节点负责什么、交付什么；提示词给出具体任务与验收条件，运行时会附上本次输入和上游报告。").foregroundStyle(.secondary)
         }
-        if n.nodeType == "model" {
+        if n.usesModel {
             Section("备用 / 补位路线") {
                 if n.fallbackRoutes.isEmpty { Text("未设置").foregroundStyle(.secondary) }
                 else { Text(n.fallbackRoutes.map { id in routes.first { $0.id == id }?.model ?? id }.joined(separator: " → ")).lineLimit(3) }
@@ -683,33 +931,57 @@ struct SchedulingView: View {
     private func pool(_ id: String) { let expiry = now + UInt64(minutes) * 60000; if let i = settings.pool.firstIndex(where: { $0.id == id }) { settings.pool[i].expiresAt = expiry } else if settings.pool.count < 128 { settings.pool.append(SchedulePool(routeId: id, expiresAt: expiry)) }; dirty = true }
     private func movePool(_ i: Int, _ delta: Int) { let j = i + delta; if settings.pool.indices.contains(j) { settings.pool.swapAt(i, j); dirty = true } }
     private func moveNode(_ i: Int, _ delta: Int) { let j = i + delta; mutate { if $0.nodes.indices.contains(j) { $0.nodes.swapAt(i, j) } } }
+    private func addCodex() {
+        addTemplate(ScheduleTemplate(id: "codex", title: "母节点 · Codex 接口", nodeType: "codex",
+            role: "由真实 Codex 调用方查看完整拓扑，规划切片、分配任务、确认修正并验收结果。",
+            tags: ["母节点", "规划", "验收"], task: .object(["kind": .string("extract"), "prompt": .string("等待真实 Codex 的规划与验收回执；不自动启动模型。")])) )
+    }
     private func addTemplate(_ t: ScheduleTemplate) {
         if graph == nil { var g = ScheduleGraph(); g.lunaSupervision = probeSupervision; settings.workflows.append(g); selected = settings.workflows.count - 1 }
         guard let g = graph, g.nodes.count < 256 else { return }
         let route = settings.pool.first(where: { $0.expiresAt > now })?.routeId ?? ""
         let id = UUID().uuidString
-        mutate { $0.nodes.append(ScheduleNode(id: id, title: t.title, routeId: t.nodeType == "model" ? route : "", nodeType: t.nodeType, role: t.role, tags: t.tags, x: Double(g.nodes.count % 3) * 250 + 40, y: Double(g.nodes.count / 3) * 160 + 40,
+        mutate { $0.nodes.append(ScheduleNode(id: id, title: t.title, routeId: ["model", "operator", "reviewer"].contains(t.nodeType) ? route : "", nodeType: t.nodeType, role: t.role, tags: t.tags, x: Double(g.nodes.count % 3) * 250 + 40, y: Double(g.nodes.count / 3) * 160 + 40,
             task: .object(["kind": .string("extract"), "prompt": .string("分析输入材料。"), "max_output_tokens": .number(8192), "token_budget": .number(48000), "deadline_s": .number(300), "hard_deadline_s": .number(900)]))) }
         if let i = graph?.nodes.firstIndex(where: { $0.id == id }) { applyTemplate(t, to: i) }; nodeId = id
     }
     private func applyTemplate(_ t: ScheduleTemplate, to i: Int) {
         mutate { g in
             g.nodes[i].title = t.title; g.nodes[i].nodeType = t.nodeType; g.nodes[i].role = t.role; g.nodes[i].tags = t.tags
-            if t.nodeType != "model" { g.nodes[i].routeId = ""; g.nodes[i].fallbackRoutes = [] }
+            if !["model", "operator", "reviewer"].contains(t.nodeType) { g.nodes[i].routeId = ""; g.nodes[i].fallbackRoutes = [] }
             if case .object(let values) = t.task { for (key, value) in values { g.nodes[i].task[key] = value } }
         }
         taskText = graph?.nodes[i].task.pretty ?? ""
     }
-    private func connect(to id: String) {
-        guard let from, from != id, var candidate = graph else { return }
-        candidate.edges.append(ScheduleEdge(from: from, to: id))
-        Task { do { _ = try await Core.scheduling(SchedulerJSON.object(["method": .string("validate_graph"), "params": try SchedulerJSON.encode(candidate)]).pretty); mutate { $0 = candidate }; self.from = nil } catch { self.error = error.localizedDescription } }
+    private func beginConnection(_ id: String, mode: ScheduleConnectionMode) {
+        from = id; fromMode = mode; error = nil
+    }
+    private func connect(to id: String, kind: ScheduleEdgeKind) {
+        guard let source = from, source != id, fromMode.kind == kind, let original = graph else { return }
+        let mode = fromMode
+        var candidate = original
+        candidate.edges.append(ScheduleEdge(from: source, to: id, kind: kind))
+        if mode == .bidirectional { candidate.edges.append(ScheduleEdge(from: id, to: source, kind: .report)) }
+        Task { do {
+            let signature = try SchedulerJSON.encode(original).pretty
+            _ = try await Core.scheduling(SchedulerJSON.object(["method": .string("validate_graph"), "params": try SchedulerJSON.encode(candidate)]).pretty)
+            guard let current = graph, current.id == original.id,
+                  try SchedulerJSON.encode(current).pretty == signature,
+                  from == source, fromMode == mode else {
+                error = "连线期间工作流已变化，请重新连接。"; return
+            }
+            mutate { $0 = candidate }; from = nil
+        } catch { self.error = error.localizedDescription } }
     }
     private func save() { do { request(params: .object(["action": .string("save"), "expected_revision": .number(Double(settings.revision)), "value": try SchedulerJSON.encode(settings)]), replace: true) } catch { self.error = error.localizedDescription } }
     private func run() { showRun=true;guard let graph else { return }; do {
-        let definition = try SchedulerJSON.encode(graph); let signature = definition.pretty + input + workflowId
+        if let reason = operatorAccessError { error = reason; return }
+        let definition = try SchedulerJSON.encode(graph); let grant = executionGrant
+        let signature = definition.pretty + input + workflowId + (grant?.pretty ?? "")
         if submitKey.isEmpty || signature != submitSignature || finished { submitKey = UUID().uuidString; submitSignature = signature; finished = false }
-        request("router_workflow_submit", params: .object(["definition": definition, "input_text": .string(input), "workflow_id": .string(workflowId), "request_id": .string(submitKey), "acknowledge_unknown_risk": .bool(acknowledge)]))
+        var params: [String: SchedulerJSON] = ["definition": definition, "input_text": .string(input), "workflow_id": .string(workflowId), "request_id": .string(submitKey), "acknowledge_unknown_risk": .bool(acknowledge)]
+        if let grant { params["execution"] = grant }
+        request("router_workflow_submit", params: .object(params))
     } catch { self.error = error.localizedDescription } }
     private func poll(_ id: String) { guard !id.isEmpty else { return }; request("router_workflow_status", params: .object(["run_id": .string(id)])) }
     private func request(_ method: String = "router_scheduling", params: SchedulerJSON = .object([:]), replace: Bool = false) {

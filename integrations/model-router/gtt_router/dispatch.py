@@ -14,7 +14,7 @@ import uuid
 from .models import Task, now_ms, reject_secrets
 from .scheduling import graph, integer, settings, text
 
-READ_ACTIONS = {"status", "collect", "report", "list", "cancel"}
+READ_ACTIONS = {"status", "collect", "report", "list", "cancel", "topology", "events"}
 LEGACY_SUBMISSIONS = {"router_plan", "router_submit", "router_group_plan", "router_group_submit",
                       "router_workflow_plan", "router_workflow_submit"}
 
@@ -64,7 +64,7 @@ class Dispatch:
         request = copy.deepcopy(request)
         kind = request.get("kind")
         allowed = {"task": {"kind", "task"}, "group": {"kind", "request"},
-                   "workflow": {"kind", "definition", "saved_workflow_id", "expected_revision", "input_text", "workflow_id"}}
+                   "workflow": {"kind", "definition", "saved_workflow_id", "expected_revision", "input_text", "workflow_id", "execution"}}
         if kind not in allowed or set(request) - allowed[kind]:
             raise ValueError("Unsupported dispatch request fields or kind")
         if kind == "task":
@@ -165,7 +165,7 @@ class Dispatch:
             else:
                 result = self.service.scheduling.submit(request["definition"], request.get("input_text", ""),
                     workflow_id, request_id="dispatch:" + row["dispatch_id"],
-                    acknowledge_unknown_risk=acknowledge_unknown_risk, _run_id=target_id, _cancellation_event=cancellation)
+                    acknowledge_unknown_risk=acknowledge_unknown_risk, execution=request.get("execution"), _run_id=target_id, _cancellation_event=cancellation)
         except Exception as error:
             # A known rejection before target persistence is safe to report.
             # Unexpected failure, or any existing target, remains queryable.
@@ -226,6 +226,9 @@ class Dispatch:
                    "status": {"dispatch_id", "request_id"}, "cancel": {"dispatch_id", "request_id"},
                    "collect": {"dispatch_id", "request_id", "cursor", "max_chars"},
                    "report": {"dispatch_id", "request_id", "node_id", "worker", "offset", "max_chars"},
+                   "coordinate": {"dispatch_id", "request_id", "expected_revision", "decision", "event_id"},
+                   "topology": {"dispatch_id", "request_id"},
+                   "events": {"dispatch_id", "request_id", "cursor", "limit"},
                    "list": {"workflow_id", "cursor", "limit"}}
         if action not in allowed or set(params) - allowed[action]:
             raise ValueError("Unsupported dispatch action or fields")
@@ -250,6 +253,16 @@ class Dispatch:
         row = self._find(**identity)
         if action == "status":
             return self._status(row)
+        if action in {"topology", "events", "coordinate"}:
+            if row["kind"] != "workflow" or not row.get("target_id"):
+                raise ValueError("This action requires a controlled workflow dispatch")
+            runtime = self.service.scheduling.operators
+            if action == "coordinate":
+                self.service.require_external_interface()
+                result = runtime.coordinate(row["target_id"], **params)
+            else:
+                result = getattr(runtime, action)(row["target_id"], **params)
+            return {**result, "dispatch_id": row["dispatch_id"]}
         if action == "cancel":
             with self.lock:
                 row = self._find(dispatch_id=row["dispatch_id"])

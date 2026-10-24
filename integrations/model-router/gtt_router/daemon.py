@@ -199,6 +199,18 @@ class LocalClient:
                 health = self.runtime_info()
                 if health.get("runtime_contract_version") != RUNTIME_CONTRACT_VERSION or "dispatch_v1" not in health.get("features", []):
                     raise ValueError("resident_feature_missing: dispatch_v1; align the runtime before unified dispatch; no task dispatched")
+                request = (params or {}).get("request", {})
+                definition = request.get("definition", {}) if isinstance(request, dict) else {}
+                definition = definition if isinstance(definition, dict) else {}
+                nodes = definition.get("nodes", [])
+                edges = definition.get("edges", [])
+                nodes = nodes if isinstance(nodes, list) else []
+                edges = edges if isinstance(edges, list) else []
+                requires_operator = ((params or {}).get("action") == "coordinate" or
+                    any(isinstance(n, dict) and n.get("node_type") in {"codex", "operator", "reviewer"} for n in nodes) or
+                    any(isinstance(e, dict) and e.get("kind") == "report" for e in edges))
+                if requires_operator and "operator_workflow_v1" not in health.get("features", []):
+                    raise ValueError("resident_feature_missing: operator_workflow_v1; align the runtime; no operator dispatched")
             if method == "router_scheduling" or method.startswith("router_workflow_"):
                 if "scheduling_v1" not in self.runtime_info().get("features", []):
                     raise ValueError("resident_feature_missing: scheduling_v1; align the runtime before using visual dispatch")
@@ -243,7 +255,7 @@ def serve(config_path):
                 self.respond(403, {"error": "Unauthorized local request"})
             elif self.path == "/health":
                 self.respond(200, {"service": "gtt-model-router", "pid": os.getpid(), "version": __version__,
-                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION, "features": ["report_capacity_v1", "scheduling_v1", "runtime_limits_v1", "dispatch_v1"]})
+                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION, "features": ["report_capacity_v1", "scheduling_v1", "runtime_limits_v1", "dispatch_v1", "operator_workflow_v1", "feedback_edges_v1"]})
             else:
                 self.respond(404, {"error": "Unknown local route"})
 

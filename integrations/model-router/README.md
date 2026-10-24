@@ -233,6 +233,8 @@ globaltokentracker-cli scheduling submit --request-file "<私有组请求文件�
 
 ## MCP 与本地 API
 
+0.6.0 新增 [Codex 母节点、操作员与回报拓扑](docs/operator-workflows.md)：真实 Codex 调用方读取完整任务/回报图，按文件和材料分片分配高速操作员；受控执行器实际修改授权文件，回报线可串联审阅模型，修正和最终验收由母节点确认。新客户端通过 `operator_workflow_v1` 握手，旧普通工作流保持兼容；新类型不在旧服务上回退执行。
+
 MCP、GTT 原生 CLI、Windows 和 macOS 界面共用同一受理层与执行状态。新客户端只发现一个计划/提交入口；旧客户端的六个 plan/submit 名称保留兼容转发，不再独立派发：
 
 | 普通工具 | 用途 |

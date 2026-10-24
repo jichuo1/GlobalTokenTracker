@@ -663,7 +663,7 @@ ADAPTERS = {"zcode_rpc": zcode, "antigravity_cli": antigravity, "command_json": 
             "opencode_http": opencode_http, "claude_cli": native_print, "codebuddy_cli": native_print, "dsh_headless": dsh_headless}
 
 
-def validate_result(result, needs_web, max_chars=120000):
+def validate_result(result, needs_web, max_chars=120000, *, local_files=None):
     from .report_contract import parse_report, ReportContractError
     text = result.get("text", "")
     try:
@@ -689,11 +689,27 @@ def validate_result(result, needs_web, max_chars=120000):
         return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), parsed.query, ""))
     observed = {canonical(u) for u in result.get("observed_urls", []) if isinstance(u, str) and public_url(u)}
     verified = 0
+    authorized = {f["path"]: f for f in (local_files or [])}
+    if local_files is not None:
+        body.pop("operator_file_sources", None)  # reserved for verified normalization
+    file_sources, web_sources = [], []
     for source in body["sources"]:
+        reference = source if isinstance(source, str) else source.get("path", source.get("url")) if isinstance(source, dict) else None
+        if not needs_web and isinstance(reference, str) and reference in authorized:
+            snapshot = authorized[reference]
+            if isinstance(source, dict) and "sha256" in source and source["sha256"] != snapshot["sha256"]:
+                raise WorkerFailure("invalid_source_url", retry_after_s=0)
+            file_sources.append({"path": reference, "sha256": snapshot["sha256"], "declared_source": source,
+                "provenance": "authorized_assignment_snapshot", "verified_by_tool": False})
+            continue
         if not isinstance(source, dict) or not isinstance(source.get("url"), str) or not public_url(source["url"]):
             raise WorkerFailure("invalid_source_url", retry_after_s=0)
         source["verified_by_tool"] = canonical(source["url"]) in observed
         verified += int(source["verified_by_tool"])
+        web_sources.append(source)
+    body["sources"] = web_sources
+    if file_sources:
+        body["operator_file_sources"] = file_sources
     if needs_web and verified == 0:
         raise WorkerFailure("insufficient_web_evidence", retry_after_s=0)
     result.pop("text", None)
