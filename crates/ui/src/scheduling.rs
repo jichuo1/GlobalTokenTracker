@@ -1435,6 +1435,11 @@ fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         w.edges.iter().any(|e| &e.from == id || &e.to == id)
     });
     let checking = state.pending_check.is_some();
+    // The coordinator refuses every check while the SAVED master switch is
+    // off (snapshot = what it has on disk; the draft may differ until saved),
+    // so the row is greyed with the reason visible — a disabled button shows
+    // no tooltip, so the reason is a line under the row, not a hover text.
+    let switch_off = bound && !state.snapshot.settings.enabled;
     let separator = || -> View {
         Border::new()
             .height(1.0)
@@ -1483,9 +1488,28 @@ fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 "仅绑定了模型的模型节点可以检测。"
             },
             || Action::CheckNode,
-            bound && !checking && !state.busy,
+            bound && !checking && !state.busy && !switch_off,
             ctx,
         ),
+        if switch_off {
+            // Indented to the row's label column (button padding 11 + icon
+            // 16 + gap 12), so it reads as the row's own note.
+            Border::new()
+                .padding(Thickness::new(39.0, 0.0, 8.0, 4.0))
+                .content(
+                    TextBlock::new()
+                        .text(if state.draft.enabled && state.dirty {
+                            "调度总开关已在草稿中开启，保存修改后可检测"
+                        } else {
+                            "调度总开关已关闭，需在「来源与模型池」开启并保存后才能检测"
+                        })
+                        .font_size(theme.label_size)
+                        .foreground(theme.warn)
+                        .text_wrapping(TextWrapping::Wrap),
+                )
+        } else {
+            Border::new().into()
+        },
         command(
             Symbol::Add,
             if pooled {
@@ -1753,7 +1777,7 @@ fn error_bar(state: &State) -> Option<View> {
             .is_open(true)
             .is_closable(false)
             .title("调度服务")
-            .message(error.clone())
+            .message(readable_error(error))
             .into()
     })
 }
@@ -2971,6 +2995,52 @@ fn route_status(route: Option<&Route>) -> (Tone, &'static str) {
     }
 }
 
+/// The coordinator's dispatch refusal codes (controls.py `BLOCK_CODES`) as
+/// actionable Chinese: what is blocked and where to change it. Shown raw they
+/// read like a crash ("未执行检测：scheduling_disabled").
+fn refusal_text(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "scheduling_disabled" => {
+            "调度总开关已关闭——请在「来源与模型池 › 调度开关」开启「允许模型调度」，然后保存修改"
+        }
+        "scheduling_settings_invalid" => {
+            "调度设置无法读取——请在「来源与模型池」检查后重新保存，或在更多中重载设置"
+        }
+        "source_dispatch_disabled" => {
+            "该节点模型所属来源未允许入池——请在「来源与模型池 › 来源」打开它，然后保存修改"
+        }
+        "route_not_selected" => {
+            "定向模式下该模型不在有效的模型池中——请右键节点「加入模型池」，然后保存修改"
+        }
+        "directed_pool_empty" => {
+            "定向模式的模型池为空——请先把模型加入模型池（右键节点或来源页），然后保存修改"
+        }
+        "directed_pool_expired" => {
+            "定向模式的模型池已全部到期——请续期模型池（右键节点或来源页），然后保存修改"
+        }
+        "luna_supervisor_required" => {
+            "需要同一工作流的在线 Luna 监工——请启动监工，或在工作流设置中关闭 Luna 监工"
+        }
+        "external_interface_disabled" => "外部协同接口已关闭——请在「设置」中开启外部接口",
+        "external_interface_settings_invalid" => {
+            "外部协同接口设置无法读取——请在「设置」中重新保存外部接口设置"
+        }
+        "workflow_cancelled" => "工作流已被取消",
+        _ => return None,
+    })
+}
+
+/// A request error whose text starts with a refusal code ("code: detail",
+/// DispatchBlocked's format) gets the Chinese guidance in front; anything
+/// else is shown as it came.
+fn readable_error(error: &str) -> String {
+    let code = error.split([':', ' ']).next().unwrap_or("");
+    match refusal_text(code) {
+        Some(text) => format!("{text}。（{code}）"),
+        None => error.to_owned(),
+    }
+}
+
 /// Turns the router's `check` answer into the canvas feedback bar.
 fn check_feedback(
     title: &str,
@@ -2978,6 +3048,9 @@ fn check_feedback(
     route: Option<&Route>,
 ) -> (InfoBarSeverity, String) {
     let reason = |code: &str| -> String {
+        if let Some(text) = refusal_text(code) {
+            return text.to_owned();
+        }
         match code {
             "foreground_busy" | "yielded_to_foreground" => {
                 "有前台任务正在使用该来源，检测已让位，请稍后再试".into()
@@ -2987,9 +3060,6 @@ fn check_feedback(
             "auth_failed" => "认证失败，请检查该来源的登录状态".into(),
             "model_unavailable" => "模型不可用".into(),
             "quota_exhausted" => "额度已耗尽".into(),
-            "luna_supervisor_required" => {
-                "需要同一工作流的在线 Luna 监工，或在工作流设置中关闭监工".into()
-            }
             other => other.to_owned(),
         }
     };
@@ -3708,6 +3778,43 @@ mod gesture_tests {
         );
         assert_eq!(skipped.0, windows_reactor::InfoBarSeverity::Warning);
         assert!(skipped.1.contains("预算"));
+    }
+
+    #[test]
+    fn refusal_codes_become_actionable_chinese() {
+        use super::{check_feedback, readable_error, refusal_text};
+        use serde_json::json;
+        // Every coordinator BLOCK_CODE has guidance.
+        for code in [
+            "external_interface_disabled",
+            "external_interface_settings_invalid",
+            "luna_supervisor_required",
+            "scheduling_disabled",
+            "scheduling_settings_invalid",
+            "source_dispatch_disabled",
+            "route_not_selected",
+            "directed_pool_expired",
+            "directed_pool_empty",
+            "workflow_cancelled",
+        ] {
+            assert!(refusal_text(code).is_some(), "{code}");
+        }
+        let skipped = check_feedback(
+            "研究员",
+            Some(&json!({"checked": false, "reason": "scheduling_disabled"})),
+            None,
+        );
+        assert!(
+            skipped.1.contains("调度总开关已关闭") && !skipped.1.contains("scheduling_disabled")
+        );
+        // DispatchBlocked's "code: detail" errors get the guidance in front.
+        let error = readable_error("directed_pool_expired: pool has no live routes");
+        assert!(
+            error.starts_with("定向模式的模型池已全部到期")
+                && !error.contains("(directed_pool_expired)")
+        );
+        assert!(error.contains("（directed_pool_expired）"));
+        assert_eq!(readable_error("connection refused"), "connection refused");
     }
 
     #[test]

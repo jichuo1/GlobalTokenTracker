@@ -2060,3 +2060,11 @@
 - **切换后**：正式入口仍为 integrations/model-router/router.py；health 返回 0.5.0、runtime_contract_version=2 与 dispatch_v1。正式 CLI 哈希等于验证过的 release 候选（f34a0498d4cc…），scheduling list 成功；已有 MCP 客户端读取配置成功。
 - **保留与门禁**：调度 enabled=false、revision=4、模型池和两个正式配置文件 SHA-256 均不变；历史作业仍为146、在途为0。正式 CLI 的验证提交被 scheduling_disabled 拒绝，新增 dispatch 与作业均为0。新协议已可用，实际生成仍需用户自行启用调度并配置有效路线池。
 - **证据**：协调器工作区 diagnostics/dispatch-activation-20261024-210540/activation.json 保存备份与正式验收，dispatch-verification.md 已区分源码、独立原生负载、正式安装和 macOS/GUI 验收边界。并行 Rust 回归的既有语言竞争失败日志仍保留。
+
+## S169 调度拒绝原因的中文指引与检测入口置灰（2026-10-24）
+
+- **问题（用户截图）**：节点右键"检测连通性"后提示"「研究员」未执行检测：scheduling_disabled。"原因：已保存的调度设置 enabled=false（S168 切换服务时按原状保留），协调器 0.5.0 在发出检测前先按"调度总开关 → 来源是否允许派发 → 定向模型池"逐项判定，第一项即拒绝，未发出请求、未产生用量；另外当时定向模型池的 2 个条目均已到期，开启总开关后仍会被"模型池已到期"拦截。S166 的检测反馈只翻译了检测内部的失败原因，漏掉了检测前的拒绝码，于是原样显示英文代码。
+- **拒绝码中文化**：新增 `refusal_text`，覆盖协调器 controls.py `BLOCK_CODES` 全部 10 个码（scheduling_disabled / scheduling_settings_invalid / source_dispatch_disabled / route_not_selected / directed_pool_empty / directed_pool_expired / luna_supervisor_required / external_interface_disabled / external_interface_settings_invalid / workflow_cancelled），每条写明被什么拦住、到哪里修改（并提示"保存修改"——协调器只认已保存设置）。检测反馈条先查此表；页面错误条对 DispatchBlocked 的"code: detail"格式也改为"中文指引。（code）"，任何请求被拒都可读。
+- **检测入口置灰**：以协调器已保存的设置（snapshot，而非草稿）判断，总开关关闭时右键菜单"检测连通性"置灰，并在该行下方以琥珀色说明原因（禁用按钮不显示悬停提示，所以原因直接写在菜单里，与行文字左缘对齐）；若草稿中已开启但未保存，则提示"保存修改后可检测"。
+- **实测**（隔离调试实例，GTT_NODEMENUTEST 打开模型节点菜单，连接正式协调器只读加载；协调器切换到 0.5.0 后需重新复制 daemon-endpoint.json）：总开关关闭时检测项置灰、说明行显示正确。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 378 项通过、4 项既有 ignored（新增拒绝码覆盖与错误文本测试）。合并提交 bea8ce7 的 main CI 通过（Alpha 发布步骤按设计跳过）。未提交、未安装。
