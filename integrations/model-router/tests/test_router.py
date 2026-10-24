@@ -605,6 +605,20 @@ class RouterTests(unittest.TestCase):
         self.make_due(service, r)
         self.assertEqual(service.recovery.tick()["reason"], "recovery_hourly_budget")
 
+    def test_manual_recheck_is_not_limited_by_the_hourly_probe_budget(self):
+        r = route()
+        service = self.service([r], lambda *a: response("GTT_RECOVERY_OK"))
+        service.recovery.settings["max_probes_per_hour"] = 1
+        service.recovery.settings["max_tokens_per_hour"] = 100
+        service.store.record_probe(r, True, "fixture", 100)
+        self.make_due(service, r)
+        # Both hourly limits are spent; an explicit check of one route
+        # (the node menu / Sources page button) still runs. The background
+        # tick keeps the budget (test_recovery_honors_hourly_request_budget).
+        result = service.recovery.recheck(r.id, supervision_required=False)
+        self.assertTrue(result["checked"], result)
+        self.assertTrue(result["success"], result)
+
     def test_model_list_or_wrong_probe_answer_does_not_restore_route(self):
         r = route()
         service = self.service([r], lambda *a: response("available models: m"))

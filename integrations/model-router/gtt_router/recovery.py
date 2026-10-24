@@ -58,7 +58,9 @@ class RecoveryController:
     def recheck(self, route_id, workflow_id="default", *, supervision_required=True):
         if not isinstance(route_id, str) or not route_id or len(route_id) > 200:
             raise ValueError("route_id must be a bounded route identity")
-        # Explicit requests bypass old cooldowns, never capacity or probe budgets.
+        # Explicit requests bypass old cooldowns and the hourly recovery probe
+        # budget (a person asked for this one check), never capacity, the
+        # scheduling/interface gates or an exhausted source quota.
         if not isinstance(workflow_id, str) or not workflow_id or len(workflow_id) > 200:
             raise ValueError("workflow_id must be a bounded workflow identity")
         if not isinstance(supervision_required, bool):
@@ -84,8 +86,9 @@ class RecoveryController:
             workers = [a for a in service._active_codex() if a.get("role") != "supervisor"]
             if service.stopping or service.total_inflight or workers or len(service._active_codex()) >= service.limits.get("combined_parallel", 8) or any(j.state in {"queued", "running", "cancelling"} for j in [*service.jobs.values(),*service.groups.jobs.values()]):
                 return {"checked": False, "reason": "foreground_busy"}
+        manual = route_id is not None
         budget = service.store.probe_budget(now_ms() - 3600000)
-        if budget["count"] >= self.settings.get("max_probes_per_hour", 2) or budget["tokens"] >= self.settings.get("max_tokens_per_hour", 24000):
+        if not manual and (budget["count"] >= self.settings.get("max_probes_per_hour", 2) or budget["tokens"] >= self.settings.get("max_tokens_per_hour", 24000)):
             return {"checked": False, "reason": "recovery_hourly_budget"}
         service.ensure_catalog()
         candidates = []
@@ -109,7 +112,7 @@ class RecoveryController:
                 continue
             # Native IDE agents carry framework context even for tiny prompts.
             estimate = 20000 if route.adapter == "antigravity_cli" else 4096
-            if budget["tokens"] + estimate > self.settings.get("max_tokens_per_hour", 24000):
+            if not manual and budget["tokens"] + estimate > self.settings.get("max_tokens_per_hour", 24000):
                 continue
             candidates.append((min(s["next_probe_at"] for s in due) if due else 0, route, estimate))
         if not candidates:

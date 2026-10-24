@@ -11,6 +11,8 @@ pub(crate) struct BorderEvents {
     on_drop: Option<Callback<DroppedData>>,
     on_pointer_pressed: Option<Callback<PointerEventInfo>>,
     on_pointer_moved: Option<Callback<PointerEventInfo>>,
+    // GTT PATCH: mouse wheel over a Border (see PATCH.md).
+    on_pointer_wheel_changed: Option<Callback<PointerEventInfo>>,
     on_pointer_entered: Option<Callback<PointerEventInfo>>,
     on_pointer_exited: Option<Callback<PointerEventInfo>>,
     on_pointer_released: Option<Callback<PointerEventInfo>>,
@@ -891,6 +893,17 @@ pub mod public {
                     .get_or_insert_with(|| std::rc::Rc::new(Default::default())),
             )
             .on_pointer_moved = Some(callback.into_payload_callback());
+            self
+        }
+        pub fn on_pointer_wheel_changed(
+            mut self,
+            callback: impl IntoPayloadCallback<PointerEventInfo>,
+        ) -> Self {
+            std::rc::Rc::make_mut(
+                self.events
+                    .get_or_insert_with(|| std::rc::Rc::new(Default::default())),
+            )
+            .on_pointer_wheel_changed = Some(callback.into_payload_callback());
             self
         }
         pub fn on_pointer_entered(
@@ -9059,6 +9072,13 @@ pub mod public {
                             .is_some_and(|events| events.on_pointer_moved.is_some()),
                     );
                     visit(
+                        EventId::BorderPointerWheelChanged,
+                        value
+                            .events
+                            .as_ref()
+                            .is_some_and(|events| events.on_pointer_wheel_changed.is_some()),
+                    );
+                    visit(
                         EventId::BorderPointerEntered,
                         value
                             .events
@@ -11377,6 +11397,13 @@ impl MountedEventsExt for MountedProps {
                         .is_some_and(|events| events.on_pointer_moved.is_some()),
                 );
                 visit(
+                    EventId::BorderPointerWheelChanged,
+                    values
+                        .events
+                        .as_ref()
+                        .is_some_and(|events| events.on_pointer_wheel_changed.is_some()),
+                );
+                visit(
                     EventId::BorderPointerEntered,
                     values
                         .events
@@ -11723,6 +11750,15 @@ impl MountedEventsExt for MountedProps {
                 .events
                 .as_ref()
                 .and_then(|events| events.on_pointer_moved.as_ref())
+                .map(|callback| callback.call(*value)),
+            (
+                Self::Border(values),
+                EventId::BorderPointerWheelChanged,
+                EventPayload::PointerEventInfo(value),
+            ) => values
+                .events
+                .as_ref()
+                .and_then(|events| events.on_pointer_wheel_changed.as_ref())
                 .map(|callback| callback.call(*value)),
             (
                 Self::Border(values),
@@ -14077,6 +14113,7 @@ pub enum EventId {
     BorderDrop,
     BorderPointerPressed,
     BorderPointerMoved,
+    BorderPointerWheelChanged,
     BorderPointerEntered,
     BorderPointerExited,
     BorderPointerReleased,
@@ -15110,6 +15147,13 @@ const BORDER_EVENTS: &[EventDescriptor] = &[
         id: EventId::BorderPointerMoved,
         name: "PointerMoved",
         field: "on_pointer_moved",
+        payload: "PointerEventInfo",
+        interface: "Microsoft.UI.Xaml.IUIElement",
+    },
+    EventDescriptor {
+        id: EventId::BorderPointerWheelChanged,
+        name: "PointerWheelChanged",
+        field: "on_pointer_wheel_changed",
         payload: "PointerEventInfo",
         interface: "Microsoft.UI.Xaml.IUIElement",
     },
