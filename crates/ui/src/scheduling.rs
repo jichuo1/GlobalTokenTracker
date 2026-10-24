@@ -86,6 +86,10 @@ pub enum Action {
     ToggleRun,
     TogglePan,
     ToggleConnectMode,
+    CheckNode,
+    PoolNode,
+    ConnectFromNode,
+    DismissCheck,
     Fit,
     CloseInspector,
     Acknowledge(bool),
@@ -203,6 +207,10 @@ pub struct State {
     /// from anywhere on a node draws an edge. One gesture per mode — the old
     /// 20 DIP port strip beside the move area made each misfire as the other.
     connect_mode: bool,
+    /// Connectivity check started from the node menu: (route id, node title).
+    pending_check: Option<(String, String)>,
+    /// Result of that check, shown as a closable bar above the canvas.
+    check_feedback: Option<(InfoBarSeverity, String)>,
     /// Last left-press on empty canvas, for double-click detection (pointer
     /// events carry no click count).
     last_blank_press: Option<(std::time::Instant, (f64, f64))>,
@@ -256,6 +264,8 @@ impl Default for State {
             show_run: false,
             pan_tool: false,
             connect_mode: false,
+            pending_check: None,
+            check_feedback: None,
             last_blank_press: None,
             viewport: std::rc::Rc::new(std::cell::Cell::new((800.0, 500.0))),
             submit_key: String::new(),
@@ -517,6 +527,30 @@ impl State {
             // mode instead of silently re-enabling drags that move the view.
             Action::TogglePan => { self.pan_tool = !self.pan_tool; if self.pan_tool { self.connect_mode = false; } self.drag.cancel(); },
             Action::ToggleConnectMode => self.toggle_connect_mode(),
+            Action::CheckNode => {
+                let target = self
+                    .node
+                    .and_then(|i| self.workflow().and_then(|w| w.nodes.get(i)))
+                    .filter(|n| n.node_type == "model" && !n.route_id.is_empty())
+                    .map(|n| (n.route_id.clone(), n.title.clone()));
+                if let Some((route, title)) = target {
+                    self.check_feedback = None;
+                    self.pending_check = Some((route.clone(), title));
+                    self.update(Action::Check(route), ctx);
+                }
+            }
+            Action::PoolNode => {
+                let route = self
+                    .node
+                    .and_then(|i| self.workflow().and_then(|w| w.nodes.get(i)))
+                    .filter(|n| n.node_type == "model" && !n.route_id.is_empty())
+                    .map(|n| n.route_id.clone());
+                if let Some(route) = route {
+                    self.add_pool(route);
+                }
+            }
+            Action::ConnectFromNode => self.toggle_connect_mode(),
+            Action::DismissCheck => self.check_feedback = None,
             Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
             Action::CloseInspector => {self.show_params=false;self.show_node_details=false;},
             Action::AddFallback(id) => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)) && n.node_type=="model" && id!=n.route_id && !n.fallback_routes.contains(&id) && n.fallback_routes.len()<8 {n.fallback_routes.push(id);self.dirty=true;}}
@@ -547,6 +581,8 @@ impl State {
                     Err(error) => {
                         self.error = Some(error);
                         self.saving = false;
+                        // A failed check surfaces through the error bar.
+                        self.pending_check = None;
                     }
                     Ok(value) if value.get("settings").is_some() => {
                         match serde_json::from_value::<Snapshot>(value) {
@@ -567,6 +603,28 @@ impl State {
                                 }
                                 if let Some(check) = &snapshot.check {
                                     self.notice = check.to_string();
+                                }
+                                if let Some((route, title)) = self.pending_check.take() {
+                                    self.check_feedback = Some(check_feedback(
+                                        &title,
+                                        snapshot.check.as_ref(),
+                                        snapshot.routes.iter().find(|r| r.route_id == route),
+                                    ));
+                                }
+                                // GTT_NODEMENUTEST=<node index> opens that node's menu on
+                                // the first load in debug builds — injected pointer input
+                                // never reaches WinUI3's content island (same workaround
+                                // as GTT_DONUTTEST / GTT_TIPTEST).
+                                #[cfg(debug_assertions)]
+                                if !self.loaded
+                                    && let Some(i) = std::env::var("GTT_NODEMENUTEST")
+                                        .ok()
+                                        .and_then(|v| v.parse::<usize>().ok())
+                                    && self.workflow().is_some_and(|w| i < w.nodes.len())
+                                {
+                                    self.node = Some(i);
+                                    self.menu_at = (420.0, 60.0);
+                                    self.open_menu = Some("node");
                                 }
                                 if self.run_id.is_empty()
                                     && let Some(id) = snapshot.active_run(&self.workflow_id)
@@ -1151,10 +1209,12 @@ fn command(
     label: &str,
     description: &str,
     action: impl Fn() -> Action + 'static,
+    enabled: bool,
     ctx: &ViewContext<Shell>,
 ) -> View {
     Button::new()
         .style(ButtonStyle::Subtle)
+        .is_enabled(enabled)
         .min_height(36.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .horizontal_content_alignment(HorizontalAlignment::Stretch)
@@ -1166,9 +1226,12 @@ fn command(
                 .columns([GridLength::Pixel(20.0), GridLength::STAR])
                 .column_spacing(12.0)
                 .children((
-                    Border::new()
+                    // 16 DIP, like MenuFlyoutItem icons (SymbolIcon is 20).
+                    Viewbox::new()
+                        .width(16.0)
+                        .height(16.0)
                         .vertical_alignment(VerticalAlignment::Center)
-                        .content(SymbolIcon::new().symbol(icon)),
+                        .slot(ViewboxSlot::Child, SymbolIcon::new().symbol(icon)),
                     Border::new()
                         .grid_column(1)
                         .vertical_alignment(VerticalAlignment::Center)
@@ -1319,31 +1382,133 @@ fn help_button(theme: &Theme) -> View {
 }
 
 /// Width of the node context sheet: menu-sized, not panel-sized.
-const NODE_MENU_W: f64 = 240.0;
+const NODE_MENU_W: f64 = 260.0;
 
 /// Right-click sheet for a canvas node. The canvas is a custom surface, so
 /// this one stays an in-page layer; it is styled as a MenuFlyout (subtle
-/// rows, icon column, hairline separator) to match the native menus.
+/// rows, icon column, hairline separators) to match the native menus.
+///
+/// Header = the node's name and its availability line, so opening the menu
+/// already answers "is this node usable"; the rows are the node's frequent
+/// actions, greyed out where they do not apply to this node type.
 fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
-    let title = state
+    let workflow = state.workflow();
+    let node = state
         .node
-        .and_then(|i| state.workflow().and_then(|w| w.nodes.get(i)))
-        .map_or_else(|| "节点操作".to_owned(), |n| n.title.clone());
+        .and_then(|i| workflow.and_then(|w| w.nodes.get(i)));
+    let route = node.and_then(|n| {
+        state
+            .snapshot
+            .routes
+            .iter()
+            .find(|r| r.route_id == n.route_id)
+    });
+    let is_model = node.is_some_and(|n| n.node_type == "model");
+    let bound = is_model && node.is_some_and(|n| !n.route_id.is_empty());
+    let (tone, status) = match node {
+        Some(n) if n.node_type == "input" => (Tone::Good, "入口 · 按拓扑向下游分发".to_owned()),
+        Some(n) if n.node_type != "model" => (Tone::Muted, "本地节点 · 不调用模型".to_owned()),
+        Some(_) => {
+            let (tone, label) = route_status(route);
+            let target =
+                route.map_or_else(String::new, |r| format!(" · {} / {}", r.source, r.model));
+            (tone, format!("{label}{target}"))
+        }
+        None => (Tone::Muted, String::new()),
+    };
+    let tone_brush = match tone {
+        Tone::Good => theme.ok,
+        Tone::Warn => theme.warn,
+        Tone::Bad => theme.danger,
+        Tone::Info => theme.accent,
+        Tone::Muted => theme.subtle,
+    };
+    let pooled = node.is_some_and(|n| {
+        state
+            .draft
+            .pool
+            .iter()
+            .any(|p| p.route_id == n.route_id && p.expires_at > model::now_ms())
+    });
+    let linked = state.node.zip(workflow).is_some_and(|(i, w)| {
+        let id = &w.nodes[i].id;
+        w.edges.iter().any(|e| &e.from == id || &e.to == id)
+    });
+    let checking = state.pending_check.is_some();
+    let separator = || -> View {
+        Border::new()
+            .height(1.0)
+            .margin(Thickness::xy(0.0, 4.0))
+            .background(theme.divider)
+            .into()
+    };
     let items: Vec<View> = vec![
         Border::new()
-            .padding(Thickness::new(11.0, 4.0, 8.0, 4.0))
-            .content(
-                TextBlock::new()
-                    .text(title)
-                    .font_size(theme.label_size)
-                    .foreground(theme.subtle)
-                    .text_trimming(TextTrimming::CharacterEllipsis),
-            ),
+            .padding(Thickness::new(11.0, 6.0, 8.0, 6.0))
+            .content(vstack(
+                3.0,
+                vec![
+                    TextBlock::new()
+                        .text(node.map_or("节点操作", |n| n.title.as_str()))
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .text_trimming(TextTrimming::CharacterEllipsis)
+                        .into(),
+                    TextBlock::new()
+                        .text(format!("● {status}"))
+                        .font_size(theme.label_size)
+                        .foreground(tone_brush)
+                        .text_trimming(TextTrimming::CharacterEllipsis)
+                        .into(),
+                ],
+            )),
+        separator(),
         command(
             Symbol::Edit,
             "编辑节点",
             help_for("编辑节点"),
             || Action::EditNode,
+            true,
+            ctx,
+        ),
+        command(
+            Symbol::Refresh,
+            if checking {
+                "检测中…"
+            } else {
+                "检测连通性"
+            },
+            if bound {
+                "发起一次真实生成检测（会产生少量用量），结果显示在画布上方。"
+            } else {
+                "仅绑定了模型的模型节点可以检测。"
+            },
+            || Action::CheckNode,
+            bound && !checking && !state.busy,
+            ctx,
+        ),
+        command(
+            Symbol::Add,
+            if pooled {
+                "续期模型池"
+            } else {
+                "加入模型池"
+            },
+            "按来源页的有效期把本节点的模型加入限时模型池（已在池则续期），保存后生效。定向模式只使用池内模型。",
+            || Action::PoolNode,
+            bound,
+            ctx,
+        ),
+        separator(),
+        command(
+            Symbol::Link,
+            if state.connect_mode {
+                "退出连线模式"
+            } else {
+                "从此节点连线"
+            },
+            "切换到连线模式后，从该节点拖到下游节点即可建立依赖。",
+            || Action::ConnectFromNode,
+            true,
             ctx,
         ),
         command(
@@ -1351,25 +1516,16 @@ fn node_menu(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
             "断开连线",
             "移除与该节点相关的全部上下游连线，保留节点。",
             || Action::DisconnectNode,
+            linked,
             ctx,
         ),
-        Border::new()
-            .height(1.0)
-            .margin(Thickness::xy(0.0, 4.0))
-            .background(theme.divider)
-            .into(),
+        separator(),
         command(
             Symbol::Delete,
             "删除节点",
             "从工作流移除该节点及其全部连线。",
             || Action::RemoveNode,
-            ctx,
-        ),
-        command(
-            Symbol::ClearSelection,
-            "取消选择",
-            "清除当前选中，保留节点与连线。",
-            || Action::ClearSelection,
+            true,
             ctx,
         ),
     ];
@@ -1819,7 +1975,7 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 "{} / {} · {} · 最近错误 {}",
                 r.source,
                 r.model,
-                r.connectivity,
+                route_status(Some(r)).1,
                 r.last_error.as_deref().unwrap_or("—")
             );
             route_rows.push(table_row(
@@ -2274,6 +2430,30 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
     // the node sheet lives in the pane below it, anchored by layout.
     let mut top = vec![page_band(state, theme, ctx)];
     top.extend(error_bar(state));
+    // Result of a connectivity check started from the node menu: the canvas
+    // page otherwise never shows `notice`, so the check had no visible answer.
+    if let Some((severity, message)) = &state.check_feedback {
+        top.push(
+            InfoBar::new()
+                .severity(*severity)
+                .is_open(true)
+                .is_closable(true)
+                .title("连通性检测")
+                .message(message.clone())
+                .on_closed(ctx.callback(|_| Msg::Scheduling(Action::DismissCheck)))
+                .into(),
+        );
+    } else if let Some((_, title)) = &state.pending_check {
+        top.push(
+            InfoBar::new()
+                .severity(InfoBarSeverity::Informational)
+                .is_open(true)
+                .is_closable(false)
+                .title("连通性检测")
+                .message(format!("正在检测「{title}」…"))
+                .into(),
+        );
+    }
     top.push(flow_bar);
     top.push(library_bar);
     let toolbar = vstack(10.0, top);
@@ -2319,7 +2499,7 @@ fn workspace_view(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) ->
         let (px, py) = state.menu_at;
         let (vw, vh) = state.viewport.get();
         let left = px.clamp(0.0, (vw - NODE_MENU_W - 12.0).max(0.0));
-        let top = py.clamp(0.0, (vh - 220.0).max(0.0));
+        let top = py.clamp(0.0, (vh - 330.0).max(0.0));
         layers.push(KeyedView::new(
             "menu",
             Border::new()
@@ -2764,13 +2944,81 @@ fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
 
 /// Status color classes for the node canvas; resolved to brushes in the draw
 /// closure (brushes are device-bound, the classification is plain data).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Tone {
     Good,
     Warn,
     Bad,
     Info,
     Muted,
+}
+
+/// Availability of a model node's bound route, in the router's connectivity
+/// vocabulary (scheduling.py): verified / stale / cooling_down /
+/// verification_required / unverified / "". One table for the canvas status
+/// band, the node menu and the model list — the canvas used to know four of
+/// the six values, so a route merely due for re-verification (stale) read as
+/// a red 连通异常.
+fn route_status(route: Option<&Route>) -> (Tone, &'static str) {
+    match route.map(|r| r.connectivity.as_str()) {
+        Some("verified") => (Tone::Good, "已连通"),
+        Some("" | "unverified") => (Tone::Warn, "未验证"),
+        Some("stale") => (Tone::Warn, "待重新验证"),
+        Some("verification_required") => (Tone::Warn, "需要验证"),
+        Some("cooling_down") => (Tone::Bad, "冷却中"),
+        Some(_) => (Tone::Bad, "连通异常"),
+        None => (Tone::Warn, "未绑定模型"),
+    }
+}
+
+/// Turns the router's `check` answer into the canvas feedback bar.
+fn check_feedback(
+    title: &str,
+    check: Option<&Value>,
+    route: Option<&Route>,
+) -> (InfoBarSeverity, String) {
+    let reason = |code: &str| -> String {
+        match code {
+            "foreground_busy" | "yielded_to_foreground" => {
+                "有前台任务正在使用该来源，检测已让位，请稍后再试".into()
+            }
+            "recovery_hourly_budget" => "本小时的检测预算已用完，请稍后再试".into(),
+            "no_due_route" => "协调器未找到可检测的该路线（可能已停用或不在本轮范围）".into(),
+            "auth_failed" => "认证失败，请检查该来源的登录状态".into(),
+            "model_unavailable" => "模型不可用".into(),
+            "quota_exhausted" => "额度已耗尽".into(),
+            "luna_supervisor_required" => {
+                "需要同一工作流的在线 Luna 监工，或在工作流设置中关闭监工".into()
+            }
+            other => other.to_owned(),
+        }
+    };
+    let Some(check) = check else {
+        return (
+            InfoBarSeverity::Warning,
+            format!("「{title}」未收到检测结果。"),
+        );
+    };
+    let code = |key: &str| check[key].as_str().unwrap_or("").to_owned();
+    if check["checked"].as_bool() != Some(true) {
+        return (
+            InfoBarSeverity::Warning,
+            format!("「{title}」未执行检测：{}。", reason(&code("reason"))),
+        );
+    }
+    if check["success"].as_bool() == Some(true) {
+        return (
+            InfoBarSeverity::Success,
+            format!("「{title}」生成检测通过，当前{}。", route_status(route).1),
+        );
+    }
+    let retry = check["retry_after_s"]
+        .as_u64()
+        .map_or_else(String::new, |s| format!("，约 {s} 秒后可重试"));
+    (
+        InfoBarSeverity::Error,
+        format!("「{title}」检测失败：{}{retry}。", reason(&code("code"))),
+    )
 }
 
 /// Classifies a router run-state string into a badge. Keyword matching on the
@@ -2884,22 +3132,9 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                         // "verification_required" / "" — only a verified
                         // route is a green light, anything else is a warning
                         // unless the router reports a hard failure.
-                        match routes_by_id.get(n.route_id.as_str()) {
-                            Some(r) if r.connectivity == "verified" => {
-                                Some((Tone::Good, "已连通".into()))
-                            }
-                            Some(r) if r.connectivity.is_empty() => {
-                                Some((Tone::Warn, "未验证".into()))
-                            }
-                            Some(r) if r.connectivity == "unverified" => {
-                                Some((Tone::Warn, "未验证".into()))
-                            }
-                            Some(r) if r.connectivity == "verification_required" => {
-                                Some((Tone::Warn, "需要验证".into()))
-                            }
-                            Some(_) => Some((Tone::Bad, "连通异常".into())),
-                            None => Some((Tone::Warn, "未绑定模型".into())),
-                        }
+                        let (tone, label) =
+                            route_status(routes_by_id.get(n.route_id.as_str()).copied());
+                        Some((tone, label.into()))
                     };
                     let badge = run_states.get(&n.id).map(|s| run_tone(s));
                     (light, badge)
@@ -3427,6 +3662,54 @@ mod gesture_tests {
         state.detail = Some(serde_json::json!({"state":"running"}));
         assert!(state.run_disabled_reason().unwrap().contains("运行"));
     }
+    #[test]
+    fn route_status_covers_the_router_vocabulary() {
+        use super::{Tone, route_status};
+        let route = |c: &str| globaltokentracker_core::scheduler::Route {
+            connectivity: c.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            route_status(Some(&route("verified"))),
+            (Tone::Good, "已连通")
+        );
+        // Due for re-verification is a warning, not a failure.
+        assert_eq!(
+            route_status(Some(&route("stale"))),
+            (Tone::Warn, "待重新验证")
+        );
+        assert_eq!(
+            route_status(Some(&route("cooling_down"))),
+            (Tone::Bad, "冷却中")
+        );
+        assert_eq!(route_status(Some(&route(""))), (Tone::Warn, "未验证"));
+        assert_eq!(route_status(None), (Tone::Warn, "未绑定模型"));
+    }
+
+    #[test]
+    fn check_feedback_reads_the_three_router_answers() {
+        use super::check_feedback;
+        use serde_json::json;
+        let ok = check_feedback("A", Some(&json!({"checked": true, "success": true})), None);
+        assert_eq!(ok.0, windows_reactor::InfoBarSeverity::Success);
+        let failed = check_feedback(
+            "A",
+            Some(
+                &json!({"checked": true, "success": false, "code": "auth_failed", "retry_after_s": 60}),
+            ),
+            None,
+        );
+        assert_eq!(failed.0, windows_reactor::InfoBarSeverity::Error);
+        assert!(failed.1.contains("认证失败") && failed.1.contains("60 秒"));
+        let skipped = check_feedback(
+            "A",
+            Some(&json!({"checked": false, "reason": "recovery_hourly_budget"})),
+            None,
+        );
+        assert_eq!(skipped.0, windows_reactor::InfoBarSeverity::Warning);
+        assert!(skipped.1.contains("预算"));
+    }
+
     #[test]
     fn connect_mode_locks_panning() {
         let mut state = super::State::default();

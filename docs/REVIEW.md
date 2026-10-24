@@ -2031,6 +2031,17 @@
 - **修复**：新增 `State::can_pan()`（连线模式下为 false），三处入口都经它判定，连线模式下左/右/中键拖动均不再移动视图；右键节点仍打开节点菜单。打开平移工具时自动回到移动模式（平移工具属于移动模式）。"适应全图"与缩放不经拖动，仍可在连线模式下调整视图。徽标第二行改为"从节点拖到下游节点 · 画布锁定 · 双击空白处切换"，"?"说明同步改写。
 - **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 370 项通过、4 项既有 ignored（新增 connect_mode_locks_panning）。隔离实例截图确认连线模式徽标文字在框内。真实指针拖动未由本机验证（未接管鼠标）。
 
+## S166 节点右键菜单：可用性一目了然与常用操作（2026-10-24）
+
+- **需求（用户）**：节点右键菜单应能一键检测连通性、直接看到可用状态，而不必翻找冗长的菜单；并补充其他常用功能。
+- **菜单重排**：标题区显示节点名与彩色可用性行（如"● 未验证 · zcode / deepseek-flash"；母节点"入口"，本地节点"本地节点 · 不调用模型"）。操作分三组：编辑节点 / **检测连通性** / **加入或续期模型池**；**从此节点连线**（进入连线模式，已在则为"退出连线模式"）/ 断开连线（无连线时置灰）；删除节点。对当前节点类型不适用的项置灰（未绑定模型的、母节点和本地节点不能检测或入池）。"取消选择"移出菜单（状态栏已有同名按钮）。图标改为 16 DIP，与 MenuFlyoutItem 一致。
+- **检测结果可见（根因）**：原先检测结果存进 `notice`，而画布页从不显示 `notice`，在画布发起检测没有任何可见回执。新增 `pending_check` / `check_feedback`：检测中显示"正在检测「节点」…"，返回后按路由器 `recheck` 的三种回答显示可关闭的 InfoBar——通过（成功）、失败（错误，附原因码中文说明与重试秒数）、未执行（警告：前台占用、每小时检测预算、Luna 监工等）；请求本身报错仍走错误条。
+- **连通性词表统一**：新增 `route_status`，覆盖路由器全部六种 connectivity（verified / stale / cooling_down / verification_required / unverified / 空）。画布状态带此前只认四种，**"stale"（验证已超过 24 小时）与"cooling_down"都显示为红色"连通异常"**；现为"待重新验证"（琥珀）与"冷却中"（红）。节点菜单、画布状态带与来源页模型列表共用同一张表（来源页原先直接显示 verified 等英文原值）。
+- **测试钩子**：仿照 GTT_DONUTTEST / GTT_TIPTEST 新增仅 debug 构建生效的 `GTT_NODEMENUTEST=<节点序号>`，首次加载后打开该节点菜单，用于截图验收（注入的指针输入到不了 WinUI3 内容岛）。
+- **实测**（隔离调试实例，指向正式协调器只读加载，不保存、不发起检测）：菜单标题、状态行配色、分组与置灰均符合预期。真实检测未在本机发起（会产生用量），反馈条文案由单元测试覆盖三种回答。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 375 项通过、4 项既有 ignored（新增 route_status 词表与 check_feedback 三种回答测试）。未提交、未安装。
+
+
 ## S167 统一调度受理与 GTT 正式承接（2026-10-24）
 
 - **范围**：协调器 0.5.0 新增 router_dispatch，将 task/group/workflow 的计划和提交集中到持久受理日志；原六个提交/计划名称退出 MCP 工具发现并兼容转发。研究组的审批、续研、交接保持原职责，共用原执行、容量和计量路径。GTT core 统一 loopback 认证、dispatch_v1/contract=2 握手及旧 workflow 转换；FFI 开放新入口，CLI 新增 scheduling 七种动作，从文件读取材料。
