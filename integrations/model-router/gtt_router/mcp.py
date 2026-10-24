@@ -69,15 +69,18 @@ REFS = {"type": "array", "maxItems": 4, "items": {"type": "object", "additionalP
 MESSAGE_KIND = {"type": "string", "enum": ["assignment", "evidence", "conflict", "progress", "suggestion", "merge_proposal"]}
 TOOLS = [
     tool("router_dispatch", "Unified durable intake for task, group or workflow (inline or saved_workflow_id). Submit with a stable request_id; query it after ambiguous transport. Never replay unknown paid outcomes. status/collect/report/list/cancel remain available when dispatch is disabled. Large reports are losslessly paged with report, worker, node_id and offset. Existing supervision, route pool, budget and capacity gates apply.",
-         {"action": {"type": "string", "enum": ["plan", "submit", "status", "collect", "report", "list", "cancel"]},
+         {"action": {"type": "string", "enum": ["plan", "submit", "status", "collect", "report", "list", "cancel", "topology", "events", "coordinate"]},
           "request": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {
               "kind": {"type": "string", "enum": ["task", "group", "workflow"]}, "task": TASK_SCHEMA, "request": GROUP_SCHEMA,
               "definition": {"type": "object"}, "saved_workflow_id": ID, "expected_revision": {"type": "integer", "minimum": 0},
-              "input_text": {"type": "string", "maxLength": ABS_LIMITS["max_workflow_input_chars"]}, "workflow_id": ID}},
+              "input_text": {"type": "string", "maxLength": ABS_LIMITS["max_workflow_input_chars"]}, "workflow_id": ID,
+              "execution": {"type": "object", "description": "Caller-owned workspace root, exact writable_paths and optional fixed command registry; models cannot expand this grant"}}},
           "request_id": ID, "dispatch_id": ID, "acknowledge_unknown_risk": {"type": "boolean"}, "workflow_id": ID,
           "cursor": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 64},
           "max_chars": {"type": "integer", "minimum": 2000, "maximum": 30000}, "node_id": ID,
-          "worker": {"type": "integer", "minimum": 0}, "offset": {"type": "integer", "minimum": 0}}, ["action"]),
+          "worker": {"type": "integer", "minimum": 0}, "offset": {"type": "integer", "minimum": 0},
+          "expected_revision": {"type": "integer", "minimum": 0}, "event_id": ID,
+          "decision": {"type": "object", "description": "Actual caller Codex assignment, exact review proposal correction, or evidence-digest acceptance; messages alone never approve edits"}}, ["action"]),
     tool("router_scheduling", "Read/edit user dispatch switches, expiring ordered model pool and saved DAGs. Refresh scans native catalogs only; check uses the existing bounded generation probe and real Luna gate. Save requires the current revision.",
          {"action": {"type": "string", "enum": ["get", "save", "refresh", "check"]}, "value": {"type": "object"},
           "expected_revision": {"type": "integer", "minimum": 0}, "route_id": ID, "workflow_id": ID, "luna_supervision": {"type": "boolean", "default": True}}),

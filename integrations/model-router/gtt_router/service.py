@@ -20,12 +20,25 @@ from .store import StateStore
 from .usage import clean_usage, total_tokens
 from .controls import BLOCK_CODES, DispatchBlocked, control_paths, require_interface
 from .slicing import output_budget
+from .operator import WorkspaceBroker
+from .operator_workflow import OperatorWorkflow
 
 ADMISSION_STOP_CODES = {"token_budget_exhausted", "exploration_budget_exhausted", "attempt_budget_exhausted",
                         "context_exceeded", "output_recovery_unavailable", "scope_capacity_full", "queue_deadline", "work_already_covered", "cancelled"}
 
 
 def make_prompt(task, worker_index=0, verifier_context=None):
+    assignment = getattr(task, "_operator_assignment", None)
+    if assignment is not None:
+        return ("You are the fast operator implementing an explicit Codex assignment. Produce concrete operations, not a new plan or delegation. "
+            "Native tools remain disabled: do not execute commands or modify files yourself; the GTT workspace broker applies your operation JSON. "
+            "Use only the supplied file paths, exact base_sha256, and registered command_id values. Never enlarge scope or repair reviewer findings without a new Codex assignment. "
+            "Return one complete JSON object: {summary:string,findings:[],sources:[],uncertainties:[],complete:true,operations:[{id:string,op:write_text|replace_text|run_command,path?:string,base_sha256?:string|null,content?:string,old_text?:string,new_text?:string,command_id?:string}]}. "
+            "Create a missing file only with base_sha256=null. Existing files require the exact supplied hash. replace_text must match exactly once. "
+            "A file snapshot with excerpt_only=true is a line slice, never the full file: use replace_text wholly inside its content; never write_text that file. "
+            "Do not invent execution success: you are proposing the assigned concrete operations; actual results come from broker receipts. "
+            "Keep within the explicit assignment and report capacity. The assignment and authorized snapshots follow:\n" +
+            json.dumps({"task": task.prompt, "context": task.context}, ensure_ascii=False))
     instructions = {
         "research": "Collect current evidence from primary sources. Do not repeat blocked calls. After read_url_content, use view_file only on the bounded gtt_excerpt.md directed by the local hook. Cite the exact full URL passed to a successful read_url_content, never just a homepage domain. Separate facts from inference and never claim a search snippet is a read page.",
         "extract": "Extract only the requested facts from supplied data; preserve provenance and mark missing data.",
@@ -144,6 +157,8 @@ class RouterService:
         from .recovery import RecoveryController
         self.recovery = RecoveryController(self)
         self.call_profile()
+        self.operator = WorkspaceBroker(self)
+        self.scheduling.operators = OperatorWorkflow(self.scheduling)
 
     def record_failure(self, route, failure):
         from .recovery import CONNECTIVITY_ERRORS
@@ -465,8 +480,9 @@ class RouterService:
             self.coordination.on_save(job)
             job.changed.notify_all()
 
-    def submit(self, data, *, _supervision_required=True, _cancellation_event=None, _job_id=None):
+    def submit(self, data, *, _supervision_required=True, _cancellation_event=None, _job_id=None, _operator_assignment=None):
         task = self.parse_task(data)
+        task._operator_assignment = _operator_assignment
         task._cancellation_event = _cancellation_event
         task._workflow_supervision_opt_out = not _supervision_required
         self.require_dispatch(task.workflow_id, task=task)
@@ -746,7 +762,10 @@ class RouterService:
                     attempt["actual_model"] = raw["actual_selection"].get("model", route.model)
                 charge(raw.get("usage", {}))
                 context.check()
-                result = validate_result(raw, task.needs_web) if task.report_max_chars == DEFAULT_REPORT_CHARS else validate_result(raw, task.needs_web, task.report_max_chars)
+                if getattr(task, "_operator_assignment", None) is not None:
+                    result = validate_result(raw, task.needs_web, task.report_max_chars, local_files=task._operator_assignment["files"])
+                else:
+                    result = validate_result(raw, task.needs_web) if task.report_max_chars == DEFAULT_REPORT_CHARS else validate_result(raw, task.needs_web, task.report_max_chars)
                 activity = context.public_activity()
                 if activity["activity_count"]:
                     progress({"activity": activity})
@@ -876,7 +895,7 @@ class RouterService:
                                          ttft_s=job.task.ttft_s, idle_s=job.task.idle_s, stall_grace_s=job.task.stall_grace_s,
                                          price_weight=job.task.price_weight, prefer_free=job.task.prefer_free,
                                          prefer_new_models=job.task.prefer_new_models, report_max_chars=job.task.report_max_chars)
-                for field in ["_runtime_limits","_native_options","_source_parallel","_workflow_supervision_opt_out","_cancellation_event"]:
+                for field in ["_runtime_limits","_native_options","_source_parallel","_workflow_supervision_opt_out","_cancellation_event","_operator_assignment"]:
                     if hasattr(job.task,field):setattr(verification_task,field,getattr(job.task,field))
                 verification_task._queue_wait_explicit = getattr(job.task, "_queue_wait_explicit", False)
                 if len(json.dumps(reports, ensure_ascii=False)) + len(verification_task.context) > self.limits.get("max_context_chars", 64000):

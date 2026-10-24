@@ -17,6 +17,27 @@ FILE_NAME = "scheduling.json"
 DEFAULT = {"revision": 0, "enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [], "call_profile": {"preset":"inherit"}}
 TERMINAL = {"succeeded", "failed", "blocked", "unknown", "cancelled", "interrupted"}
 INFORMATION_PROMPT = "\n证据不足时报告 information_requests:[{question,reason}]。补充已有请求时，仅用上下文提供的准确 ID 返回 information_support:[{request_id,summary,evidence}]；每个问题分别绑定，不得将缺失证据视为已解决。"
+MODEL_TYPES = {"model", "operator", "reviewer"}
+
+
+def controlled(definition):
+    return any(n["node_type"] in {"codex", "operator", "reviewer"} for n in definition["nodes"]) or any(e.get("kind", "task") == "report" for e in definition["edges"])
+
+
+def report_dependencies(definition, node_id):
+    """Feedback to an active task ancestor never blocks its first dispatch."""
+    spec = next(n for n in definition["nodes"] if n["id"] == node_id)
+    if spec["node_type"] in {"codex", "operator", "input"}:
+        return []
+    descendants, pending = set(), [node_id]
+    while pending:
+        current = pending.pop()
+        for edge in definition["edges"]:
+            if edge.get("kind", "task") == "task" and edge["from"] == current and edge["to"] not in descendants:
+                descendants.add(edge["to"])
+                pending.append(edge["to"])
+    return [e["from"] for e in definition["edges"] if e.get("kind", "task") == "report" and e["to"] == node_id
+            and (spec["node_type"] == "reviewer" or e["from"] not in descendants)]
 
 
 def text(value, name, maximum=200, empty=False):
@@ -39,7 +60,7 @@ def labels(values):
 
 
 def graph(value, *, allow_draft=False):
-    if not isinstance(value, dict) or set(value) - {"id", "name", "nodes", "edges", "token_budget", "max_parallel", "luna_supervision"}:
+    if not isinstance(value, dict) or set(value) - {"id", "name", "nodes", "edges", "token_budget", "max_parallel", "luna_supervision", "max_rounds"}:
         raise ValueError("Invalid workflow fields")
     result = {"id": text(value.get("id"), "workflow id"), "name": text(value.get("name"), "workflow name", 100),
               "token_budget": integer(value.get("token_budget", 200000), "workflow budget", 1000, 100000000),
@@ -59,7 +80,7 @@ def graph(value, *, allow_draft=False):
             raise ValueError("Duplicate node id")
         ids.add(ident)
         node_type = node.get("node_type", "model")
-        if node_type not in {"model", "input", "merge", "gate", "output"}:
+        if node_type not in MODEL_TYPES | {"input", "merge", "gate", "output", "codex"}:
             raise ValueError("Unsupported workflow node type")
         fallbacks=node.get("fallback_routes",[])
         if not isinstance(fallbacks,list) or len(fallbacks)>8:raise ValueError("At most eight explicit fallback routes per node")
@@ -71,6 +92,8 @@ def graph(value, *, allow_draft=False):
             raise ValueError("Node task contains unsupported fields")
         from .profiles import ABS_LIMITS
         parsed = Task.parse({"kind": "extract", "prompt": "Complete the supplied material.", **task}, runtime_limits=ABS_LIMITS)
+        if node_type in {"operator", "reviewer"} and (parsed.fanout != 1 or parsed.verify):
+            raise ValueError("An operator/reviewer has one attributable report; use separate nodes for parallel work and verification")
         if len(parsed.prompt) > ABS_LIMITS["max_node_prompt_chars"]:
             raise ValueError("Node prompt exceeds protocol envelope")
         pos = {}
@@ -80,34 +103,73 @@ def graph(value, *, allow_draft=False):
                 raise ValueError("Node positions must be finite canvas coordinates")
             pos[key] = v
         result["nodes"].append({"id": ident, "title": text(node.get("title", ident), "node title", 100),
-            "route_id": text(node.get("route_id", ""), "route id", empty=allow_draft or node_type != "model"),
+            "route_id": text(node.get("route_id", ""), "route id", empty=allow_draft or node_type not in MODEL_TYPES),
             "node_type": node_type, "role": text(node.get("role", ""), "node role", ABS_LIMITS["max_node_role_chars"], empty=True),
             "fallback_routes":fallbacks,
             "tags": labels(node.get("tags", [])), **pos,
             "task": {"kind": parsed.kind, "prompt": parsed.prompt, **copy.deepcopy(task)}})
     seen = set()
     for edge in edges:
-        if not isinstance(edge, dict) or set(edge) != {"from", "to"}:
-            raise ValueError("Edges require from and to")
+        if not isinstance(edge, dict) or set(edge) - {"from", "to", "kind"} or not {"from", "to"} <= set(edge):
+            raise ValueError("Edges require from, to and an optional task/report kind")
+        kind = edge.get("kind", "task")
         pair = (edge["from"], edge["to"])
-        if any(not isinstance(v, str) or v not in ids for v in pair) or pair[0] == pair[1] or pair in seen:
+        if kind not in {"task", "report"} or any(not isinstance(v, str) or v not in ids for v in pair) or pair[0] == pair[1] or (*pair, kind) in seen:
             raise ValueError("Invalid or duplicate workflow edge")
-        seen.add(pair)
-        result["edges"].append(dict(edge))
-    outgoing, degrees = {n: [] for n in ids}, dict.fromkeys(ids, 0)
-    for a, b in seen:
-        outgoing[a].append(b)
-        degrees[b] += 1
-    ready = [n for n in ids if not degrees[n]]
-    visited = 0
-    while ready:
-        visited += 1
-        for n in outgoing[ready.pop()]:
-            degrees[n] -= 1
-            if not degrees[n]:
-                ready.append(n)
-    if visited != len(ids):
-        raise ValueError("Workflow contains a cycle")
+        destination = next(n for n in result["nodes"] if n["id"] == pair[1])
+        if destination["node_type"] == "input" or (kind == "task" and destination["node_type"] == "codex"):
+            raise ValueError("Input/Codex entry nodes accept no task edges; use a report edge to Codex")
+        seen.add((*pair, kind))
+        result["edges"].append({"from": pair[0], "to": pair[1], **({"kind": kind} if kind != "task" else {})})
+    for kind in ("task", "report"):
+        outgoing, degrees = {n: [] for n in ids}, dict.fromkeys(ids, 0)
+        for a, b, edge_kind in seen:
+            if edge_kind == kind:
+                outgoing[a].append(b)
+                degrees[b] += 1
+        ready, visited = [n for n in ids if not degrees[n]], 0
+        while ready:
+            visited += 1
+            for n in outgoing[ready.pop()]:
+                degrees[n] -= 1
+                if not degrees[n]:
+                    ready.append(n)
+        if visited != len(ids):
+            raise ValueError("Workflow contains a cycle in " + kind + " edges")
+    if controlled(result):
+        result["max_rounds"] = integer(value.get("max_rounds", 8), "workflow rounds", 1, 64)
+        codex = [n for n in result["nodes"] if n["node_type"] == "codex"]
+        if not allow_draft and len(codex) != 1:
+            raise ValueError("A controlled workflow requires exactly one real caller Codex node")
+        if any(n["node_type"] == "codex" and n["route_id"] for n in result["nodes"]):
+            raise ValueError("Codex mother is caller-executed and cannot bind an external model route")
+        if not allow_draft:
+            reachable = {codex[0]["id"]}
+            while True:
+                grown = reachable | {b for a, b, kind in seen if kind == "task" and a in reachable}
+                if grown == reachable:
+                    break
+                reachable = grown
+            if any(n["node_type"] == "operator" and n["id"] not in reachable for n in result["nodes"]):
+                raise ValueError("Every operator must be downstream of the Codex task topology")
+        effective = [(a, b) for a, b, kind in seen if kind == "task"]
+        effective += [(source, n["id"]) for n in result["nodes"] for source in report_dependencies(result, n["id"])]
+        degrees = dict.fromkeys(ids, 0)
+        for _, destination in effective:
+            degrees[destination] += 1
+        ready, visited = [n for n in ids if not degrees[n]], 0
+        while ready:
+            source = ready.pop()
+            visited += 1
+            for origin, destination in effective:
+                if origin == source:
+                    degrees[destination] -= 1
+                    if not degrees[destination]:
+                        ready.append(destination)
+        if visited != len(ids):
+            raise ValueError("Report review dependencies conflict with task startup; route correction approval through Codex")
+    elif "max_rounds" in value:
+        integer(value["max_rounds"], "workflow rounds", 1, 64)
     return result
 
 
@@ -234,7 +296,7 @@ class Scheduling:
                 if run["state"] not in TERMINAL:
                     run["state"] = "interrupted"
                     for node in run["nodes"].values():
-                        if node["state"] in {"queued", "running"}:
+                        if node["state"] in {"queued", "running", "executing"}:
                             node["state"] = "unknown"
                     self._save(run)
 
@@ -253,6 +315,10 @@ class Scheduling:
         if not full:
             result.pop("input", None)
             result.pop("definition", None)
+            result.pop("execution", None)
+            if "assignments" in result:
+                result["assignments"] = {k: {p: a.get(p) for p in ("id", "node_id", "paths", "file_ranges", "command_ids", "input_range", "source")}
+                                         for k, a in result["assignments"].items()}
             for node in result["nodes"].values():
                 requests = node.get("information_requests", [])
                 node["information_request_count"] = len(requests)
@@ -353,10 +419,16 @@ class Scheduling:
         self._check_limits(definition)
         return {"workflow": definition, "nodes": [{"id": n["id"], "plan": self.service.plan({**n["task"],
             "preferred_route": n["route_id"], "allowed_routes":[n["route_id"],*n["fallback_routes"]],"workflow_id": workflow_id})
-            if n["node_type"] == "model" else {"local_node": n["node_type"], "generates_content": False}} for n in definition["nodes"]]}
+            if n["node_type"] in MODEL_TYPES else {"local_node": n["node_type"], "generates_content": False,
+                "caller_required": n["node_type"] == "codex"}} for n in definition["nodes"]],
+            "required_features": ["operator_workflow_v1", "feedback_edges_v1"] if controlled(definition) else []}
 
-    def submit(self, definition, input_text="", workflow_id="default", request_id="", acknowledge_unknown_risk=False, *, _run_id=None, _cancellation_event=None):
+    def submit(self, definition, input_text="", workflow_id="default", request_id="", acknowledge_unknown_risk=False, execution=None, *, _run_id=None, _cancellation_event=None):
         definition = graph(definition)
+        operator_mode = controlled(definition)
+        grant = self.service.operator.validate_grant(execution) if execution is not None else None
+        if any(n["node_type"] == "operator" for n in definition["nodes"]) and grant is None:
+            raise ValueError("operator_execution_grant_required: specify workspace root and exact writable paths")
         from .profiles import ABS_LIMITS
         text(input_text,"workflow input",ABS_LIMITS["max_workflow_input_chars"],empty=True)
         text(workflow_id,"workflow id",200)
@@ -366,7 +438,8 @@ class Scheduling:
         fingerprint_nodes=[{k:v for k,v in n.items() if k not in {"x","y","title","tags"}} for n in definition["nodes"]]
         fingerprint=hashlib.sha256(json.dumps({"nodes":fingerprint_nodes,"edges":definition["edges"],"input":input_text,"workflow_id":workflow_id},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         request_fingerprint=hashlib.sha256(json.dumps({"execution":fingerprint,"token_budget":definition["token_budget"],
-            "max_parallel":definition["max_parallel"],"luna_supervision":definition["luna_supervision"]},sort_keys=True).encode()).hexdigest()
+            "max_parallel":definition["max_parallel"],"luna_supervision":definition["luna_supervision"],"execution":grant,
+            "max_rounds":definition.get("max_rounds",8)},sort_keys=True).encode()).hexdigest()
         request_id = request_id or fingerprint
         prior = self._previous(request_id,fingerprint,acknowledge_unknown_risk,request_fingerprint)
         if prior:return prior
@@ -408,6 +481,14 @@ class Scheduling:
                 "supervision": "required" if definition["luna_supervision"] else "workflow_opt_out",
                 "request_id":request_id,"fingerprint":fingerprint,"request_fingerprint":request_fingerprint,"acknowledge_unknown_risk":acknowledge_unknown_risk,
                 "nodes": {n["id"]: {"state": "pending", "job_id": None, "tokens_used": 0} for n in definition["nodes"]}}
+            if operator_mode:
+                run.update(mode="operator_v1", execution=grant, control_revision=0, assignments={}, decisions=[],
+                    job_ids=[], review_proposals=[], state="awaiting_codex", execution_complete=False)
+                for node in definition["nodes"]:
+                    run["nodes"][node["id"]]["work_revision"] = 1
+                    if node["node_type"] == "codex":
+                        run["nodes"][node["id"]]["state"] = "awaiting_plan"
+                run["pending_actions"] = self.operators.pending(run)
             self._save(run)
             thread = threading.Thread(target=self._run, args=(ident,), daemon=True, name="gtt-visual-dag")
             self.threads[ident] = thread
@@ -437,6 +518,9 @@ class Scheduling:
         return {"run_id": run_id, "state": run["state"]}
 
     def _run(self, run_id):
+        if self.status(run_id, full=True).get("mode") == "operator_v1":
+            self.operators.run(run_id)
+            return
         try:
             while not self.stopping.is_set():
                 with self.lock:
@@ -477,7 +561,7 @@ class Scheduling:
                                         node.update(state="blocked", reason=str(error), evidence_refs=[])
                             else:
                                 node["state"] = "running"
-                                reserved += max(0, node["reserved_budget"] - job["tokens_used"] - job["tokens_estimated"])
+                                reserved += max(0, node["reserved_budget"] - job["tokens_used"])
                     run.update(tokens_used=used, tokens_estimated=estimated)
                     cancelling = run["state"] == "cancelling"
                     active = sum(n["state"] == "running" for n in states.values())
@@ -525,7 +609,7 @@ class Scheduling:
                         except ValueError as error:
                             node.update(state="blocked", reason=str(error)[:300])
                             continue
-                        if used + estimated + reserved + budget > definition["token_budget"]:
+                        if used + reserved + budget > definition["token_budget"]:
                             if active:
                                 continue
                             node.update(state="blocked", reason="workflow_token_budget_exhausted")

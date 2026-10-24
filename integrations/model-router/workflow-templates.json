@@ -1,5 +1,54 @@
 [
   {
+    "id": "codex",
+    "title": "Codex 母节点",
+    "node_type": "codex",
+    "role": "由真实 Codex 调用方查看完整任务与回报拓扑，智能切片分配所有下游节点，确认审阅修正并验收真实执行结果；不自行启动或冒充 Codex。",
+    "tags": [
+      "母节点",
+      "规划",
+      "验收"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "等待真实调用方提供 topology/coordinate 决策。"
+    }
+  },
+  {
+    "id": "operator",
+    "title": "操作员",
+    "node_type": "operator",
+    "role": "按母节点下发的精确文件与分片执行具体修改或已授权操作；输出可核对的 operations，由 GTT 执行并沿回报线报告进度、结果和冲突。不得自行扩大范围或批准修正。",
+    "tags": [
+      "操作",
+      "文件修改",
+      "高速"
+    ],
+    "task": {
+      "kind": "extract",
+      "prompt": "按 Codex assignment 与文件快照生成具体 write_text、replace_text 或已注册 run_command 操作；使用准确基线哈希，返回完整 JSON operations。",
+      "max_attempts": 1,
+      "fanout": 1,
+      "verify": false
+    }
+  },
+  {
+    "id": "operator-review",
+    "title": "操作审阅员",
+    "node_type": "reviewer",
+    "role": "读取回报线中的实际操作收据、变更及原始分片，检查是否符合任务和验收条件；问题交母节点确认，未经确认不修正文件。",
+    "tags": [
+      "操作审阅",
+      "回报",
+      "验收"
+    ],
+    "task": {
+      "kind": "code_review",
+      "prompt": "审阅真实操作结果，返回 review:{accepted:boolean,issues:array}。错误或证据不足时 accepted=false，将修正建议经回报线交母节点。",
+      "max_output_tokens": 32768
+    }
+  },
+  {
     "id": "input",
     "title": "输入材料",
     "node_type": "input",

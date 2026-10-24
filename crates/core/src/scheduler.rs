@@ -32,10 +32,32 @@ pub struct Node {
     pub task: Value,
 }
 
+impl Node {
+    pub fn is_model_backed(&self) -> bool {
+        matches!(self.node_type.as_str(), "model" | "operator" | "reviewer")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeKind {
+    #[default]
+    Task,
+    Report,
+}
+
+impl EdgeKind {
+    pub fn is_task(&self) -> bool {
+        *self == Self::Task
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Edge {
     pub from: String,
     pub to: String,
+    #[serde(default, skip_serializing_if = "EdgeKind::is_task")]
+    pub kind: EdgeKind,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +70,22 @@ pub struct Workflow {
     pub max_parallel: usize,
     #[serde(default = "supervised")]
     pub luna_supervision: bool,
+    #[serde(
+        default = "default_max_rounds",
+        skip_serializing_if = "is_default_max_rounds"
+    )]
+    pub max_rounds: usize,
+}
+
+fn default_max_rounds() -> usize {
+    8
+}
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if requires a borrowed field"
+)]
+fn is_default_max_rounds(value: &usize) -> bool {
+    *value == default_max_rounds()
 }
 
 fn model_node() -> String {
@@ -142,7 +180,10 @@ impl Snapshot {
     pub fn active_run(&self, workflow_id: &str) -> Option<&str> {
         self.runs.iter().find_map(|run| {
             (run["workflow_id"].as_str() == Some(workflow_id)
-                && matches!(run["state"].as_str(), Some("running" | "cancelling")))
+                && matches!(
+                    run["state"].as_str(),
+                    Some("running" | "cancelling" | "awaiting_codex")
+                ))
             .then(|| run["id"].as_str())
             .flatten()
         })
@@ -191,12 +232,21 @@ impl Workflow {
             token_budget: 200_000,
             max_parallel: 2,
             luna_supervision: true,
+            max_rounds: default_max_rounds(),
         }
     }
 
     /// Stable ready-node ordering; no recursion or graph library is needed.
     pub fn order(&self) -> Result<Vec<usize>> {
-        if self.nodes.is_empty() || self.nodes.len() > 256 || self.edges.len() > 4096 {
+        self.order_with_edges(&[])
+    }
+
+    fn order_with_edges(&self, additional: &[(usize, usize, EdgeKind)]) -> Result<Vec<usize>> {
+        if self.nodes.is_empty()
+            || self.nodes.len() > 256
+            || self.edges.len() + additional.len() > 4096
+            || !(1..=64).contains(&self.max_rounds)
+        {
             bail!("工作流超出图结构协议范围");
         }
         let ids: BTreeMap<&str, usize> = self
@@ -211,15 +261,26 @@ impl Workflow {
         let mut degrees = vec![0usize; self.nodes.len()];
         let mut outgoing = vec![Vec::new(); self.nodes.len()];
         let mut seen = BTreeSet::new();
+        let mut indexed = Vec::with_capacity(self.edges.len() + additional.len());
         for e in &self.edges {
             let (Some(&a), Some(&b)) = (ids.get(e.from.as_str()), ids.get(e.to.as_str())) else {
                 bail!("连线引用了不存在的节点");
             };
-            if a == b || !seen.insert((a, b)) {
+            indexed.push((a, b, e.kind));
+        }
+        indexed.extend_from_slice(additional);
+        for (a, b, kind) in indexed {
+            if a >= self.nodes.len() || b >= self.nodes.len() {
+                bail!("连线引用了不存在的节点");
+            }
+            if a == b || !seen.insert((a, b, kind)) {
                 bail!("连线重复或节点连接了自身");
             }
-            degrees[b] += 1;
-            outgoing[a].push(b);
+            self.check_target(b, kind)?;
+            if kind == EdgeKind::Task {
+                degrees[b] += 1;
+                outgoing[a].push(b);
+            }
         }
         let mut ready: BTreeSet<usize> = degrees
             .iter()
@@ -239,6 +300,35 @@ impl Workflow {
         if result.len() != self.nodes.len() {
             bail!("检测到循环依赖");
         }
+        // Reports are a separate directed plane. A task/report reciprocal pair
+        // is legal, while a report-only cycle would endlessly recirculate work.
+        let mut reports = vec![Vec::new(); self.nodes.len()];
+        let mut report_degrees = vec![0usize; self.nodes.len()];
+        for (a, b, kind) in seen {
+            if kind == EdgeKind::Report {
+                reports[a].push(b);
+                report_degrees[b] += 1;
+            }
+        }
+        let mut ready: Vec<usize> = report_degrees
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| (*d == 0).then_some(i))
+            .collect();
+        let mut visited = 0;
+        while let Some(i) = ready.pop() {
+            visited += 1;
+            for &next in &reports[i] {
+                report_degrees[next] -= 1;
+                if report_degrees[next] == 0 {
+                    ready.push(next);
+                }
+            }
+        }
+        if visited != self.nodes.len() {
+            bail!("检测到回报连线循环");
+        }
+        self.validate_start_dependencies(&outgoing, &reports, &result)?;
         if self.nodes.iter().any(|n| {
             !n.x.is_finite()
                 || !n.y.is_finite()
@@ -250,6 +340,73 @@ impl Workflow {
             bail!("节点坐标无效");
         }
         Ok(result)
+    }
+
+    fn validate_start_dependencies(
+        &self,
+        tasks: &[Vec<usize>],
+        reports: &[Vec<usize>],
+        task_order: &[usize],
+    ) -> Result<()> {
+        let count = self.nodes.len();
+        if reports.iter().flatten().all(|&target| {
+            matches!(
+                self.nodes[target].node_type.as_str(),
+                "codex" | "operator" | "input"
+            )
+        }) {
+            return Ok(());
+        }
+        let mut descendants = vec![vec![false; count]; count];
+        for &node in task_order.iter().rev() {
+            for &next in &tasks[node] {
+                descendants[node][next] = true;
+                let next_descendants = descendants[next].clone();
+                for (current, reachable) in descendants[node].iter_mut().zip(next_descendants) {
+                    *current |= reachable;
+                }
+            }
+        }
+        let mut effective = tasks.to_vec();
+        for (source, targets) in reports.iter().enumerate() {
+            for &target in targets {
+                let kind = self.nodes[target].node_type.as_str();
+                // Codex/operators receive feedback without waiting for it on
+                // first dispatch. Reviewers must wait for every report; other
+                // nodes wait only for reports outside their task descendants.
+                if !matches!(kind, "codex" | "operator" | "input")
+                    && (kind == "reviewer" || !descendants[target][source])
+                    && !effective[source].contains(&target)
+                {
+                    effective[source].push(target);
+                }
+            }
+        }
+        let mut degrees = vec![0usize; count];
+        for targets in &effective {
+            for &target in targets {
+                degrees[target] += 1;
+            }
+        }
+        let mut ready: Vec<usize> = degrees
+            .iter()
+            .enumerate()
+            .filter_map(|(i, degree)| (*degree == 0).then_some(i))
+            .collect();
+        let mut visited = 0;
+        while let Some(node) = ready.pop() {
+            visited += 1;
+            for &next in &effective[node] {
+                degrees[next] -= 1;
+                if degrees[next] == 0 {
+                    ready.push(next);
+                }
+            }
+        }
+        if visited != count {
+            bail!("任务与回报启动前置形成循环，节点无法开始执行");
+        }
+        Ok(())
     }
 
     pub fn add_route(&mut self, route: &Route, x: f64, y: f64) -> Result<usize> {
@@ -270,9 +427,8 @@ impl Workflow {
         Ok(self.nodes.len() - 1)
     }
 
-    /// 母节点：工作流入口，即 Codex 协调的接口。不绑定模型、仅向下游
-    /// 分发；可以同时存在多个。映射到路由器的 "input" 节点类型——上游
-    /// 集合为空即自动完成，按拓扑向下游传递。
+    /// Codex mother node waits for the real caller to plan, confirm corrections
+    /// and accept work. The router never pretends to start Codex itself.
     pub fn add_master(&mut self, x: f64, y: f64) -> Result<usize> {
         if self.nodes.len() >= 256 {
             bail!("最多 256 个节点，实际执行还受配置档约束");
@@ -289,8 +445,8 @@ impl Workflow {
             id: format!("node-{sequence}"),
             title: "母节点 · Codex 接口".into(),
             route_id: String::new(),
-            node_type: "input".into(),
-            role: "工作流入口：按拓扑向下游分发任务与输入材料。".into(),
+            node_type: "codex".into(),
+            role: "真实 Codex 调用方：检查完整拓扑、切片分配、确认修正并验收下游工作。".into(),
             fallback_routes: Vec::new(),
             tags: vec!["母节点".into()],
             x: x.clamp(-10_000.0, 10_000.0),
@@ -302,42 +458,56 @@ impl Workflow {
 
     /// Read-only connection preview; never clones prompts or edits the graph.
     pub fn can_connect(&self, from: usize, to: usize) -> Result<()> {
-        self.order()?;
-        let a = &self.nodes.get(from).context("起始节点不存在")?.id;
-        let b = &self.nodes.get(to).context("目标节点不存在")?.id;
-        if a == b
-            || self.edges.len() >= 4096
-            || self.edges.iter().any(|e| e.from == *a && e.to == *b)
-        {
-            bail!("连线重复、连接自身或超出范围");
-        }
-        if self.nodes.get(to).is_some_and(|n| n.node_type == "input") {
-            bail!("母节点是工作流入口，不接受上游连线");
-        }
-        let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for edge in &self.edges {
-            outgoing.entry(&edge.from).or_default().push(&edge.to);
-        }
-        let mut pending = vec![b.as_str()];
-        let mut visited = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if id == a {
-                bail!("检测到循环依赖");
-            }
-            if visited.insert(id)
-                && let Some(next) = outgoing.get(id)
-            {
-                pending.extend(next);
-            }
+        self.can_connect_kind(from, to, EdgeKind::Task)
+    }
+
+    fn check_target(&self, to: usize, kind: EdgeKind) -> Result<()> {
+        let node = self.nodes.get(to).context("目标节点不存在")?;
+        if node.node_type == "input" || (kind == EdgeKind::Task && node.node_type == "codex") {
+            bail!("输入和母节点不接受任务线；回报线可进入 Codex 母节点");
         }
         Ok(())
     }
 
+    pub fn can_connect_kind(&self, from: usize, to: usize, kind: EdgeKind) -> Result<()> {
+        self.order_with_edges(&[(from, to, kind)])?;
+        Ok(())
+    }
+
     pub fn connect(&mut self, from: usize, to: usize) -> Result<()> {
-        self.can_connect(from, to)?;
+        self.connect_kind(from, to, EdgeKind::Task)
+    }
+
+    pub fn connect_kind(&mut self, from: usize, to: usize, kind: EdgeKind) -> Result<()> {
+        self.can_connect_kind(from, to, kind)?;
         let a = self.nodes.get(from).context("起始节点不存在")?.id.clone();
         let b = self.nodes.get(to).context("目标节点不存在")?.id.clone();
-        self.edges.push(Edge { from: a, to: b });
+        self.edges.push(Edge {
+            from: a,
+            to: b,
+            kind,
+        });
+        Ok(())
+    }
+
+    pub fn can_connect_bidirectional(&self, from: usize, to: usize) -> Result<()> {
+        self.order_with_edges(&[(from, to, EdgeKind::Task), (to, from, EdgeKind::Report)])?;
+        Ok(())
+    }
+
+    pub fn connect_bidirectional(&mut self, from: usize, to: usize) -> Result<()> {
+        self.can_connect_bidirectional(from, to)?;
+        let (a, b) = (self.nodes[from].id.clone(), self.nodes[to].id.clone());
+        self.edges.push(Edge {
+            from: a.clone(),
+            to: b.clone(),
+            kind: EdgeKind::Task,
+        });
+        self.edges.push(Edge {
+            from: b,
+            to: a,
+            kind: EdgeKind::Report,
+        });
         Ok(())
     }
 
@@ -410,7 +580,7 @@ impl Workflow {
         node.node_type.clone_from(&template.node_type);
         node.role.clone_from(&template.role);
         node.tags.clone_from(&template.tags);
-        if node.node_type != "model" {
+        if !node.is_model_backed() {
             node.route_id.clear();
             node.fallback_routes.clear();
         }
@@ -422,14 +592,37 @@ impl Workflow {
     }
 
     pub fn chain(&mut self) {
-        self.edges = self
+        let codex: Vec<&Node> = self
             .nodes
-            .windows(2)
-            .map(|p| Edge {
-                from: p[0].id.clone(),
-                to: p[1].id.clone(),
-            })
+            .iter()
+            .filter(|node| node.node_type == "codex")
             .collect();
+        let inputs: Vec<&Node> = self
+            .nodes
+            .iter()
+            .filter(|node| node.node_type == "input")
+            .collect();
+        let entry = if codex.len() == 1 {
+            codex.first().copied()
+        } else if codex.is_empty() && inputs.len() == 1 {
+            inputs.first().copied()
+        } else {
+            None
+        };
+        let ordered: Vec<&Node> = entry
+            .into_iter()
+            .chain(
+                self.nodes
+                    .iter()
+                    .filter(|node| !matches!(node.node_type.as_str(), "codex" | "input")),
+            )
+            .collect();
+        self.edges.retain(|edge| edge.kind == EdgeKind::Report);
+        self.edges.extend(ordered.windows(2).map(|p| Edge {
+            from: p[0].id.clone(),
+            to: p[1].id.clone(),
+            kind: EdgeKind::Task,
+        }));
     }
 }
 
@@ -512,8 +705,9 @@ pub fn ensure_running() -> Result<()> {
 /// The endpoint token is never placed in process arguments, errors, or logs.
 pub fn call(method: &str, params: Value) -> Result<Value> {
     let (method, params, legacy_plan) = adapt_legacy_workflow_call(method, params)?;
-    if method == "router_dispatch" {
-        verify_dispatch_runtime()?;
+    let operator_workflow = requires_operator_workflow(method, &params);
+    if method == "router_dispatch" || operator_workflow {
+        verify_dispatch_runtime(operator_workflow)?;
     }
     let (port, token, agent) = local_client(Duration::from_secs(150))?;
     let path = if method == "router_scheduling"
@@ -521,7 +715,7 @@ pub fn call(method: &str, params: Value) -> Result<Value> {
         || (method == "router_dispatch"
             && matches!(
                 params["action"].as_str(),
-                Some("status" | "collect" | "cancel" | "list" | "report")
+                Some("status" | "collect" | "cancel" | "list" | "report" | "topology" | "events")
             )) {
         "manage"
     } else {
@@ -581,6 +775,9 @@ fn adapt_legacy_workflow_call(method: &str, params: Value) -> Result<(&str, Valu
             .get("input_text")
             .cloned()
             .unwrap_or_else(|| json!(""));
+        if let Some(execution) = params.get("execution") {
+            request["execution"] = execution.clone();
+        }
         let mut dispatch_params = json!({
             "request": request,
             "request_id": request_id
@@ -635,7 +832,16 @@ fn local_client(timeout: Duration) -> Result<(u16, String, ureq::Agent)> {
 pub fn dispatch(action: &str, params: Value) -> Result<Value> {
     if !matches!(
         action,
-        "plan" | "submit" | "status" | "collect" | "cancel" | "list" | "report"
+        "plan"
+            | "submit"
+            | "status"
+            | "collect"
+            | "cancel"
+            | "list"
+            | "report"
+            | "coordinate"
+            | "topology"
+            | "events"
     ) {
         bail!("未知调度操作: {action}");
     }
@@ -647,7 +853,33 @@ pub fn dispatch(action: &str, params: Value) -> Result<Value> {
     call("router_dispatch", params)
 }
 
-fn verify_dispatch_runtime() -> Result<()> {
+fn requires_operator_workflow(method: &str, params: &Value) -> bool {
+    fn graph_uses_operator(value: &Value) -> bool {
+        value.get("max_rounds").is_some()
+            || value["nodes"].as_array().is_some_and(|nodes| {
+                nodes.iter().any(|n| {
+                    matches!(
+                        n["node_type"].as_str(),
+                        Some("codex" | "operator" | "reviewer")
+                    )
+                })
+            })
+            || value["edges"]
+                .as_array()
+                .is_some_and(|edges| edges.iter().any(|e| e["kind"].as_str() == Some("report")))
+    }
+    if method == "router_dispatch" {
+        params["action"].as_str() == Some("coordinate")
+            || graph_uses_operator(&params["request"]["definition"])
+    } else {
+        method == "router_scheduling"
+            && params["value"]["workflows"]
+                .as_array()
+                .is_some_and(|values| values.iter().any(graph_uses_operator))
+    }
+}
+
+fn verify_dispatch_runtime(operator_workflow: bool) -> Result<()> {
     let (port, token, agent) = local_client(Duration::from_secs(10))?;
     let health: Value = agent
         .get(&format!("http://127.0.0.1:{port}/health"))
@@ -668,6 +900,15 @@ fn verify_dispatch_runtime() -> Result<()> {
     {
         bail!("协调器缺少 dispatch_v1 或 runtime_contract_version=2，请更新服务后重试");
     }
+    if operator_workflow
+        && !health["features"].as_array().is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("operator_workflow_v1"))
+        })
+    {
+        bail!("协调器缺少 operator_workflow_v1；操作员和回报拓扑未派发，请更新服务后重试");
+    }
     Ok(())
 }
 
@@ -681,11 +922,13 @@ mod tests {
                 json!({"id":"other","workflow_id":"other","state":"running"}),
                 json!({"id":"unknown","workflow_id":"round","state":"interrupted"}),
                 json!({"id":"owned","workflow_id":"round","state":"cancelling"}),
+                json!({"id":"decision","workflow_id":"review","state":"awaiting_codex"}),
             ],
             ..Snapshot::default()
         };
         assert_eq!(snapshot.active_run("round"), Some("owned"));
         assert_eq!(snapshot.active_run("missing"), None);
+        assert_eq!(snapshot.active_run("review"), Some("decision"));
     }
     fn sample() -> Workflow {
         let mut g = Workflow::new("test".into());
@@ -744,6 +987,167 @@ mod tests {
         assert_eq!(g.order().unwrap(), vec![2, 0, 1]);
         assert!(g.connect(1, 2).is_err());
         assert_eq!(g.edges.len(), 2);
+    }
+    #[test]
+    fn report_plane_allows_reciprocal_links_but_rejects_its_own_cycles() {
+        let mut graph = sample();
+        graph.connect(0, 1).unwrap();
+        graph.connect_kind(1, 0, EdgeKind::Report).unwrap();
+        assert_eq!(graph.order().unwrap(), vec![0, 1, 2]);
+        let before = graph.edges.clone();
+        assert!(graph.connect_kind(0, 1, EdgeKind::Report).is_err());
+        assert_eq!(graph.edges, before);
+        assert!(graph.connect(1, 0).is_err());
+    }
+
+    #[test]
+    fn a_reviewer_must_not_wait_for_a_report_from_its_unstarted_task_child() {
+        let mut graph = sample();
+        graph.nodes[0].node_type = "reviewer".into();
+        graph.nodes[1].node_type = "operator".into();
+        let master = graph.add_master(10.0, 10.0).unwrap();
+        graph.connect(master, 0).unwrap();
+        graph.connect(0, 1).unwrap();
+        let before = graph.edges.clone();
+        assert!(graph.can_connect_kind(1, 0, EdgeKind::Report).is_err());
+        assert!(graph.connect_kind(1, 0, EdgeKind::Report).is_err());
+        assert_eq!(graph.edges, before);
+        graph.edges.push(Edge {
+            from: graph.nodes[1].id.clone(),
+            to: graph.nodes[0].id.clone(),
+            kind: EdgeKind::Report,
+        });
+        assert!(graph.order().is_err());
+    }
+
+    #[test]
+    fn an_operator_task_chain_does_not_wait_for_feedback_before_first_dispatch() {
+        let mut graph = sample();
+        graph.nodes[0].node_type = "operator".into();
+        graph.nodes[1].node_type = "operator".into();
+        graph.connect_bidirectional(0, 1).unwrap();
+        assert_eq!(graph.order().unwrap(), vec![0, 1, 2]);
+        // Generic models also do not wait for a task descendant's feedback.
+        graph.nodes[0].node_type = "model".into();
+        assert_eq!(graph.order().unwrap(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn codex_accepts_report_chains_and_bidirectional_changes_are_atomic() {
+        let mut graph = sample();
+        let master = graph.add_master(10.0, 10.0).unwrap();
+        graph.connect_bidirectional(master, 0).unwrap();
+        graph.connect_kind(0, 1, EdgeKind::Report).unwrap();
+        graph.connect_kind(1, master, EdgeKind::Report).unwrap();
+        assert!(graph.order().is_ok());
+        assert!(graph.can_connect(0, master).is_err());
+        let mut incompatible = sample();
+        incompatible.connect_kind(0, 1, EdgeKind::Report).unwrap();
+        let before = incompatible.edges.clone();
+        assert!(incompatible.connect_bidirectional(0, 1).is_err());
+        assert_eq!(incompatible.edges, before);
+    }
+
+    #[test]
+    fn legacy_graphs_omit_default_fields_and_chain_keeps_report_edges() {
+        let mut graph = sample();
+        graph.connect_kind(2, 0, EdgeKind::Report).unwrap();
+        graph.chain();
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.kind == EdgeKind::Report)
+                .count(),
+            1
+        );
+        let value = serde_json::to_value(&graph).unwrap();
+        assert!(value.get("max_rounds").is_none());
+        assert!(value["edges"][1].get("kind").is_none());
+        assert_eq!(value["edges"][0]["kind"], "report");
+        let restored: Workflow = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.max_rounds, 8);
+        assert_eq!(restored.edges[1].kind, EdgeKind::Task);
+        graph.max_rounds = 0;
+        assert!(graph.order().is_err());
+    }
+
+    #[test]
+    fn operator_templates_keep_exact_model_bindings() {
+        let mut graph = sample();
+        for kind in ["operator", "reviewer"] {
+            let template = Template {
+                id: kind.into(),
+                title: kind.into(),
+                node_type: kind.into(),
+                role: String::new(),
+                tags: Vec::new(),
+                task: json!({"kind":"extract"}),
+            };
+            graph.apply_template(0, &template).unwrap();
+            assert!(graph.nodes[0].is_model_backed());
+            assert_eq!(graph.nodes[0].route_id, "route");
+        }
+    }
+
+    #[test]
+    fn chain_promotes_a_late_unique_mother_without_choosing_among_multiple_mothers() {
+        let mut graph = sample();
+        let master = graph.add_master(500.0, 10.0).unwrap();
+        graph.connect_kind(2, master, EdgeKind::Report).unwrap();
+        graph.chain();
+        assert_eq!(graph.order().unwrap(), vec![master, 0, 1, 2]);
+        assert!(graph.edges.iter().any(|e| e.from == graph.nodes[master].id
+            && e.to == graph.nodes[0].id
+            && e.kind == EdgeKind::Task));
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.to == graph.nodes[master].id && e.kind == EdgeKind::Report)
+        );
+        graph.add_master(750.0, 10.0).unwrap();
+        graph.chain();
+        assert!(
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.kind == EdgeKind::Task)
+                .all(|e| e.from != graph.nodes[master].id)
+        );
+        let mut legacy = sample();
+        let input = legacy.add_master(500.0, 10.0).unwrap();
+        legacy.nodes[input].node_type = "input".into();
+        legacy.chain();
+        assert_eq!(legacy.order().unwrap(), vec![input, 0, 1, 2]);
+    }
+
+    #[test]
+    fn advanced_graphs_and_coordination_require_the_operator_feature() {
+        for definition in [
+            json!({"nodes":[{"node_type":"codex"}]}),
+            json!({"nodes":[{"node_type":"operator"}]}),
+            json!({"nodes":[{"node_type":"reviewer"}]}),
+            json!({"edges":[{"from":"a","to":"b","kind":"report"}]}),
+            json!({"max_rounds":4}),
+        ] {
+            assert!(requires_operator_workflow(
+                "router_dispatch",
+                &json!({"action":"submit","request":{"definition":definition}})
+            ));
+        }
+        assert!(requires_operator_workflow(
+            "router_dispatch",
+            &json!({"action":"coordinate"})
+        ));
+        assert!(!requires_operator_workflow(
+            "router_dispatch",
+            &json!({"action":"status"})
+        ));
+        assert!(!requires_operator_workflow(
+            "router_dispatch",
+            &json!({"action":"submit","request":{"definition":{"nodes":[{"node_type":"model"}]}}})
+        ));
     }
     #[test]
     fn removal_prunes_edges_and_hit_testing_matches_geometry() {
