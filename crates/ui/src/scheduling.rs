@@ -397,6 +397,12 @@ impl State {
             _ => Action::AddTemplate(self.templates.iter().position(|t| t.title == label)?),
         })
     }
+    /// Whether a drag may move the view. Connect mode locks it — left, right
+    /// and middle drags alike — so a connection that misses its target never
+    /// turns into a pan. Fit and zoom (View menu) still adjust the view.
+    fn can_pan(&self) -> bool {
+        !self.connect_mode
+    }
     fn toggle_connect_mode(&mut self) {
         self.connect_mode = !self.connect_mode;
         // The pan tool would swallow every press and hide the new mode.
@@ -507,7 +513,9 @@ impl State {
             Action::PickTemplate(v) => {if let Some(i)=v {self.template_index=i.min(self.templates.len().saturating_sub(1));}},
             Action::ShowParams => {self.tab="workflow";self.show_params=true;self.show_node_details=false;},
             Action::ToggleRun => {self.tab="workflow";self.show_run = !self.show_run;},
-            Action::TogglePan => { self.pan_tool = !self.pan_tool; self.drag.cancel(); },
+            // The pan tool belongs to move mode: turning it on leaves connect
+            // mode instead of silently re-enabling drags that move the view.
+            Action::TogglePan => { self.pan_tool = !self.pan_tool; if self.pan_tool { self.connect_mode = false; } self.drag.cancel(); },
             Action::ToggleConnectMode => self.toggle_connect_mode(),
             Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
             Action::CloseInspector => {self.show_params=false;self.show_node_details=false;},
@@ -747,8 +755,8 @@ impl State {
                 if self.blank_double_click(p) {
                     self.toggle_connect_mode();
                 } else if p.is_right_button_pressed && p.x >= 210.0 {
-                    // Right-press on a node opens the floating quick menu;
-                    // on empty canvas it still pans.
+                    // Right-press on a node opens the floating quick menu; on
+                    // empty canvas it pans — in move mode only, see `can_pan`.
                     let (x, y) = self.point(p);
                     if let Some(w) = self.workflow()
                         && let Some(i) = w.hit(x, y)
@@ -756,11 +764,13 @@ impl State {
                         self.node = Some(i);
                         self.menu_at = (p.x, p.y);
                         self.open_menu = Some("node");
-                    } else {
+                    } else if self.can_pan() {
                         self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
                     }
                 } else if p.is_middle_button_pressed || (self.pan_tool && p.x >= 210.0) {
-                    self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
+                    if self.can_pan() {
+                        self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
+                    }
                 } else if p.x < 200.0 && p.y >= 42.0 {
                     // Only rows the page actually draws start a drag: the old
                     // unclamped index grabbed the NEXT page's first model when
@@ -789,7 +799,7 @@ impl State {
                             };
                             self.node = Some(i);
                             self.drag.begin(drag);
-                        } else if p.x >= 210.0 { self.drag.begin(Drag::Pan(p.x-self.pan.0,p.y-self.pan.1)); }
+                        } else if p.x >= 210.0 && self.can_pan() { self.drag.begin(Drag::Pan(p.x-self.pan.0,p.y-self.pan.1)); }
                 }
             }
             Action::Move(p) => {
@@ -1254,7 +1264,7 @@ fn help_button(theme: &Theme) -> View {
         ("移动模式", "拖动节点移动它；空白处拖动平移画布。"),
         (
             "连线模式",
-            "从任意节点拖到下游节点建立依赖，箭头指向下游；空白处仍可平移。",
+            "从任意节点拖到下游节点建立依赖，箭头指向下游。画布锁定，任何拖动都不会平移；适应全图与缩放仍可用。",
         ),
         ("节点菜单", "右键节点：编辑、断开连线、删除。"),
         (
@@ -3298,7 +3308,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         // performs right now, and how to switch. Accent-framed in connect
         // mode so the riskier mode is never mistaken for the default.
         let (mode, how) = if connect_mode {
-            ("连线模式", "从节点拖到下游节点 · 双击空白处切换")
+            ("连线模式", "从节点拖到下游节点 · 画布锁定 · 双击空白处切换")
         } else {
             ("移动模式", "拖动节点或平移画布 · 双击空白处切换")
         };
@@ -3409,6 +3419,16 @@ mod gesture_tests {
         state.detail = Some(serde_json::json!({"state":"running"}));
         assert!(state.run_disabled_reason().unwrap().contains("运行"));
     }
+    #[test]
+    fn connect_mode_locks_panning() {
+        let mut state = super::State::default();
+        assert!(state.can_pan());
+        state.toggle_connect_mode();
+        assert!(!state.can_pan());
+        state.toggle_connect_mode();
+        assert!(state.can_pan());
+    }
+
     #[test]
     fn double_click_needs_two_close_presses_in_time() {
         use std::time::{Duration, Instant};
