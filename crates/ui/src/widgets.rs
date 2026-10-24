@@ -1523,55 +1523,64 @@ pub fn donut_cell(
             .into()
     } else {
         let name_limit = if wide { 28 } else { 16 };
-        let mut legend: Vec<View> = Vec::with_capacity(slices.len());
+        // One grid for the whole legend, not a stretched grid per row: with a
+        // star name column every value was pushed to the cell's far edge,
+        // ~250 DIP from its name. Auto columns size to the longest entry, so
+        // percentages and values sit right after the names and still align
+        // down the legend (both right-aligned, so decimals line up).
+        let mut cells: Vec<View> = Vec::with_capacity(slices.len() * 4);
         for (i, (name, v)) in slices.iter().enumerate() {
-            let pct = format!("{:.1}", v / total * 100.0);
+            let row = i as i32;
             let name_short: String = if name.chars().count() > name_limit {
                 crate::tf!("{}…", name.chars().take(name_limit - 1).collect::<String>())
             } else {
                 name.clone()
             };
-            let swatch: View = Border::new()
-                .width(9.0)
-                .height(9.0)
-                .corner_radius(CornerRadius::uniform(2.0))
-                .background(slice_brush(theme, i))
-                .vertical_alignment(VerticalAlignment::Center)
-                .into();
-            // Grid, not a stack: the value sat right after the name, so the
-            // percentages staggered down the legend. The star name column
-            // pushes every value onto one right edge.
-            legend.push(
-                Grid::new()
-                    .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
-                    .column_spacing(6.0)
-                    .children([
-                        Border::new()
-                            .grid_column(0)
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .content(swatch),
-                        Border::new()
-                            .grid_column(1)
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .content(
-                                TextBlock::new()
-                                    .text(name_short)
-                                    .font_size(theme.label_size)
-                                    .text_trimming(TextTrimming::CharacterEllipsis)
-                                    .vertical_alignment(VerticalAlignment::Center),
-                            ),
-                        Border::new()
-                            .grid_column(2)
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .content(
-                                TextBlock::new()
-                                    .text(format!("{pct}% · {}", fmt_v(*v)))
-                                    .font_size(theme.label_size)
-                                    .foreground(theme.subtle)
-                                    .vertical_alignment(VerticalAlignment::Center),
-                            ),
-                    ]),
-            );
+            let cell = |col: i32, align: HorizontalAlignment, v: View| -> View {
+                Border::new()
+                    .grid_column(col)
+                    .grid_row(row)
+                    .horizontal_alignment(align)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(v)
+            };
+            cells.push(cell(
+                0,
+                HorizontalAlignment::Left,
+                Border::new()
+                    .width(9.0)
+                    .height(9.0)
+                    .corner_radius(CornerRadius::uniform(2.0))
+                    .background(slice_brush(theme, i))
+                    .into(),
+            ));
+            cells.push(cell(
+                1,
+                HorizontalAlignment::Left,
+                TextBlock::new()
+                    .text(name_short)
+                    .font_size(theme.label_size)
+                    .text_trimming(TextTrimming::CharacterEllipsis)
+                    .into(),
+            ));
+            cells.push(cell(
+                2,
+                HorizontalAlignment::Right,
+                TextBlock::new()
+                    .text(format!("{:.1}%", v / total * 100.0))
+                    .font_size(theme.label_size)
+                    .foreground(theme.subtle)
+                    .into(),
+            ));
+            cells.push(cell(
+                3,
+                HorizontalAlignment::Right,
+                TextBlock::new()
+                    .text(fmt_v(*v))
+                    .font_size(theme.label_size)
+                    .foreground(theme.subtle)
+                    .into(),
+            ));
         }
         let donut_view = donut(
             theme,
@@ -1586,11 +1595,19 @@ pub fn donut_cell(
             },
             ctx,
         );
-        let legend_view = StackPanel::new()
-            .orientation(Orientation::Vertical)
-            .spacing(3.0)
+        let legend_view = Grid::new()
+            .columns([
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::Auto,
+                GridLength::Auto,
+            ])
+            .rows((0..slices.len()).map(|_| GridLength::Auto))
+            .column_spacing(8.0)
+            .row_spacing(3.0)
+            .horizontal_alignment(HorizontalAlignment::Left)
             .vertical_alignment(VerticalAlignment::Center)
-            .keyed_children(crate::pages::keyed(legend));
+            .keyed_children(crate::pages::keyed(cells));
         if wide {
             StackPanel::new()
                 .orientation(Orientation::Horizontal)

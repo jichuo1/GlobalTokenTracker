@@ -3549,35 +3549,54 @@ pub fn prices_page(
     );
     // Errors get their own wrapping line: appended to the one-line summary a
     // long feed error was simply cut off at the card edge.
-    let mut meta: Vec<View> = vec![
-        TextBlock::new()
-            .text(summary)
-            .font_size(theme.body_size)
-            .foreground(theme.subtle)
-            .text_wrapping(TextWrapping::Wrap)
-            .into(),
-    ];
-    if let Some(e) = refresh.error {
-        meta.push(
-            TextBlock::new()
-                .text(tf!("上次刷新失败：{}", e))
-                .font_size(theme.label_size)
-                .foreground(theme.danger)
-                .text_wrapping(TextWrapping::Wrap)
-                .into(),
-        );
-    }
-    let controls = Grid::new()
-        .columns([GridLength::STAR, GridLength::Auto])
+    // One filter band under the title: the filters (search + dispute toggle)
+    // as one group on the left, the result summary right-aligned on the same
+    // centerline. The box used to stretch across the page with the checkbox
+    // pinned under 刷新价目, so the two halves read as unrelated blocks.
+    let summary: View = TextBlock::new()
+        .text(summary)
+        .font_size(theme.label_size)
+        .foreground(theme.subtle)
+        .text_wrapping(TextWrapping::Wrap)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into();
+    let controls: View = Grid::new()
+        .columns([GridLength::Auto, GridLength::Auto, GridLength::STAR])
         .column_spacing(16.0)
         .children((
-            search_box,
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                // Wide enough for the placeholder, small enough to leave the
+                // summary its line on a 1000 DIP window.
+                .width(360.0)
+                .content(search_box),
             Border::new()
                 .grid_column(1)
                 .vertical_alignment(VerticalAlignment::Center)
                 .content(only_disputed),
+            Border::new()
+                .grid_column(2)
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(summary),
         ));
-    let controls = vstack(8.0, vec![controls, vstack(4.0, meta)]);
+    // Errors keep their own wrapping line: appended to the summary a long
+    // feed error was simply cut off.
+    let controls = match refresh.error {
+        Some(e) => vstack(
+            6.0,
+            vec![
+                controls,
+                TextBlock::new()
+                    .text(tf!("上次刷新失败：{}", e))
+                    .font_size(theme.label_size)
+                    .foreground(theme.danger)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .into(),
+            ],
+        ),
+        None => controls,
+    };
 
     let body: Vec<View> = if shown == 0 {
         vec![

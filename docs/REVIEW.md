@@ -1989,4 +1989,21 @@
 - **修复**：新增 `crates/ui/app.manifest`（与实验所用内容一致：supportedOS Windows 10/11、maxversiontested、PerMonitorV2 与 true/PM、Common-Controls v6 依赖），`build.rs` 经 winresource `set_manifest_file` 嵌入。DPI 声明与框架运行时 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 一致。
 - **踩坑**：清单注释里写了 windows-reactor 自包含部署的标记字符串，框架对整个清单资源做子串匹配，判定为自包含部署后报 "self-contained Windows App Runtime files are missing" 拒绝启动。改写注释并新增两项单元测试（清单含 Windows 10 声明与 PerMonitorV2；清单不含该标记）。
 - **验证**：嵌入后 debug 实例正常启动并加载 comctl32 6.0（清单生效）；`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored（UI 43 项）。嵌入版尚未由用户以微信输入法复测；未打包安装。
+- **提交与安装**：提交 2a15b9f 推送至 ui/scheduling-layout。installer/package.ps1 产出 dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.79 MB，sha256 71740b24…c533d4；未签名——本机无 GTT_SIGN_* 配置，脚本按设计跳过）；release UI 内含清单（supportedOS、PerMonitorV2 各 1 处）。安装前旧 UI/CLI 与 installed-build.json 备份至 target\diagnostics\preinstall-s160-20261024；正式实例 WM_CLOSE 后转入托盘，强制结束后 --quiet 安装首次即成功（退出码 0，无 .gtt-new 残留），安装后 UI d9cf2bf0…、CLI 637ac727… 与 targetelease 产物逐字节一致。安装器未自动拉起界面，手动启动后正式进程加载 comctl32 6.0（清单生效），gtt_panic.log 未新增。installed-build.json 仍是上次 CI 构建的出处记录，未改写。
 - **遗留**：右屏未复测（用户右屏被占用）。已排除本应用一侧的几何原因：隔离实例放到右屏时，主窗口、DesktopChildSiteBridge 与 0×0 隐藏的 InputSiteWindowClass 经 MonitorFromWindow/MonitorFromRect（NULL/NEAREST）全部解析到 DISPLAY2（物理 3840–7680），不存在"光标与窗口不在同一显示器"的条件；左屏候选框位置正确也排除了全局 DIP/物理像素混用。待右屏可用时，用 `ime-test.ps1 -Variant original -Monitor 2`（该 debug 产物已内嵌清单）单独复测，并以系统记事本在右屏作对照：都正常则清单已覆盖双屏；记事本也失败则属微信输入法自身问题。
+
+## S161 下拉菜单改为向下展开（2026-10-24）
+
+- **问题（用户截图）**：调度页"更多"等原生下拉菜单向上弹出、盖在按钮上方，视线需要反向移动，显得突兀。
+- **根因**：windows-reactor 0.100.0 的 `Command::SetOwnedMenu` 用 `MenuFlyout::new()` 在代码里创建 DropDownButton 的菜单，从不设置 Placement，于是沿用 FlyoutBase 的默认值 `Top`（XAML 模板里的 DropDownButton 会显式设置为向下，代码路径跳过了这一步）。框架的 `Menu` 不提供 placement 参数（只有富内容 `Flyout` 有），应用层无法设置。
+- **修复**：按 windows-canvas 的先例，把 windows-reactor 0.100.0 原样 vendor 到 `vendor/windows-reactor`，经 `[patch.crates-io]` 接入；唯一改动标注 `GTT PATCH`：仅对 `DropDownButtonFlyout` 设置 `BottomEdgeAlignedLeft`（向下展开、左边缘对齐，与 XAML DropDownButton/ComboBox 一致；空间不足时 WinUI 仍自动换边），普通 `Button.menu(..)` 保持上游行为。`vendor/windows-reactor/PATCH.md` 记录原因与移除条件。Cargo.lock 仅去掉该包的 registry source/checksum 两行。
+- **实测**（隔离调试实例，UIA 读取按钮与 MenuFlyout 菜单项的屏幕矩形；不发送键盘输入）：更多 按钮 y 422–476 → 菜单 y 489–775；＋ 添加节点 y 705–759 → 773–1480；视图 y 477–531 → 545–898，三者均为 BELOW，菜单左缘比按钮右移 8–9 px（弹出层阴影边距）；位于窗口右缘的"更多"同样完整向下展开。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored。macOS 端使用系统 `Menu`，默认即向下展开，无需改动。未提交、未打包安装。
+
+## S162 总览图例、价格页筛选带与速度页切换器排版（2026-10-24）
+
+- **总览占比图例（用户截图"数据离名称太远"）**：`donut_cell` 每行图例是一个拉满整列的 Auto | STAR | Auto 网格，名称在左、"百分比 · 数值"被 STAR 列推到列的最右缘，两者相距约 250 DIP。改为整张图例一个网格（色块 | 名称 | 百分比 | 数值，四列均 Auto、靠左），列宽按最长条目自适应，跨行自然对齐；百分比与数值拆成两列并右对齐，小数点上下对齐。宽版（横排）同样适用。
+- **价格页标题区**：原先搜索框横跨整页、"仅看有分歧的"与"刷新价目"在右侧上下错开，左右两块互不相关。改为两条带：标题 | 刷新价目（不变）；筛选带为"搜索框（360 DIP）+ 仅看有分歧的"靠左、"N 个模型 · 联网同步于…"靠右，同一中线。刷新失败信息仍单独换行。
+- **速度页分组/指标切换卡**：两条 SelectorBar 与两行说明上下堆叠，只占满宽卡片的左三分之一。改为一行"按模型 | 按工具 ┃ 输出 / 总吞吐 / 输入 / 预填 / 解码"（1 DIP 竖线分隔），两句说明并为一行说明文字（沿用原有翻译字符串，不改 i18n 表），卡片高度约减半。
+- **实测**（隔离实例，账本与 ui.json 副本，1770 宽 PrintWindow 截图）：三处均按预期；价格页截图中的"同步中…"为测试副本自身触发的价目同步，不涉及正式数据。
+- **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored。macOS 端未改动。与 S161 一并未提交、未打包安装。
