@@ -4790,6 +4790,52 @@ pub fn subscribe_event(
             revision,
         })
         .map_err(native_error),
+        (Handle::Border(value), EventId::BorderPointerWheelChanged) => {
+            let source = value.cast::<IUIElement>().map_err(native_error)?;
+            source.PointerWheelChanged({
+                let element = value.cast::<UIElement>().map_err(native_error)?;
+                move |_, args| {
+                    let mut info = crate::PointerEventInfo::default();
+                    if let Some(args) = args.as_ref() {
+                        if let Ok(point) = args.GetCurrentPoint(&element) {
+                            if let Ok(position) = point.Position() {
+                                info.x = f64::from(position.x);
+                                info.y = f64::from(position.y);
+                            }
+                            if let Ok(properties) = point.Properties() {
+                                // GTT PATCH: vertical wheel notches (120 per detent).
+                                if !properties.IsHorizontalMouseWheel().unwrap_or(false) {
+                                    info.wheel_delta = properties.MouseWheelDelta().unwrap_or(0);
+                                }
+                                info.is_left_button_pressed =
+                                    properties.IsLeftButtonPressed().unwrap_or(false);
+                                info.is_right_button_pressed =
+                                    properties.IsRightButtonPressed().unwrap_or(false);
+                                info.is_middle_button_pressed =
+                                    properties.IsMiddleButtonPressed().unwrap_or(false);
+                            }
+                        }
+                        if let Ok(point) = args.GetCurrentPoint(None::<&UIElement>)
+                            && let Ok(position) = point.Position()
+                        {
+                            info.window_x = f64::from(position.x);
+                            info.window_y = f64::from(position.y);
+                        }
+                    }
+                    sink.enqueue(
+                        node,
+                        EventId::BorderPointerWheelChanged,
+                        revision,
+                        EventPayload::PointerEventInfo(info),
+                    );
+                }
+            })
+        }
+        .map(|revoker| NativeSubscription::Event {
+            _revoker: revoker,
+            revision,
+        })
+        .map_err(native_error),
         (Handle::Border(value), EventId::BorderPointerEntered) => {
             let source = value.cast::<IUIElement>().map_err(native_error)?;
             source.PointerEntered({

@@ -112,6 +112,7 @@ pub enum Action {
     Chain,
     Unlink,
     Press(PointerEventInfo),
+    Wheel(PointerEventInfo),
     Move(PointerEventInfo),
     Release(PointerEventInfo),
     Zoom(f64),
@@ -254,6 +255,10 @@ pub struct State {
     /// from anywhere on a node draws an edge. One gesture per mode — the old
     /// 20 DIP port strip beside the move area made each misfire as the other.
     connect_mode: bool,
+    /// Raw text of the workflow's numeric fields while they are edited.
+    /// The box shows this, not the stored number, so clearing it or typing
+    /// an intermediate value is not overwritten by the last valid number.
+    numeric_drafts: std::collections::BTreeMap<&'static str, String>,
     link_mode: LinkMode,
     /// Connectivity check started from the node menu: (route id, node title).
     pending_check: Option<(String, String)>,
@@ -314,6 +319,7 @@ impl Default for State {
             show_run: false,
             pan_tool: false,
             connect_mode: false,
+            numeric_drafts: std::collections::BTreeMap::new(),
             link_mode: LinkMode::Task,
             pending_check: None,
             check_feedback: None,
@@ -658,6 +664,7 @@ impl State {
                             Err(_) => self.error = Some("调度响应格式不兼容，请更新协调器".into()),
                             Ok(snapshot) => {
                                 if !self.dirty || self.saving {
+                                    self.numeric_drafts.clear();
                                     self.draft = snapshot.settings.clone();
                                     self.profile_editor=serde_json::to_string_pretty(&self.draft.call_profile).unwrap_or_default();
                                     self.dirty = false;
@@ -768,6 +775,7 @@ impl State {
                 }
             }
             Action::Select(i) => {
+                self.numeric_drafts.clear();
                 self.selected = i;
                 self.node = None;self.show_node_details=false;
             }
@@ -776,18 +784,22 @@ impl State {
                     && w.name != v { w.name = v; self.dirty = true; }
             }
             Action::Budget(v) => {
-                if let (Some(w), Ok(b)) = (self.workflow_mut(), v.parse())
+                let parsed = numeric_field(&v, NumericField::Budget);
+                self.numeric_drafts.insert(NumericField::Budget.key(), v);
+                if let (Some(w), Ok(b)) = (self.workflow_mut(), parsed)
                     && w.token_budget != b { w.token_budget = b; self.dirty = true; }
             }
             Action::Parallel(v) => {
-                if let (Some(w), Ok(p)) = (self.workflow_mut(), v.parse())
-                    && w.max_parallel != p { w.max_parallel = p; self.dirty = true; }
+                let parsed = numeric_field(&v, NumericField::Parallel);
+                self.numeric_drafts.insert(NumericField::Parallel.key(), v);
+                if let (Some(w), Ok(p)) = (self.workflow_mut(), parsed)
+                    && w.max_parallel as u64 != p { w.max_parallel = p as usize; self.dirty = true; }
             }
             Action::MaxRounds(v) => {
-                if let Ok(value) = v.parse::<usize>() && (1..=64).contains(&value) && let Some(w) = self.workflow_mut() {
-                    w.max_rounds = value;
-                    self.dirty = true;
-                }
+                let parsed = numeric_field(&v, NumericField::Rounds);
+                self.numeric_drafts.insert(NumericField::Rounds.key(), v);
+                if let (Some(w), Ok(r)) = (self.workflow_mut(), parsed)
+                    && w.max_rounds as u64 != r { w.max_rounds = r as usize; self.dirty = true; }
             }
             Action::SelectNode(i) => self.node = Some(i),
             Action::Supervision(value) => { self.probe_supervision=value; if let Some(w)=self.workflow_mut()&& w.luna_supervision!=value {w.luna_supervision=value;self.dirty=true;} }
@@ -890,6 +902,22 @@ impl State {
                     .saturating_add_signed(delta as isize)
                     .min(pages);
             }
+            Action::Wheel(p) => {
+                // The delta comes through a vtable slot patched into the
+                // vendored framework (see vendor/windows-reactor/PATCH.md);
+                // anything implausible is ignored rather than trusted.
+                if p.wheel_delta != 0 && p.wheel_delta.abs() <= 2400 {
+                    let notches = f64::from(p.wheel_delta) / 120.0;
+                    if p.x < 210.0 {
+                        self.update(Action::Palette(if notches < 0.0 { 1 } else { -1 }), ctx);
+                    } else {
+                        let anchor = (p.x - 210.0, p.y);
+                        let world = ((anchor.0 - self.pan.0) / self.zoom, (anchor.1 - self.pan.1) / self.zoom);
+                        self.zoom = (self.zoom * 1.12f64.powf(notches)).clamp(0.1, 1.8);
+                        self.pan = (anchor.0 - world.0 * self.zoom, anchor.1 - world.1 * self.zoom);
+                    }
+                }
+            }
             Action::Zoom(delta) => { let (width,height)=self.viewport.get(); let anchor=((width-210.0)/2.0,height/2.0);let world=((anchor.0-self.pan.0)/self.zoom,(anchor.1-self.pan.1)/self.zoom);self.zoom=(self.zoom+delta).clamp(0.1,1.8);self.pan=(anchor.0-world.0*self.zoom,anchor.1-world.1*self.zoom); },
             Action::Press(p) => {
                 self.pointer=(p.x,p.y);self.error=None;
@@ -975,9 +1003,23 @@ impl State {
                                     self.selected = self.draft.workflows.len() - 1;
                                 }
                                 let hit = self.workflow().and_then(|w| w.hit(x, y));
+                                // The replaced model's name, so a node still titled
+                                // after it is renamed along with the swap.
+                                let old_model = hit.and_then(|i| {
+                                    let id = &self.workflow()?.nodes.get(i)?.route_id;
+                                    self.snapshot.routes.iter().find(|r| &r.route_id == id).map(|r| r.model.clone())
+                                });
                                 if let Some(w) = self.workflow_mut() {
                                     if let Some(i) = hit {
                                         if !w.nodes[i].is_model_backed() { self.error=Some("本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板".into()); return; }
+                                        // Replace the model in place: id, edges, role and
+                                        // prompt stay; only the binding (and a title that
+                                        // merely named the old model) changes.
+                                        let node = &mut w.nodes[i];
+                                        if node.title.is_empty() || old_model.as_deref() == Some(node.title.as_str()) {
+                                            node.title.clone_from(&route.model);
+                                        }
+                                        node.fallback_routes.retain(|r| r != &route.route_id);
                                         w.nodes[i].route_id.clone_from(&route.route_id);
                                         self.node = Some(i);
                                         landed = true;
@@ -991,6 +1033,7 @@ impl State {
                             }
                             self.add_pool(route.route_id);
                             if landed {
+                                self.dirty = true;
                                 self.pulse(ctx);
                             }
                         }
@@ -1498,7 +1541,11 @@ fn help_button(theme: &Theme) -> View {
     let lines = [
         (
             "拖入模型",
-            "从左侧模型库拖到空白处创建节点；拖到模型节点上替换绑定。",
+            "从左侧模型库拖到空白处创建节点；拖到已有模型节点上即替换它的模型，连线保持不变。",
+        ),
+        (
+            "缩放",
+            "在画布上滚动鼠标滚轮，以指针为中心缩放；在模型库上滚动则翻页。",
         ),
         (
             "两种模式",
@@ -1786,6 +1833,93 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
                 ),
         ])
 }
+/// The workflow's numeric settings and their accepted ranges (rounds as in
+/// core's graph protocol; budget and concurrency are capped by the router's
+/// own limits at plan time, so the client only rejects what is never valid).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NumericField {
+    Rounds,
+    Budget,
+    Parallel,
+}
+
+impl NumericField {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Rounds => "rounds",
+            Self::Budget => "budget",
+            Self::Parallel => "parallel",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rounds => "最多协调轮数（1–64）",
+            Self::Budget => "总 Token 预算",
+            Self::Parallel => "并发目标",
+        }
+    }
+    fn range(self) -> (u64, u64) {
+        match self {
+            Self::Rounds => (1, 64),
+            Self::Budget => (1, u64::MAX),
+            Self::Parallel => (1, 1024),
+        }
+    }
+}
+
+/// Parses a numeric field; the error is the hint shown under the box.
+fn numeric_field(text: &str, field: NumericField) -> Result<u64, String> {
+    let (min, max) = field.range();
+    let wanted = if max == u64::MAX {
+        "正整数".to_owned()
+    } else {
+        format!("{min}–{max} 的整数")
+    };
+    match text.trim().parse::<u64>() {
+        Ok(v) if (min..=max).contains(&v) => Ok(v),
+        _ => Err(format!("请输入{wanted}")),
+    }
+}
+
+/// A numeric settings field showing exactly what was typed. Invalid text
+/// keeps the last valid value (stated under the box) instead of snapping
+/// the box back to it.
+fn numeric_line(
+    state: &State,
+    theme: &Theme,
+    field: NumericField,
+    current: u64,
+    action: impl Fn(String) -> Action + 'static,
+    ctx: &ViewContext<Shell>,
+) -> View {
+    let text = state
+        .numeric_drafts
+        .get(field.key())
+        .cloned()
+        .unwrap_or_else(|| current.to_string());
+    let input = line(field.label(), text.clone(), action, ctx);
+    let hint = numeric_field(&text, field).err();
+    // Always the same two children: swapping the bare input for an
+    // input + hint stack remounted the TextBox, which dropped the caret and
+    // focus the moment the box became invalid (e.g. right after clearing).
+    vstack(
+        4.0,
+        vec![
+            input,
+            TextBlock::new()
+                .text(
+                    hint.as_ref()
+                        .map_or_else(String::new, |h| format!("{h}；当前仍沿用 {current}")),
+                )
+                .font_size(theme.label_size)
+                .foreground(theme.danger)
+                .text_wrapping(TextWrapping::Wrap)
+                .height(if hint.is_some() { None } else { Some(0.0) })
+                .into(),
+        ],
+    )
+}
+
 fn field_help(label: &str) -> &'static str {
     match label {
         "节点职责（可自由调整）" => "说明这个节点负责什么、交付什么；用于生成任务指令。",
@@ -2977,9 +3111,11 @@ fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
     if state.show_params {
         if let Some(w) = state.workflow() {
             blocks.push(line("工作流名称", w.name.clone(), Action::Name, ctx));
-            blocks.push(line(
-                "最多协调轮数（1–64）",
-                w.max_rounds.to_string(),
+            blocks.push(numeric_line(
+                state,
+                theme,
+                NumericField::Rounds,
+                w.max_rounds as u64,
                 Action::MaxRounds,
                 ctx,
             ));
@@ -2992,18 +3128,22 @@ fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                     .children((
                         Border::new()
                             .vertical_alignment(VerticalAlignment::Top)
-                            .content(line(
-                                "总 Token 预算",
-                                w.token_budget.to_string(),
+                            .content(numeric_line(
+                                state,
+                                theme,
+                                NumericField::Budget,
+                                w.token_budget,
                                 Action::Budget,
                                 ctx,
                             )),
                         Border::new()
                             .grid_column(1)
                             .vertical_alignment(VerticalAlignment::Top)
-                            .content(line(
-                                "并发目标",
-                                w.max_parallel.to_string(),
+                            .content(numeric_line(
+                                state,
+                                theme,
+                                NumericField::Parallel,
+                                w.max_parallel as u64,
                                 Action::Parallel,
                                 ctx,
                             )),
@@ -3975,6 +4115,7 @@ fn canvas(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .capture_pointer_on_press(true)
         .on_pointer_pressed(ctx.callback(|p| Msg::Scheduling(Action::Press(p))))
+        .on_pointer_wheel_changed(ctx.callback(|p| Msg::Scheduling(Action::Wheel(p))))
         .on_pointer_moved(ctx.callback(|p: PointerEventInfo| Msg::Scheduling(Action::Move(p))))
         .on_pointer_released(ctx.callback(|p| Msg::Scheduling(Action::Release(p))))
         .on_pointer_capture_lost(ctx.callback(|_| Msg::Scheduling(Action::CaptureLost)))
@@ -4143,6 +4284,23 @@ mod gesture_tests {
         );
         assert!(error.contains("（directed_pool_expired）"));
         assert_eq!(readable_error("connection refused"), "connection refused");
+    }
+
+    #[test]
+    fn numeric_fields_accept_only_their_range_and_explain_otherwise() {
+        use super::{NumericField, numeric_field};
+        assert_eq!(numeric_field("4", NumericField::Rounds), Ok(4));
+        assert!(
+            numeric_field("65", NumericField::Rounds)
+                .unwrap_err()
+                .contains("1–64")
+        );
+        // Clearing the box or typing something else is invalid, not "0".
+        for bad in ["", " ", "abc", "-3", "1.5"] {
+            assert!(numeric_field(bad, NumericField::Budget).is_err(), "{bad:?}");
+        }
+        assert!(numeric_field("0", NumericField::Parallel).is_err());
+        assert_eq!(numeric_field(" 200000 ", NumericField::Budget), Ok(200_000));
     }
 
     #[test]

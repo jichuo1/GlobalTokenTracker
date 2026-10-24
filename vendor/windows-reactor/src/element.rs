@@ -281,6 +281,9 @@ pub struct PointerEventInfo {
     pub is_left_button_pressed: bool,
     pub is_right_button_pressed: bool,
     pub is_middle_button_pressed: bool,
+    /// GTT PATCH: vertical mouse-wheel delta for PointerWheelChanged (120 per
+    /// notch, positive = away from the user); 0 for every other event.
+    pub wheel_delta: i32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
