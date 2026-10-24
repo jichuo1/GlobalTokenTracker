@@ -1981,3 +1981,12 @@
 - **实测（Windows，隔离实例：GTT_DATA_DIR 副本 + GTT_UI_TEST_INSTANCE，PrintWindow 截图）**：三个子页、工作流设置检查器、输入与结果面板在 1500×950 与 1100×800 窗口下截图核对对齐与间距。原生菜单弹窗不在 PrintWindow 截图范围内，改用 UIA 验证：视图菜单 6 项（"实际大小"在 100% 时禁用），选"放大"后状态变为"缩放 110%"；更多菜单 6 项（无修改时"放弃修改并重载"禁用），选"工作流设置"后检查器打开。未用 UIA 验证画布右键节点菜单（需要真实右键）。
 - **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 366 项通过、4 项既有 ignored（UI 41 项）。过程中 `pages::tests::a_price_row_tooltip_lays_out_every_sources_say` 有一次失败，之后连续 3 次全量与单独运行均通过，与本轮改动无关（本轮未改价格页），疑为并行测试间共享状态导致的偶发失败，留待单独排查。
 - **边界**：本机没有 Swift 工具链，macOS 改动未编译、未运行，需经 verify-branch 工作流（macos-26 runner）或 Mac 本机构建验证；macOS 端仍缺 Windows 已有的"母节点"入口，属功能差异，本轮未补。未打包、未安装、未提交。
+
+## S160 微信输入法候选框：补齐应用清单（2026-10-24）
+
+- **结论**：S158 认为"应用层无可靠修复手段"不成立。UI 可执行文件此前**没有任何应用清单**（RT_MANIFEST 缺失，进程加载的是 comctl32 5.82，系统按未声明 Windows 10 支持的兼容模式运行）；微软的非打包 WinUI 3 模板固定带清单。微信输入法（WeType，基于 Mozc）的 TIP `wetype_tip.dll` 以进程内方式加载，从本进程取光标位置再交给 `wetype_renderer.exe` 绘制候选框，其代码中有多条"取位失败即不显示"的分支（GetTextExt/GetScreenExt 失败、无目标窗口、光标与窗口不在同一显示器）。
+- **对照实验**（隔离实例，仅复制 ui.json；用户实际输入 nihao；外部 `.exe.manifest` 注入，comctl32 6.0 SxS 加载作为清单生效的标记）：原版·左屏 ✗、原版·右屏 ✗、**加清单·左屏 ✓**、加清单·右屏 ✗。左屏仅清单一项差异即让候选框出现，且候选框紧贴光标（坐标正确），确认清单为主因。两次右屏测试按日志各只获得约 1.5 秒焦点、且四次测试时间重叠，右屏结果不作为结论。录制脚本未捕获到候选框窗口（类名/所属进程不在筛选范围内），结论以用户目视为准。
+- **修复**：新增 `crates/ui/app.manifest`（与实验所用内容一致：supportedOS Windows 10/11、maxversiontested、PerMonitorV2 与 true/PM、Common-Controls v6 依赖），`build.rs` 经 winresource `set_manifest_file` 嵌入。DPI 声明与框架运行时 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 一致。
+- **踩坑**：清单注释里写了 windows-reactor 自包含部署的标记字符串，框架对整个清单资源做子串匹配，判定为自包含部署后报 "self-contained Windows App Runtime files are missing" 拒绝启动。改写注释并新增两项单元测试（清单含 Windows 10 声明与 PerMonitorV2；清单不含该标记）。
+- **验证**：嵌入后 debug 实例正常启动并加载 comctl32 6.0（清单生效）；`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored（UI 43 项）。嵌入版尚未由用户以微信输入法复测；未打包安装。
+- **遗留**：右屏未复测（用户右屏被占用）。已排除本应用一侧的几何原因：隔离实例放到右屏时，主窗口、DesktopChildSiteBridge 与 0×0 隐藏的 InputSiteWindowClass 经 MonitorFromWindow/MonitorFromRect（NULL/NEAREST）全部解析到 DISPLAY2（物理 3840–7680），不存在"光标与窗口不在同一显示器"的条件；左屏候选框位置正确也排除了全局 DIP/物理像素混用。待右屏可用时，用 `ime-test.ps1 -Variant original -Monitor 2`（该 debug 产物已内嵌清单）单独复测，并以系统记事本在右屏作对照：都正常则清单已覆盖双屏；记事本也失败则属微信输入法自身问题。

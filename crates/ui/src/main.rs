@@ -3232,3 +3232,25 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod manifest_tests {
+    const MANIFEST: &str = include_str!("../app.manifest");
+
+    /// Third-party in-process input methods (WeChat IME) only show their
+    /// candidate window once the process declares Windows 10 support.
+    #[test]
+    fn manifest_declares_windows_10_and_per_monitor_v2() {
+        assert!(MANIFEST.contains("{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"));
+        assert!(MANIFEST.contains("PerMonitorV2"));
+    }
+
+    /// windows-reactor treats any RT_MANIFEST containing this string as a
+    /// self-contained deployment and refuses to start without the runtime
+    /// DLLs beside the exe — even when the string is only in a comment.
+    #[test]
+    fn manifest_never_carries_the_self_contained_marker() {
+        let marker = ["windows", "reactor", "self", "contained"].join("-");
+        assert!(!MANIFEST.contains(&marker));
+    }
+}
