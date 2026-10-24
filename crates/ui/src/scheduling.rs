@@ -568,6 +568,14 @@ impl State {
                                 if let Some(check) = &snapshot.check {
                                     self.notice = check.to_string();
                                 }
+                                if self.run_id.is_empty()
+                                    && let Some(id) = snapshot.active_run(&self.workflow_id)
+                                {
+                                    self.run_id = id.into();
+                                    self.show_run = true;
+                                    let id = self.run_id.clone();
+                                    ctx.spawn_background(move |_| Msg::Scheduling(Action::Poll(id)));
+                                }
                                 self.snapshot = snapshot;
                                 self.loaded = true;
                                 self.saving = false;
@@ -575,7 +583,7 @@ impl State {
                         }
                     }
                         Ok(value) => {
-                            if value.get("results").is_some(){self.report_text=bounded_pretty(&value);self.report_detail=Some(value);return;}
+                            if value.get("results").is_some(){self.report_text=bounded_pretty(&value);self.report_detail=Some(value);self.inv.invalidate();return;}
                         if let Some(id) = value["run_id"].as_str() {
                             self.run_id = id.into();
                         }

@@ -44,7 +44,18 @@ def _reason(params):
 
 
 def dispatch_management(service, method, params):
-    # This authenticated loopback UI endpoint does not expose model execution.
+    # Observation/cancellation remains available after dispatch is disabled.
+    if method == "router_dispatch":
+        from .dispatch import READ_ACTIONS
+        if not isinstance(params, dict) or params.get("action") not in READ_ACTIONS:
+            raise ValueError("Management endpoint cannot admit model work")
+        return service.dispatcher.control(**params)
+    historical = {"router_status": service.status, "router_collect": service.collect, "router_cancel": service.cancel,
+                  "router_group_status": service.groups.status, "router_group_collect": service.groups.collect,
+                  "router_group_cancel": service.groups.cancel, "router_workflow_status": service.scheduling.status,
+                  "router_workflow_cancel": service.scheduling.cancel}
+    if method in historical:
+        return historical[method](**(params or {}))
     if method != "router_scheduling":
         raise ValueError("Unknown local management method")
     params = _group_args(params or {}, {"action", "value", "expected_revision", "route_id", "workflow_id", "luna_supervision"}, set())
@@ -52,24 +63,25 @@ def dispatch_management(service, method, params):
 
 
 def dispatch(service, method, params):
+    from .dispatch import READ_ACTIONS, LEGACY_SUBMISSIONS
+    if method == "router_dispatch" and isinstance(params, dict) and params.get("action") in READ_ACTIONS:
+        return dispatch_management(service, method, params)
     service.require_external_interface()
     params = params or {}
     if not isinstance(params, dict):
         raise ValueError("Arguments must be an object")
+    if method == "router_dispatch":
+        return service.dispatcher.control(**params)
+    if method in LEGACY_SUBMISSIONS:
+        return service.dispatcher.legacy(method, params)
     if method == "router_inventory":
         return service.inventory(**params)
     if method == "router_scheduling":
         return dispatch_management(service, method, params)
-    if method in {"router_workflow_plan", "router_workflow_submit"}:
-        _group_args(params, {"definition", "input_text", "workflow_id", "request_id", "acknowledge_unknown_risk"} if method.endswith("submit") else {"definition", "workflow_id"}, {"definition"})
-        target = service.scheduling.submit if method.endswith("submit") else service.scheduling.plan
-        return target(**params)
     if method in {"router_workflow_status", "router_workflow_cancel"}:
         _group_args(params, {"run_id"}, {"run_id"})
         target = service.scheduling.cancel if method.endswith("cancel") else service.scheduling.status
         return target(**params)
-    if method == "router_plan":
-        return service.plan(params["task"])
     if method == "router_recheck":
         if "route_id" not in params or set(params) - {"route_id", "workflow_id"}:
             raise ValueError("router_recheck requires route_id and optional workflow_id")
@@ -77,8 +89,6 @@ def dispatch(service, method, params):
     if method == "router_preferences":
         _group_args(params, {"action", "scope_id", "preferences", "ttl_s"}, {"action"})
         return service.preferences(**params)
-    if method == "router_submit":
-        return service.submit(params["task"])
     if method == "router_status":
         return service.status(**params)
     if method == "router_collect":
@@ -114,8 +124,6 @@ def dispatch(service, method, params):
             service.catalog.refresh()
         return result
     group_methods = {
-        "router_group_plan": ("plan", {"request"}, {"request"}),
-        "router_group_submit": ("submit", {"request"}, {"request"}),
         "router_group_status": ("status", {"group_id"}, {"group_id"}),
         "router_group_collect": ("collect", {"group_id", "cursor", "max_chars", "wait_ms"}, {"group_id"}),
         "router_group_cancel": ("cancel", {"group_id"}, {"group_id"}),
@@ -128,10 +136,6 @@ def dispatch(service, method, params):
     if spec:
         target, allowed, required = spec
         _group_args(params, allowed, required)
-        if target in {"plan", "submit"}:
-            if not isinstance(params["request"], dict):
-                raise ValueError("request must be an object")
-            return getattr(service.groups, target)(params["request"])
         _group_id(params)
         if target == "collect":
             params["cursor"] = _whole_number(params.get("cursor", 0), "cursor", 0, 2**63 - 1)

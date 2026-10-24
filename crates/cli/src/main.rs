@@ -8,6 +8,7 @@ use tabled::{Table, Tabled};
 
 mod coordination;
 mod peer;
+mod scheduling;
 
 #[derive(Parser)]
 #[command(
@@ -38,6 +39,11 @@ enum Cmd {
     Peer {
         #[command(subcommand)]
         command: peer::Command,
+    },
+    /// Dispatch bounded model tasks and inspect their durable results.
+    Scheduling {
+        #[command(subcommand)]
+        command: scheduling::Command,
     },
     /// Incremental scan of all sources (or one: claude|codex|opencode|zcode).
     Scan { source: Option<String> },
@@ -122,6 +128,9 @@ fn main() -> Result<()> {
         let db = cli.db.clone().unwrap_or_else(default_db_path);
         return peer::run(&db, command);
     }
+    if let Cmd::Scheduling { command } = &cli.cmd {
+        return scheduling::run(command);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -135,6 +144,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Coordination { .. } => unreachable!("coordination dispatched above"),
         Cmd::Peer { .. } => unreachable!("peer dispatched above"),
+        Cmd::Scheduling { .. } => unreachable!("scheduling dispatched above"),
         Cmd::Scan { source } => {
             let t = std::time::Instant::now();
             let r = match source.as_deref() {

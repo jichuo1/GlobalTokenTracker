@@ -205,7 +205,7 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 
 ## 使用
 
-“调度”页提供来源状态、开关与生成检测、限时定向模型池，以及带职责模板、主备路线和可选 Luna 的拖拽工作流。调用上限与兼容选项可通过七种配置档调整。需要单独部署配套协调器0.4.0或更新版，详见[可视调度说明](integrations/model-router/docs/visual-scheduling.md)。
+“调度”页提供来源状态、开关与生成检测、限时定向模型池，以及带职责模板、主备路线和可选 Luna 的拖拽工作流。调用上限与兼容选项可通过七种配置档调整。新接入需要配套协调器 0.5.0 或更新版（`dispatch_v1`）；GUI、FFI、MCP 与原生 CLI 共用统一受理和持久请求身份。CLI 使用 `scheduling plan|submit|status|collect|report|cancel|list`，从请求文件承接普通任务、研究组或已保存工作流。详见[统一调度接入](integrations/model-router/docs/dispatch-intake.md)与[可视调度说明](integrations/model-router/docs/visual-scheduling.md)。
 
 GUI 开箱即用（Windows：开始菜单 → GlobalTokenTracker；macOS：“应用程序”或菜单栏图标）。Windows 安装包同时附带 CLI（安装时勾选"加入用户 PATH"后可直接调用）；macOS 的 DMG 只含应用，CLI 需从源码构建（见[构建项目](#构建项目)）：
 

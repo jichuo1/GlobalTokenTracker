@@ -24,7 +24,7 @@ inherit、balanced、economy、throughput、deep、compatibility、connectivity 
 
 ZCode 支持 prompt/messages 载荷和可选的 requested_options 校验，仍核对提供商、模型和请求的推理级别；额外原生元数据不会原样导出。支持嵌套原生 usage 与常见长度终止值。OpenCode 对照 [服务接口](https://opencode.ai/docs/server/) 和 [1.18.18 提示词执行代码](https://github.com/anomalyco/opencode/blob/v1.18.18/packages/opencode/src/session/prompt.ts)：agent steps、轮询、HTTP 超时、消息页大小可配置，权限读回使用相同生效步数；原生输出环境上限与请求对应。打印式客户端可配置轮数及兼容标志，保留工具禁用和严格 MCP 配置。
 
-原生启动/权限预检能够证明未发出生成时，不记成估算消费；已发出的未知传输结果保留状态与计量，不自动重试相同片段或节点。原始错误正文、凭证和命令不进入公开诊断。设置按 revision 做并发冲突检查并原子替换；外协关闭时所有 MCP/RPC 仍拒绝，本机认证管理端点只保留设置读取与编辑，扫描及检测继续遵守外协开关。
+原生启动/权限预检能够证明未发出生成时，不记成估算消费；已发出的未知传输结果保留状态与计量，不自动重试相同片段或节点。原始错误正文、凭证和命令不进入公开诊断。设置按 revision 做并发冲突检查并原子替换；外协关闭后拒绝新计划、派发、扫描与生成检测。0.5.0 的认证管理端点保留设置读取/编辑和存量任务的状态、结果、全文分页、列表与取消，便于对账和停止。新提交统一经 [router_dispatch](dispatch-intake.md)，两端原生客户端通过共同的 Rust 调用层转入这一入口，旧工作流计划/提交仅作兼容转发。
 
 ## 信息支撑与验收
 

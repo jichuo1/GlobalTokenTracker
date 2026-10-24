@@ -726,6 +726,15 @@ struct SchedulingView: View {
                 callPresets = value["call_presets"].values
                 effectiveProfile = value["effective_profile"].pretty
                 if workflowId.isEmpty { workflowId = value["supervisors"].values.first?["workflow_id"].text ?? "default" }
+                if runId.isEmpty, let active = runs.first(where: { $0["workflow_id"].text == workflowId && ["running", "cancelling"].contains($0["state"].text) }) {
+                    runId = active["id"].text
+                    showRun = true
+                    detailValue = active
+                    Task { @MainActor in
+                        await Task.yield()
+                        poll(runId)
+                    }
+                }
                 if case .object = value["check"] { notice = value["check"].pretty }
             } else if value.fields.keys.contains("results") { report=value.pretty }
             else { if !value["run_id"].text.isEmpty { runId = value["run_id"].text }; detail = value.pretty; detailValue=value; finished = ["succeeded", "failed", "cancelled", "interrupted"].contains(value["state"].text) }

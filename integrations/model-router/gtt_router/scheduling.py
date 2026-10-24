@@ -320,6 +320,34 @@ class Scheduling:
             "call_presets": presets(),
             "effective_profile": self.service.call_profile()}
 
+    def collect(self, run_id, cursor=0, max_chars=12000):
+        """Collect node indexes in stable order; full reports use dispatch.report."""
+        integer(cursor, "cursor", 0, 2**53 - 1)
+        integer(max_chars, "max_chars", 2000, 30000)
+        run = self.status(run_id)
+        # Do not advance a cursor over an unfinished parallel branch.
+        nodes = list(run["nodes"].items())
+        results, used, offset = [], 0, cursor
+        for node_id, node in nodes[cursor:]:
+            if node["state"] not in TERMINAL:
+                break
+            item = {"node_id": node_id, "state": node["state"], "job_id": node.get("job_id"),
+                    "reports": node.get("reports", []), "reason": node.get("reason"),
+                    "information_requests": node.get("information_requests", [])}
+            size = len(json.dumps(item, ensure_ascii=False))
+            if results and used + size > max_chars:
+                break
+            if size > max_chars:
+                item = {"node_id": node_id, "state": node["state"], "job_id": node.get("job_id"),
+                        "report_count": node.get("report_count", 0), "excerpt_only": True}
+                size = len(json.dumps(item, ensure_ascii=False))
+            results.append(item)
+            used += size
+            offset += 1
+        return {"run_id": run_id, "state": run["state"], "results": results,
+                "next_cursor": offset, "has_more": offset < len(nodes),
+                "tokens_used": run["tokens_used"], "tokens_estimated": run["tokens_estimated"]}
+
     def plan(self, definition, workflow_id="default"):
         definition = graph(definition)
         self._check_limits(definition)
@@ -327,7 +355,7 @@ class Scheduling:
             "preferred_route": n["route_id"], "allowed_routes":[n["route_id"],*n["fallback_routes"]],"workflow_id": workflow_id})
             if n["node_type"] == "model" else {"local_node": n["node_type"], "generates_content": False}} for n in definition["nodes"]]}
 
-    def submit(self, definition, input_text="", workflow_id="default", request_id="", acknowledge_unknown_risk=False):
+    def submit(self, definition, input_text="", workflow_id="default", request_id="", acknowledge_unknown_risk=False, *, _run_id=None, _cancellation_event=None):
         definition = graph(definition)
         from .profiles import ABS_LIMITS
         text(input_text,"workflow input",ABS_LIMITS["max_workflow_input_chars"],empty=True)
@@ -337,29 +365,48 @@ class Scheduling:
             raise ValueError("acknowledge_unknown_risk must be boolean")
         fingerprint_nodes=[{k:v for k,v in n.items() if k not in {"x","y","title","tags"}} for n in definition["nodes"]]
         fingerprint=hashlib.sha256(json.dumps({"nodes":fingerprint_nodes,"edges":definition["edges"],"input":input_text,"workflow_id":workflow_id},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        request_fingerprint=hashlib.sha256(json.dumps({"execution":fingerprint,"token_budget":definition["token_budget"],
+            "max_parallel":definition["max_parallel"],"luna_supervision":definition["luna_supervision"]},sort_keys=True).encode()).hexdigest()
         request_id = request_id or fingerprint
-        prior = self._previous(request_id,fingerprint,acknowledge_unknown_risk)
+        prior = self._previous(request_id,fingerprint,acknowledge_unknown_risk,request_fingerprint)
         if prior:return prior
         self._check_limits(definition)
         gate = Task("extract", "Workflow supervision setting", workflow_id=workflow_id)
         gate._workflow_supervision_opt_out = not definition["luna_supervision"]
+        gate._cancellation_event = _cancellation_event
         self.service.require_dispatch(workflow_id, task=gate)
         text(input_text, "workflow input", self.service.call_profile()["limits"]["max_workflow_input_chars"], empty=True)
         self.service.ensure_catalog()
+        # Catch permanently incompatible downstream bindings before the first
+        # paid node. Cooldowns, latency estimates and busy slots may recover
+        # while upstream nodes run, so they remain runtime scheduling decisions.
+        permanent = {"task_kind_not_allowed", "web_not_supported", "quality_floor_not_met",
+                     "disabled_or_no_auth_hint", "outside_task_route_pool", "route_not_selected", "source_dispatch_disabled"}
+        preflight = self.plan(definition, workflow_id)
+        for item in preflight["nodes"]:
+            plan = item["plan"]
+            if plan.get("local_node") or plan.get("candidates"):
+                continue
+            rejected = plan.get("rejected", [])
+            if not rejected or all(permanent.intersection(r["reasons"]) for r in rejected):
+                reasons = sorted({reason for r in rejected for reason in r["reasons"] if reason in permanent})
+                raise ValueError("workflow_preflight_failed: " + item["id"] + ":" + (",".join(reasons) or "workflow_route_not_found"))
         with self.lock:
-            prior = self._previous(request_id,fingerprint,acknowledge_unknown_risk)
+            if _cancellation_event is not None and _cancellation_event.is_set():
+                raise ValueError("workflow_cancelled")
+            prior = self._previous(request_id,fingerprint,acknowledge_unknown_risk,request_fingerprint)
             if prior:return prior
             self.threads = {k:t for k,t in self.threads.items() if t.is_alive()}
             self.cancellations = {k:v for k,v in self.cancellations.items() if k in self.threads}
             if sum(t.is_alive() for t in self.threads.values()) >= 2:
                 raise ValueError("visual_workflow_capacity_full")
-            ident = uuid.uuid4().hex
-            self.cancellations[ident] = threading.Event()
+            ident = _run_id or uuid.uuid4().hex
+            self.cancellations[ident] = _cancellation_event if _cancellation_event is not None else threading.Event()
             run = {"id": ident, "name": definition["name"], "workflow_id": workflow_id, "state": "running", "tokens_used": 0,
                 "definition_id":definition["id"],
                 "tokens_estimated": 0, "definition": definition, "input": input_text,
                 "supervision": "required" if definition["luna_supervision"] else "workflow_opt_out",
-                "request_id":request_id,"fingerprint":fingerprint,"acknowledge_unknown_risk":acknowledge_unknown_risk,
+                "request_id":request_id,"fingerprint":fingerprint,"request_fingerprint":request_fingerprint,"acknowledge_unknown_risk":acknowledge_unknown_risk,
                 "nodes": {n["id"]: {"state": "pending", "job_id": None, "tokens_used": 0} for n in definition["nodes"]}}
             self._save(run)
             thread = threading.Thread(target=self._run, args=(ident,), daemon=True, name="gtt-visual-dag")
@@ -367,12 +414,12 @@ class Scheduling:
             thread.start()
         return {"run_id": ident, "state": "running"}
 
-    def _previous(self, request_id, fingerprint, acknowledge):
+    def _previous(self, request_id, fingerprint, acknowledge, request_fingerprint=None):
         with self.lock, self.service.store.lock:
             candidates=[json.loads(r[0]) for r in self.service.store.conn.execute("SELECT payload FROM visual_runs WHERE json_extract(payload,'$.request_id')=? OR json_extract(payload,'$.fingerprint')=?",(request_id,fingerprint))]
             for prior in candidates:
                 if prior.get("request_id")==request_id:
-                    if prior.get("fingerprint")!=fingerprint:raise ValueError("workflow_request_id_conflict")
+                    if prior.get("fingerprint")!=fingerprint or (prior.get("request_fingerprint") and prior["request_fingerprint"]!=request_fingerprint):raise ValueError("workflow_request_id_conflict")
                     return {"run_id":prior["id"],"state":prior["state"],"deduplicated":True}
             for prior in candidates:
                 if not acknowledge and (prior["state"]=="interrupted" or any(n["state"]=="unknown" for n in prior["nodes"].values())):
@@ -430,7 +477,7 @@ class Scheduling:
                                         node.update(state="blocked", reason=str(error), evidence_refs=[])
                             else:
                                 node["state"] = "running"
-                                reserved += max(0, node["reserved_budget"] - job["tokens_used"])
+                                reserved += max(0, node["reserved_budget"] - job["tokens_used"] - job["tokens_estimated"])
                     run.update(tokens_used=used, tokens_estimated=estimated)
                     cancelling = run["state"] == "cancelling"
                     active = sum(n["state"] == "running" for n in states.values())
@@ -478,7 +525,7 @@ class Scheduling:
                         except ValueError as error:
                             node.update(state="blocked", reason=str(error)[:300])
                             continue
-                        if used + reserved + budget > definition["token_budget"]:
+                        if used + estimated + reserved + budget > definition["token_budget"]:
                             if active:
                                 continue
                             node.update(state="blocked", reason="workflow_token_budget_exhausted")

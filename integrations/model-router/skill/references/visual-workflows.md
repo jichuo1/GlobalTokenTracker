@@ -1,5 +1,7 @@
 # 定向工作流与调用配置
 
+0.5.0 起，新计划/提交统一使用 `router_dispatch`，详见[统一受理协议](dispatch-intake.md)。本文出现的旧 workflow 方法名仅作兼容说明，不再向新 MCP 客户端发现。
+
 `router_scheduling(action="get")` 返回来源、路线、生成验证状态、限时池、职责模板、配置预设和生效值；`refresh` 重新扫描目录，不生成内容。`save` 传完整 `value` 与读取到的 `expected_revision`，冲突时重载并合并，不能覆盖别人刚保存的设置。来源目录可见、存在认证提示、近期生成成功分别表述。
 
 `settings.enabled` 是调度总开关。`mode="directed"` 只允许 `pool` 中未到期的路线，按顺序选路。每项为 `route_id`、毫秒 `expires_at` 和标签。质量、恢复隔离、原生容量和共享预算仍有效；过期后阻挡新派发，已发出请求允许完成。

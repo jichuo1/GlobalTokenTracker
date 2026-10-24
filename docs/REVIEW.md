@@ -2030,3 +2030,22 @@
 - **全部平移入口**：按下处理里共三处会开始平移——空白处左键、空白处右键、中键或平移工具；另外"视图 › 平移工具"可在连线模式下重新打开。无滚轮平移。
 - **修复**：新增 `State::can_pan()`（连线模式下为 false），三处入口都经它判定，连线模式下左/右/中键拖动均不再移动视图；右键节点仍打开节点菜单。打开平移工具时自动回到移动模式（平移工具属于移动模式）。"适应全图"与缩放不经拖动，仍可在连线模式下调整视图。徽标第二行改为"从节点拖到下游节点 · 画布锁定 · 双击空白处切换"，"?"说明同步改写。
 - **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 370 项通过、4 项既有 ignored（新增 connect_mode_locks_panning）。隔离实例截图确认连线模式徽标文字在框内。真实指针拖动未由本机验证（未接管鼠标）。
+
+## S167 统一调度受理与 GTT 正式承接（2026-10-24）
+
+- **范围**：协调器 0.5.0 新增 router_dispatch，将 task/group/workflow 的计划和提交集中到持久受理日志；原六个提交/计划名称退出 MCP 工具发现并兼容转发。研究组的审批、续研、交接保持原职责，共用原执行、容量和计量路径。GTT core 统一 loopback 认证、dispatch_v1/contract=2 握手及旧 workflow 转换；FFI 开放新入口，CLI 新增 scheduling 七种动作，从文件读取材料。
+- **可靠性**：先落预分配目标和请求指纹，再执行；并发同 ID、完成后和重启后均查回原任务，修改内容冲突。未知付费结果换 ID 仍需显式接受风险；受理期间取消传递真实事件，尚未发出不建立付费目标。已保存工作流按 revision 解析。全文 report 分页带 SHA-256，工作流游标不越过未完成分支；预算纳入明确、估算和剩余预约。整图永久不兼容在付费上游前拒绝。
+- **GTT 承接**：Windows 报告响应早退前补 invalidate；两端仅恢复当前 workflow 的活动运行观察，不自动重提。保留本轮其他任务正在修改的节点菜单与 S166 记录，没有覆盖或提交其改动。macOS 仅源码核对，本机未编译/视觉验收。
+- **真实负载**：独立服务上的 Gemini Flash 两并行提取成功（13,113 + 12,218 tokens）；首次下游任务类型不被模型允许，触发整图预检修复。保留两个成功报告，仅补测允许的 summarize 节点（14,639 tokens）；合计三次原生调用 39,970 tokens，预约归零。新轮四个重复提交仍只有一个 dispatch；原生 native_backed/actual_model 和完整 JSON 留证。首轮 CLI 文件名错误已保留并将路径验证移至生成前。
+- **接入实测**：真实 GTT CLI 对独立实例执行 plan、同 ID submit、status/collect/report/list/cancel；服务重启后复用原 dispatch，原生 attempt 未增加。关闭独立实例外协后对账/取消仍通过，新 plan/submit 拒绝。正式配置 SHA-256 未变，正式 0.4.0 服务未切换。146 条历史作业的数据库副本迁移 dry-run 全部保留，保存的调度关闭状态保留。
+- **验证**：Python 协调器 391 项全套回归通过；cargo fmt --all -- --check、workspace Clippy -D warnings 通过；release CLI 构建通过。默认并行 Rust workspace 曾出现既有价格 tooltip 语言竞争（预期中文“未计票”，实际英文“not counted”），pages.rs/i18n.rs 未改，单项通过；失败日志保留。不跳过任何测试的完整串行回归 377 通过、4 项既有 ignored。未通过重试抹除原并行失败，未放宽阈值。
+- **交付边界**：GTT 内嵌协调器与独立源码按明确清单同步并核对字节相同；正式服务切换和安装 CLI/Skill 属共享环境变更，依用户 AGENTS 协议待明确确认。详细接口及证据边界见 integrations/model-router/docs/dispatch-intake.md 与 dispatch-verification.md。未提交、未推送。
+
+
+## S168 用户授权后的正式调度服务切换（2026-10-24）
+
+- **授权**：用户明确选择“确认切换服务并同步 CLI、Skill，保留当前开关”。实际维护仅切换模型协调器常驻进程、安装 release CLI 和同步三份 Skill 文档；没有安装 GUI、提交或推送其他并发 UI 修改。
+- **维护前**：确认普通/研究组/工作流无在途任务，备份 CLI、Skill、config.json、scheduling.json 和 SQLite 一致性副本。146 条历史作业的副本迁移预演保留全部记录。
+- **切换后**：正式入口仍为 integrations/model-router/router.py；health 返回 0.5.0、runtime_contract_version=2 与 dispatch_v1。正式 CLI 哈希等于验证过的 release 候选（f34a0498d4cc…），scheduling list 成功；已有 MCP 客户端读取配置成功。
+- **保留与门禁**：调度 enabled=false、revision=4、模型池和两个正式配置文件 SHA-256 均不变；历史作业仍为146、在途为0。正式 CLI 的验证提交被 scheduling_disabled 拒绝，新增 dispatch 与作业均为0。新协议已可用，实际生成仍需用户自行启用调度并配置有效路线池。
+- **证据**：协调器工作区 diagnostics/dispatch-activation-20261024-210540/activation.json 保存备份与正式验收，dispatch-verification.md 已区分源码、独立原生负载、正式安装和 macOS/GUI 验收边界。并行 Rust 回归的既有语言竞争失败日志仍保留。

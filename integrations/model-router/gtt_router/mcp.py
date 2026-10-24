@@ -68,6 +68,16 @@ REFS = {"type": "array", "maxItems": 4, "items": {"type": "object", "additionalP
                    "url": {"type": "string", "maxLength": 600}, "anchor": {"type": "string", "maxLength": 300}}}}
 MESSAGE_KIND = {"type": "string", "enum": ["assignment", "evidence", "conflict", "progress", "suggestion", "merge_proposal"]}
 TOOLS = [
+    tool("router_dispatch", "Unified durable intake for task, group or workflow (inline or saved_workflow_id). Submit with a stable request_id; query it after ambiguous transport. Never replay unknown paid outcomes. status/collect/report/list/cancel remain available when dispatch is disabled. Large reports are losslessly paged with report, worker, node_id and offset. Existing supervision, route pool, budget and capacity gates apply.",
+         {"action": {"type": "string", "enum": ["plan", "submit", "status", "collect", "report", "list", "cancel"]},
+          "request": {"type": "object", "additionalProperties": False, "required": ["kind"], "properties": {
+              "kind": {"type": "string", "enum": ["task", "group", "workflow"]}, "task": TASK_SCHEMA, "request": GROUP_SCHEMA,
+              "definition": {"type": "object"}, "saved_workflow_id": ID, "expected_revision": {"type": "integer", "minimum": 0},
+              "input_text": {"type": "string", "maxLength": ABS_LIMITS["max_workflow_input_chars"]}, "workflow_id": ID}},
+          "request_id": ID, "dispatch_id": ID, "acknowledge_unknown_risk": {"type": "boolean"}, "workflow_id": ID,
+          "cursor": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 64},
+          "max_chars": {"type": "integer", "minimum": 2000, "maximum": 30000}, "node_id": ID,
+          "worker": {"type": "integer", "minimum": 0}, "offset": {"type": "integer", "minimum": 0}}, ["action"]),
     tool("router_scheduling", "Read/edit user dispatch switches, expiring ordered model pool and saved DAGs. Refresh scans native catalogs only; check uses the existing bounded generation probe and real Luna gate. Save requires the current revision.",
          {"action": {"type": "string", "enum": ["get", "save", "refresh", "check"]}, "value": {"type": "object"},
           "expected_revision": {"type": "integer", "minimum": 0}, "route_id": ID, "workflow_id": ID, "luna_supervision": {"type": "boolean", "default": True}}),
@@ -121,11 +131,18 @@ TOOLS = [
 ]
 
 
+# Cached clients can still call these aliases. New clients discover one intake,
+# so no second submit policy can compete with the configured scheduler.
+from .dispatch import LEGACY_SUBMISSIONS
+COMPAT_TOOLS = [t for t in TOOLS if t["name"] in LEGACY_SUBMISSIONS]
+TOOLS = [t for t in TOOLS if t["name"] not in LEGACY_SUBMISSIONS]
+
+
 def serve(config_path, client=None):
     client = client or LocalClient(config_path)
     initialized = False
     ready = False
-    valid_tools = {t["name"] for t in TOOLS}
+    valid_tools = {t["name"] for t in TOOLS + COMPAT_TOOLS}
     def respond(value):
         sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
         sys.stdout.flush()
