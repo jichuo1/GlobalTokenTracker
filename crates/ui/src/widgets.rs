@@ -1268,6 +1268,10 @@ pub struct DonutSpec<'a> {
     pub wide: bool,
 }
 
+/// Width of the donut canvas. The stacked legend under it is at least this
+/// wide, so its value column ends on the canvas's right border.
+const DONUT_W: f64 = 200.0;
+
 fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> View {
     let DonutSpec {
         slices,
@@ -1302,7 +1306,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
     });
     Border::new()
         // Wider than the ring: the band right of it hosts the hover bubble.
-        .width(200.0)
+        .width(DONUT_W)
         .height(132.0)
         // Left edge aligns with the legend rows below — centering floated
         // the ring right of the text column.
@@ -1523,11 +1527,14 @@ pub fn donut_cell(
             .into()
     } else {
         let name_limit = if wide { 28 } else { 16 };
-        // One grid for the whole legend, not a stretched grid per row: with a
-        // star name column every value was pushed to the cell's far edge,
-        // ~250 DIP from its name. Auto columns size to the longest entry, so
-        // percentages and values sit right after the names and still align
-        // down the legend (both right-aligned, so decimals line up).
+        // One grid for the whole legend (columns align across rows; percent
+        // and value right-aligned, so decimals line up). Its width follows
+        // the chart, not the cell: at least the donut canvas, so the value
+        // column ends on the canvas's right border and the name-to-value gap
+        // is whatever that leaves — stretched across the cell it was ~250 DIP,
+        // packed to the content it stopped short of the border by a
+        // different amount on every chart. Longer content widens it instead
+        // of clipping.
         let mut cells: Vec<View> = Vec::with_capacity(slices.len() * 4);
         for (i, (name, v)) in slices.iter().enumerate() {
             let row = i as i32;
@@ -1598,10 +1605,14 @@ pub fn donut_cell(
         let legend_view = Grid::new()
             .columns([
                 GridLength::Auto,
-                GridLength::Auto,
+                GridLength::STAR,
                 GridLength::Auto,
                 GridLength::Auto,
             ])
+            // Left-aligned, so the grid is arranged at max(content, min):
+            // the star name column absorbs exactly the slack up to the border.
+            // Beside the ring (wide) there is no border to meet.
+            .min_width(if wide { 0.0 } else { DONUT_W })
             .rows((0..slices.len()).map(|_| GridLength::Auto))
             .column_spacing(8.0)
             .row_spacing(3.0)
