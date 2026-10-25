@@ -5053,6 +5053,21 @@ pub fn subscribe_event(
             revision,
         })
         .map_err(native_error),
+        (Handle::TextBox(value), EventId::TextBoxLostFocus) => {
+            // Focus events live on the IUIElement interface (slot order
+            // verified against Microsoft.UI.Xaml.winmd), not on ITextBox.
+            let source = value.cast::<IUIElement>().map_err(native_error)?;
+            source.LostFocus({
+                move |_, _| {
+                    sink.enqueue(node, EventId::TextBoxLostFocus, revision, EventPayload::Unit);
+                }
+            })
+        }
+        .map(|revoker| NativeSubscription::Event {
+            _revoker: revoker,
+            revision,
+        })
+        .map_err(native_error),
         (Handle::AutoSuggestBox(value), EventId::AutoSuggestBoxTextChanged) => {
             let event_source = (*value).clone();
             value.TextChanged({

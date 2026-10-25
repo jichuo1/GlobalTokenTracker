@@ -108,6 +108,10 @@ pub enum Action {
     PoolNode,
     ConnectFromNode,
     DismissCheck,
+    /// A TextBox lost focus (or the canvas was pressed): settle every
+    /// waiting field — commit finished values, stop waiting on unfinished
+    /// numeric drafts.
+    CommitFields,
     /// Set the selected model node's reasoning effort ("" clears it).
     SetEffort(String),
     /// Text of the custom-effort input row inside the node menu.
@@ -566,6 +570,64 @@ impl State {
     fn workflow_mut(&mut self) -> Option<&mut Workflow> {
         self.draft.workflows.get_mut(self.selected)
     }
+    /// Settles fields that wait for an explicit commit. `revert_invalid`
+    /// distinguishes a real blur (focus moved to another control — an
+    /// unfinished numeric draft gives up and falls back to the stored value)
+    /// from a canvas press (the TextBox keeps focus mid-edit, so nothing may
+    /// be discarded). Valid drafts always commit: that is the "typed it,
+    /// clicked away, why isn't it saved" case.
+    fn commit_pending_fields(&mut self, revert_invalid: bool) {
+        if revert_invalid {
+            for field in [
+                NumericField::Rounds,
+                NumericField::Budget,
+                NumericField::Parallel,
+            ] {
+                let unfinished = self
+                    .numeric_drafts
+                    .get(field.key())
+                    .is_some_and(|text| numeric_field(text, field).is_err());
+                if unfinished {
+                    self.numeric_drafts.remove(field.key());
+                }
+            }
+        }
+        let effort = self.effort_draft.trim().to_owned();
+        if !effort.is_empty() && effort.chars().count() <= 32 {
+            let known = EFFORT_PRESETS.iter().any(|(key, _)| *key == effort)
+                || self.draft.effort_presets.contains(&effort);
+            if !known && self.draft.effort_presets.len() < 16 {
+                self.draft.effort_presets.push(effort.clone());
+            }
+            if let Some(i) = self.node
+                && let Some(n) = self
+                    .workflow_mut()
+                    .and_then(|w| w.nodes.get_mut(i))
+                    .filter(|n| n.is_model_backed() && n.effort != effort)
+            {
+                n.effort = effort;
+                self.dirty = true;
+            }
+            self.effort_draft.clear();
+            self.effort_input_open = false;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(&self.task_editor)
+            && value.is_object()
+            && let Some(i) = self.node
+            && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
+            && n.task != value
+        {
+            n.task = value;
+            self.dirty = true;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(&self.profile_editor)
+            && value.is_object()
+            && self.draft.call_profile != value
+        {
+            self.draft.call_profile = value;
+            self.dirty = true;
+        }
+    }
     fn add_pool(&mut self, route_id: String) {
         let expiry = if self.pool_permanent {
             model::PERMANENT_EXPIRES_AT
@@ -726,6 +788,7 @@ impl State {
             }
             Action::ConnectFromNode => self.toggle_connect_mode(),
             Action::DismissCheck => self.check_feedback = None,
+            Action::CommitFields => self.commit_pending_fields(true),
             Action::SetEffort(effort) => {
                 if let Some(i) = self.node
                     && let Some(n) = self
@@ -1275,6 +1338,11 @@ impl State {
             Action::Press(p) => {
                 self.pointer = (p.x, p.y);
                 self.error = None;
+                // The canvas cannot take focus from a TextBox (WinUI keeps
+                // focus on non-focusable targets), so a canvas press is the
+                // click-away signal: finished values commit, nothing is
+                // discarded while a field may still be mid-edit.
+                self.commit_pending_fields(false);
                 if self.blank_double_click(p) {
                     self.toggle_connect_mode();
                 } else if p.is_right_button_pressed && p.x >= 210.0 {
@@ -2180,7 +2248,10 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
                                     .text(state.effort_draft.clone())
                                     .on_text_changed(ctx.callback(|v: String| {
                                         Msg::Scheduling(Action::EffortDraft(v))
-                                    })),
+                                    }))
+                                    .on_lost_focus(
+                                        ctx.callback(|_| Msg::Scheduling(Action::CommitFields)),
+                                    ),
                                 button("添加", || Action::ApplyEffortDraft, ctx),
                             )),
                     ),
@@ -2530,6 +2601,9 @@ fn line(
             .min_width(120.0)
             .text(value)
             .on_text_changed(ctx.callback(move |v| Msg::Scheduling(action(v))))
+            // Clicking away settles the field: a finished value commits, an
+            // unfinished numeric draft stops waiting (see CommitFields).
+            .on_lost_focus(ctx.callback(|_| Msg::Scheduling(Action::CommitFields)))
             .into(),
     ];
     // Only fields that have help render the line: a zero-height stand-in still
@@ -4897,6 +4971,87 @@ mod gesture_tests {
         assert!(
             message.contains("思考程度") && message.contains("（effort_not_set）"),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn clicking_away_settles_waiting_fields_without_losing_work() {
+        use super::NumericField;
+        let mut state = super::State {
+            loaded: true,
+            ..Default::default()
+        };
+        let mut workflow = globaltokentracker_core::scheduler::Workflow::new("fixture".into());
+        workflow
+            .add_route(
+                &globaltokentracker_core::scheduler::Route {
+                    route_id: "r".into(),
+                    model: "m".into(),
+                    ..Default::default()
+                },
+                10.0,
+                10.0,
+            )
+            .unwrap();
+        state.draft.workflows.push(workflow);
+        state.node = Some(0);
+
+        // A real blur (focus moved to another control): an unfinished numeric
+        // draft stops waiting and falls back to the stored value.
+        state
+            .numeric_drafts
+            .insert(NumericField::Budget.key(), "not-a-number".into());
+        state.commit_pending_fields(true);
+        assert!(
+            !state
+                .numeric_drafts
+                .contains_key(NumericField::Budget.key())
+        );
+        // A canvas press keeps focus, so the same unfinished draft must
+        // survive — mid-edit text is never discarded there.
+        state
+            .numeric_drafts
+            .insert(NumericField::Budget.key(), "still-typing".into());
+        state.commit_pending_fields(false);
+        assert!(
+            state
+                .numeric_drafts
+                .contains_key(NumericField::Budget.key())
+        );
+
+        // A finished custom effort commits on click-away: preset list, node
+        // effort, and the input row all settle.
+        state.effort_draft = " ultra ".into();
+        state.commit_pending_fields(false);
+        assert!(state.draft.effort_presets.contains(&"ultra".to_owned()));
+        assert_eq!(state.draft.workflows[0].nodes[0].effort, "ultra");
+        assert!(state.effort_draft.is_empty() && !state.effort_input_open);
+        assert!(state.dirty);
+        // An unfinished effort draft (too long) neither applies nor errors.
+        state.dirty = false;
+        state.effort_draft = "x".repeat(33);
+        state.commit_pending_fields(false);
+        assert_eq!(state.draft.workflows[0].nodes[0].effort, "ultra");
+        assert!(!state.dirty);
+
+        // JSON editors apply silently when valid, and are left alone when not.
+        state.task_editor = r#"{"kind":"extract","prompt":"settled"}"#.into();
+        state.profile_editor = r#"{"preset":"inherit"}"#.into();
+        state.commit_pending_fields(false);
+        assert_eq!(
+            state.draft.workflows[0].nodes[0].task["prompt"],
+            serde_json::json!("settled")
+        );
+        assert_eq!(
+            state.draft.call_profile,
+            serde_json::json!({"preset":"inherit"})
+        );
+        state.task_editor = "not json yet".into();
+        state.commit_pending_fields(true);
+        assert_eq!(
+            state.draft.workflows[0].nodes[0].task["prompt"],
+            serde_json::json!("settled"),
+            "invalid editor text is skipped, not applied"
         );
     }
 

@@ -1264,6 +1264,7 @@ pub mod public {
         border_brush: Property<Brush>,
         border_thickness: Property<Thickness>,
         on_text_changed: Option<Callback<String>>,
+        on_lost_focus: Option<Callback<()>>,
         reference: Option<NativeElementRef>,
         element_state: Option<std::rc::Rc<ElementState>>,
     }
@@ -1359,6 +1360,10 @@ pub mod public {
         }
         pub fn on_text_changed(mut self, callback: impl IntoPayloadCallback<String>) -> Self {
             self.on_text_changed = Some(callback.into_payload_callback());
+            self
+        }
+        pub fn on_lost_focus(mut self, callback: impl IntoUnitCallback) -> Self {
+            self.on_lost_focus = Some(callback.into_unit_callback());
             self
         }
     }
@@ -6665,6 +6670,7 @@ pub mod public {
                         border_brush,
                         border_thickness,
                         on_text_changed,
+                        on_lost_focus,
                         reference,
                         element_state,
                     } = value;
@@ -6680,6 +6686,7 @@ pub mod public {
                             border_brush,
                             border_thickness,
                             on_text_changed,
+                            on_lost_focus,
                         })),
                         reference,
                         element_state,
@@ -9123,8 +9130,9 @@ pub mod public {
                 Self::StackPanel(_) => {}
                 Self::VariableSizedWrapGrid(_) => {}
                 Self::Grid(_) => {}
-                Self::TextBox(_) => {
+                Self::TextBox(value) => {
                     visit(EventId::TextBoxTextChanged, true);
+                    visit(EventId::TextBoxLostFocus, value.on_lost_focus.is_some());
                 }
                 Self::AutoSuggestBox(value) => {
                     visit(EventId::AutoSuggestBoxTextChanged, true);
@@ -11448,8 +11456,12 @@ impl MountedEventsExt for MountedProps {
             Self::StackPanel(_) => {}
             Self::VariableSizedWrapGrid(_) => {}
             Self::Grid(_) => {}
-            Self::TextBox(_) => {
+            Self::TextBox(values) => {
                 visit(EventId::TextBoxTextChanged, true);
+                visit(
+                    EventId::TextBoxLostFocus,
+                    values.on_lost_focus.is_some(),
+                );
             }
             Self::AutoSuggestBox(values) => {
                 visit(EventId::AutoSuggestBoxTextChanged, true);
@@ -11702,6 +11714,9 @@ impl MountedEventsExt for MountedProps {
         match (self, event, payload) {
             (Self::Button(values), EventId::ButtonClick, EventPayload::Unit) => {
                 values.on_click.as_ref().map(|callback| callback.call(()))
+            }
+            (Self::TextBox(values), EventId::TextBoxLostFocus, EventPayload::Unit) => {
+                values.on_lost_focus.as_ref().map(|callback| callback.call(()))
             }
             (Self::HyperlinkButton(values), EventId::HyperlinkButtonClick, EventPayload::Unit) => {
                 values.on_click.as_ref().map(|callback| callback.call(()))
@@ -12805,6 +12820,7 @@ pub(crate) struct TextBoxMountedProps {
     border_brush: Property<Brush>,
     border_thickness: Property<Thickness>,
     on_text_changed: Option<Callback<String>>,
+    on_lost_focus: Option<Callback<()>>,
 }
 impl PartialEq for TextBoxMountedProps {
     fn eq(&self, other: &Self) -> bool {
@@ -12817,6 +12833,7 @@ impl PartialEq for TextBoxMountedProps {
             && self.border_brush == other.border_brush
             && self.border_thickness == other.border_thickness
             && self.on_text_changed == other.on_text_changed
+            && self.on_lost_focus == other.on_lost_focus
     }
 }
 #[derive(Clone, Debug)]
@@ -14121,6 +14138,7 @@ pub enum EventId {
     BorderPointerCanceled,
     BreadcrumbBarItemClicked,
     TextBoxTextChanged,
+    TextBoxLostFocus,
     AutoSuggestBoxTextChanged,
     AutoSuggestBoxSuggestionChosen,
     PasswordBoxPasswordChanged,
@@ -15414,13 +15432,22 @@ const TEXT_BOX_PROPERTIES: &[PropertyDescriptor] = &[
         observes_feedback: false,
     },
 ];
-const TEXT_BOX_EVENTS: &[EventDescriptor] = &[EventDescriptor {
-    id: EventId::TextBoxTextChanged,
-    name: "TextChanged",
-    field: "on_text_changed",
-    payload: "Str",
-    interface: "Microsoft.UI.Xaml.Controls.ITextBox",
-}];
+const TEXT_BOX_EVENTS: &[EventDescriptor] = &[
+    EventDescriptor {
+        id: EventId::TextBoxTextChanged,
+        name: "TextChanged",
+        field: "on_text_changed",
+        payload: "Str",
+        interface: "Microsoft.UI.Xaml.Controls.ITextBox",
+    },
+    EventDescriptor {
+        id: EventId::TextBoxLostFocus,
+        name: "LostFocus",
+        field: "on_lost_focus",
+        payload: "Unit",
+        interface: "Microsoft.UI.Xaml.IUIElement",
+    },
+];
 const TEXT_BOX_SLOTS: &[SlotDescriptor] = &[SlotDescriptor {
     id: SlotId::TextBoxHeader,
     name: "Header",
