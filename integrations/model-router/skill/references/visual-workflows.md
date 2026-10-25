@@ -6,7 +6,7 @@
 
 `settings.enabled` 是调度总开关。`mode="directed"` 只允许 `pool` 中未到期的路线，按顺序选路。每项为 `route_id`、毫秒 `expires_at` 和标签。质量、恢复隔离、原生容量和共享预算仍有效；过期后阻挡新派发，已发出请求允许完成。
 
-工作流定义包含 `id/name/nodes/edges/token_budget/max_parallel/luna_supervision`。监工默认开启；用户选择关闭时按该选择执行。每个模型节点绑定主 `route_id`，可列出 `fallback_routes`；只在这个有序范围内补位。`role/tags/task/x/y` 保存职责、分类、调用参数和画布位置。模型节点可配置 fanout、verify、max_attempts 等；备用模型由用户明确选定，不能因换源逃出池。
+工作流定义包含 `id/name/nodes/edges/token_budget/max_parallel/luna_supervision`。监工默认开启；用户选择关闭时按该选择执行。每个模型节点绑定主 `route_id`，可列出 `fallback_routes`；只在这个有序范围内补位。`role/tags/task/x/y` 保存职责、分类、调用参数和画布位置。模型节点可配置 fanout、verify、max_attempts 等；备用模型由用户明确选定，不能因换源逃出池。职责模板携带完整的角色化高级调用参数（输出 tokens、节点预算、等待与报告上限等，Codex 母节点模板为协调级配置），套用模板会整体替换节点的高级参数。
 
 `input/merge/gate/output` 是本地节点：只处理输入或证据引用，不伪造模型报告，不计生成费用。gate 检查结构性完成并要求至少一份模型证据，不判断语义正确性。失败或未知节点阻断依赖，完整报告通过节点 `job_id` 的 `router_collect` 回收。
 

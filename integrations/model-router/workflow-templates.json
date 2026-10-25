@@ -11,7 +11,14 @@
     ],
     "task": {
       "kind": "extract",
-      "prompt": "等待真实调用方提供 topology/coordinate 决策。"
+      "prompt": "等待真实调用方提供 topology/coordinate 决策。",
+      "max_output_tokens": 65536,
+      "token_budget": 160000,
+      "deadline_s": 900,
+      "hard_deadline_s": 7200,
+      "ttft_s": 600,
+      "idle_s": 600,
+      "report_max_chars": 1048576
     }
   },
   {
@@ -31,6 +38,9 @@
       "token_budget": 48000,
       "deadline_s": 300,
       "hard_deadline_s": 1800,
+      "ttft_s": 120,
+      "idle_s": 180,
+      "report_max_chars": 131072,
       "max_attempts": 1,
       "fanout": 1,
       "verify": false
@@ -52,7 +62,10 @@
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 480,
-      "hard_deadline_s": 3600
+      "hard_deadline_s": 3600,
+      "ttft_s": 240,
+      "idle_s": 240,
+      "report_max_chars": 262144
     }
   },
   {
@@ -84,6 +97,9 @@
       "token_budget": 160000,
       "deadline_s": 900,
       "hard_deadline_s": 7200,
+      "ttft_s": 600,
+      "idle_s": 600,
+      "report_max_chars": 1048576,
       "needs_web": true
     }
   },
@@ -101,7 +117,10 @@
       "max_output_tokens": 8192,
       "token_budget": 24000,
       "deadline_s": 120,
-      "hard_deadline_s": 1800
+      "hard_deadline_s": 1800,
+      "ttft_s": 60,
+      "idle_s": 120,
+      "report_max_chars": 65536
     }
   },
   {
@@ -119,7 +138,10 @@
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 600,
-      "hard_deadline_s": 5400
+      "hard_deadline_s": 5400,
+      "ttft_s": 300,
+      "idle_s": 300,
+      "report_max_chars": 262144
     }
   },
   {
@@ -137,7 +159,10 @@
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 600,
-      "hard_deadline_s": 5400
+      "hard_deadline_s": 5400,
+      "ttft_s": 300,
+      "idle_s": 300,
+      "report_max_chars": 262144
     }
   },
   {
@@ -155,7 +180,10 @@
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 600,
-      "hard_deadline_s": 5400
+      "hard_deadline_s": 5400,
+      "ttft_s": 300,
+      "idle_s": 300,
+      "report_max_chars": 262144
     }
   },
   {
@@ -173,7 +201,10 @@
       "max_output_tokens": 16384,
       "token_budget": 48000,
       "deadline_s": 300,
-      "hard_deadline_s": 3600
+      "hard_deadline_s": 3600,
+      "ttft_s": 120,
+      "idle_s": 240,
+      "report_max_chars": 131072
     }
   },
   {
@@ -190,7 +221,10 @@
       "max_output_tokens": 16384,
       "token_budget": 48000,
       "deadline_s": 240,
-      "hard_deadline_s": 2400
+      "hard_deadline_s": 2400,
+      "ttft_s": 120,
+      "idle_s": 180,
+      "report_max_chars": 131072
     }
   },
   {

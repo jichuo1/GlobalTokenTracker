@@ -463,6 +463,19 @@ impl Workflow {
         {
             sequence += 1;
         }
+        // The codex template carries the mother node's coordination-grade
+        // task (output ceiling, budgets, waiting windows); a master created
+        // here matches what applying that template would produce instead of
+        // being born with a bare placeholder.
+        let task = templates()
+            .ok()
+            .and_then(|all| {
+                all.iter()
+                    .find(|t| t.node_type == "codex")
+                    .map(|t| t.task.clone())
+            })
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| json!({"kind":"extract","prompt":"提供输入材料。"}));
         self.nodes.push(Node {
             id: format!("node-{sequence}"),
             title: "母节点 · Codex 接口".into(),
@@ -474,7 +487,7 @@ impl Workflow {
             tags: vec!["母节点".into()],
             x: x.clamp(-10_000.0, 10_000.0),
             y: y.clamp(-10_000.0, 10_000.0),
-            task: json!({"kind":"extract","prompt":"提供输入材料。"}),
+            task,
         });
         Ok(self.nodes.len() - 1)
     }
@@ -606,10 +619,15 @@ impl Workflow {
         if !node.is_model_backed() {
             node.route_id.clear();
             node.fallback_routes.clear();
+            // A local or Codex mother node has no reasoning level of its own.
+            node.effort.clear();
         }
-        if let (Some(target), Some(values)) = (node.task.as_object_mut(), template.task.as_object())
-        {
-            target.extend(values.clone());
+        // The template's task IS the role's configuration: applying a preset
+        // replaces the advanced settings wholesale, so switching a node from a
+        // heavy role to a light one actually lowers its budgets instead of
+        // leaving the previous values behind.
+        if template.task.is_object() {
+            node.task = template.task.clone();
         }
         Ok(())
     }
@@ -1240,6 +1258,74 @@ mod tests {
             !serde_json::from_value::<Workflow>(serde_json::to_value(g).unwrap())
                 .unwrap()
                 .luna_supervision
+        );
+    }
+    #[test]
+    fn applying_a_template_replaces_the_advanced_settings_wholesale() {
+        let mut g = sample();
+        // A heavy role's leftovers (and a custom key) must not survive applying
+        // a lighter preset: the merge kept stale budgets when roles switched.
+        g.nodes[0].task = json!({"kind":"research","prompt":"custom prompt","max_output_tokens":65536,
+            "token_budget":160000,"deadline_s":900,"hard_deadline_s":7200,
+            "idle_s":600,"report_max_chars":200000,"my_custom_key":"keep?"});
+        let light = Template {
+            id: "summary".into(),
+            title: "汇总编辑员".into(),
+            node_type: "model".into(),
+            role: String::new(),
+            tags: Vec::new(),
+            task: json!({"kind":"summarize","prompt":"汇总","max_output_tokens":16384,
+                "token_budget":48000,"deadline_s":240,"hard_deadline_s":2400,
+                "idle_s":120,"report_max_chars":60000}),
+        };
+        g.apply_template(0, &light).unwrap();
+        assert_eq!(g.nodes[0].task["max_output_tokens"], 16384);
+        assert_eq!(g.nodes[0].task["token_budget"], 48000);
+        assert_eq!(g.nodes[0].task["report_max_chars"], 60000);
+        assert!(
+            g.nodes[0].task.get("my_custom_key").is_none(),
+            "template application is a replacement, not a merge"
+        );
+        // Model template on a model node keeps the route binding untouched.
+        assert_eq!(g.nodes[0].route_id, "route");
+    }
+    #[test]
+    fn applying_a_local_template_clears_route_and_effort() {
+        let mut g = sample();
+        g.nodes[0].effort = "high".into();
+        let master = Template {
+            id: "codex".into(),
+            title: "Codex 母节点".into(),
+            node_type: "codex".into(),
+            role: String::new(),
+            tags: Vec::new(),
+            task: json!({"kind":"extract","prompt":"协调","max_output_tokens":65536}),
+        };
+        g.apply_template(0, &master).unwrap();
+        assert_eq!(g.nodes[0].route_id, "");
+        assert_eq!(g.nodes[0].fallback_routes.len(), 0);
+        assert_eq!(
+            g.nodes[0].effort, "",
+            "a Codex mother has no reasoning level of its own"
+        );
+        assert_eq!(g.nodes[0].task["max_output_tokens"], 65536);
+    }
+    #[test]
+    fn new_master_nodes_inherit_the_codex_template_task() {
+        let mut g = sample();
+        let before = g.nodes.len();
+        g.add_master(10.0, 10.0).unwrap();
+        let master = &g.nodes[before];
+        assert_eq!(master.node_type, "codex");
+        let template = templates()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.node_type == "codex")
+            .expect("a codex template ships with the app");
+        assert_eq!(master.task, template.task);
+        assert!(
+            master.task.get("max_output_tokens").is_some(),
+            "the mother is no longer born with a bare placeholder task"
         );
     }
     #[test]

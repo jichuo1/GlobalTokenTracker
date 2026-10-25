@@ -932,9 +932,10 @@ struct SchedulingView: View {
     private func movePool(_ i: Int, _ delta: Int) { let j = i + delta; if settings.pool.indices.contains(j) { settings.pool.swapAt(i, j); dirty = true } }
     private func moveNode(_ i: Int, _ delta: Int) { let j = i + delta; mutate { if $0.nodes.indices.contains(j) { $0.nodes.swapAt(i, j) } } }
     private func addCodex() {
+        let task = templates.first { $0.nodeType == "codex" }?.task ?? .object(["kind": .string("extract"), "prompt": .string("等待真实 Codex 的规划与验收回执；不自动启动模型。")])
         addTemplate(ScheduleTemplate(id: "codex", title: "母节点 · Codex 接口", nodeType: "codex",
             role: "由真实 Codex 调用方查看完整拓扑，规划切片、分配任务、确认修正并验收结果。",
-            tags: ["母节点", "规划", "验收"], task: .object(["kind": .string("extract"), "prompt": .string("等待真实 Codex 的规划与验收回执；不自动启动模型。")])) )
+            tags: ["母节点", "规划", "验收"], task: task))
     }
     private func addTemplate(_ t: ScheduleTemplate) {
         if graph == nil { var g = ScheduleGraph(); g.lunaSupervision = probeSupervision; settings.workflows.append(g); selected = settings.workflows.count - 1 }
@@ -949,7 +950,7 @@ struct SchedulingView: View {
         mutate { g in
             g.nodes[i].title = t.title; g.nodes[i].nodeType = t.nodeType; g.nodes[i].role = t.role; g.nodes[i].tags = t.tags
             if !["model", "operator", "reviewer"].contains(t.nodeType) { g.nodes[i].routeId = ""; g.nodes[i].fallbackRoutes = [] }
-            if case .object(let values) = t.task { for (key, value) in values { g.nodes[i].task[key] = value } }
+            if case .object = t.task { g.nodes[i].task = t.task }
         }
         taskText = graph?.nodes[i].task.pretty ?? ""
     }

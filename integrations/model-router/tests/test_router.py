@@ -862,8 +862,39 @@ class RouterTests(unittest.TestCase):
         self.assertGreater(heavy.token_budget, light.token_budget)
         self.assertGreater(heavy.deadline_s, light.deadline_s)
         self.assertGreater(heavy.hard_deadline_s, light.hard_deadline_s)
+        # The heavy/light split also holds for the first-response window, the
+        # inactivity window and the report ceiling.
+        self.assertGreater(heavy.ttft_s, light.ttft_s)
+        self.assertGreater(heavy.idle_s, light.idle_s)
+        self.assertGreater(heavy.report_max_chars, light.report_max_chars)
         self.assertGreater(parsed["review"].token_budget, light.token_budget)
         self.assertGreater(parsed["review"].deadline_s, light.deadline_s)
+        # Every dispatchable model template plus the caller-executed Codex
+        # coordinator carries the full advanced panel: role-fit output budget,
+        # both deadline tiers, first-token and inactivity windows, report
+        # ceiling. Local placeholders stay minimal {kind, prompt}: apply
+        # replaces the whole node task, so minimal is the correct whole.
+        advanced = {"max_output_tokens", "token_budget", "deadline_s", "hard_deadline_s",
+                    "ttft_s", "idle_s", "report_max_chars"}
+        model_ids = {"research", "extract", "review", "logic", "critic", "support",
+                     "summary", "operator", "operator-review", "codex"}
+        for template in templates:
+            if template["id"] in model_ids:
+                self.assertTrue(advanced <= set(template["task"]), template["id"])
+            else:
+                self.assertEqual({"kind", "prompt"}, set(template["task"]), template["id"])
+        # The Codex mother node plans and coordinates instead of dispatching,
+        # but its applied settings must still match that role at the heaviest
+        # tier, no lighter than the research template.
+        codex, review = parsed["codex"], parsed["review"]
+        self.assertGreaterEqual(codex.max_output_tokens, heavy.max_output_tokens)
+        self.assertGreaterEqual(codex.token_budget, heavy.token_budget)
+        self.assertLessEqual(codex.deadline_s, codex.hard_deadline_s)
+        self.assertGreaterEqual(codex.deadline_s, review.deadline_s)
+        self.assertGreaterEqual(codex.hard_deadline_s, review.hard_deadline_s)
+        self.assertGreaterEqual(codex.ttft_s, review.ttft_s)
+        self.assertGreaterEqual(codex.idle_s, review.idle_s)
+        self.assertGreaterEqual(codex.report_max_chars, review.report_max_chars)
 
     def test_prompts_disclose_the_effective_output_budget(self):
         from gtt_router.service import output_budget_note
