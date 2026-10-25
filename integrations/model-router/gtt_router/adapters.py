@@ -22,6 +22,9 @@ from .usage import clean_usage, positive_usage
 _slot_condition = threading.Condition()
 _busy_slots = set()
 
+# Fallback reasoning level for zcode selections that carry none (see zcode()).
+ZCODE_DEFAULT_EFFORT = "high"
+
 
 @contextmanager
 def native_slot(route, context):
@@ -53,6 +56,28 @@ def native_slot(route, context):
             _slot_condition.notify_all()
 
 
+def _diagnostic_text(value):
+    """Compact first-party diagnostic chain (message/reason/name), no stack
+    frames. Bounded and redacted before it ever leaves this process."""
+    parts = []
+    def walk(item, depth=0):
+        if depth > 4 or len(parts) >= 3:
+            return
+        if isinstance(item, dict):
+            for key in ("message", "reason", "error_description", "name"):
+                text = item.get(key)
+                if isinstance(text, str) and text and len(text) <= 400:
+                    parts.append(text)
+            for key in ("error", "data", "details", "context", "cause"):
+                if key in item:
+                    walk(item[key], depth + 1)
+        elif isinstance(item, list):
+            for child in item[:4]:
+                walk(child, depth + 1)
+    walk(value)
+    return redact(" · ".join(parts))[:300]
+
+
 def classify_error(value):
     def signals(item, depth=0):
         if depth > 6:
@@ -64,27 +89,33 @@ def classify_error(value):
             return [s for child in item[:16] for s in signals(child, depth + 1)][:32]
         return [str(item)[:2048]] if isinstance(item, (str, int)) and not isinstance(item, bool) else []
     lower = " ".join(signals(value)).lower()
+    detail = {"provider_message": _diagnostic_text(value)}
     # Explicit billing signals outrank a generic native authentication wrapper.
     if any(x in lower for x in ["no left credit", "insufficient credit", "insufficient balance", "quota exceeded", "quota exhausted",
                                "quota_exceeded", "quota_exhausted", "insufficient_quota", "credit_balance_exhausted", "resource_exhausted", "credit balance is too low", "you've hit your limit", "usage limit reached", "余额不足", "额度耗尽"]):
-        return WorkerFailure("quota_exhausted", scope="provider", retry_after_s=900)
+        return WorkerFailure("quota_exhausted", scope="provider", retry_after_s=900, details=detail)
     if re.search(r"\b429\b", lower) or any(x in lower for x in ["rate_limit", "rate limit", "too many requests"]):
-        return WorkerFailure("rate_limited", scope="provider", retry_after_s=45)
+        return WorkerFailure("rate_limited", scope="provider", retry_after_s=45, details=detail)
     if re.search(r"\b(?:401|403)\b", lower) or any(x in lower for x in ["provider_not_configured", "authentication", "unauthenticated", "auth_failed", "unauthorized", "invalid_api_key", "invalid api key", "model_request_auth_missing", "not logged in", "please run /login", "oauth token has expired"]):
-        return WorkerFailure("auth_failed", scope="provider", retry_after_s=900)
+        return WorkerFailure("auth_failed", scope="provider", retry_after_s=900, details=detail)
     if any(x in lower for x in ["invalid_model_selection", "model_not_found", "unknown model", "invalid model name", "not recognized", "model is not available"]):
-        return WorkerFailure("model_unavailable", retry_after_s=300)
+        return WorkerFailure("model_unavailable", retry_after_s=300, details=detail)
+    # Newer ZCode CLIs make selection.options.reasoningLevel mandatory for
+    # personal api-key providers; a missing level is a protocol contract
+    # break, not a provider outage, and must not read as one.
+    if "reasoning level" in lower and "required" in lower:
+        return WorkerFailure("reasoning_level_required", scope="source", retry_after_s=300, details=detail)
     if any(x in lower for x in ["unknown option", "unrecognized argument", "unrecognized option", "unexpected argument", "invalid option", "cannot be launched inside another claude code session"]):
-        return WorkerFailure("native_configuration_error", scope="source", retry_after_s=300)
+        return WorkerFailure("native_configuration_error", scope="source", retry_after_s=300, details=detail)
     if "context" in lower and any(x in lower for x in ["exceed", "too long", "limit"]):
-        return WorkerFailure("context_exceeded", retry_after_s=0)
+        return WorkerFailure("context_exceeded", retry_after_s=0, details=detail)
     if "permission" in lower or "denied" in lower:
-        return WorkerFailure("permission_denied", retry_after_s=60)
+        return WorkerFailure("permission_denied", retry_after_s=60, details=detail)
     if "cancel" in lower or "interrupt" in lower:
         return WorkerFailure("cancelled", retry_after_s=0)
     if "timeout" in lower or "timed out" in lower:
-        return WorkerFailure("timeout", retry_after_s=30)
-    return WorkerFailure("provider_request_failed", retry_after_s=30)
+        return WorkerFailure("timeout", retry_after_s=30, details=detail)
+    return WorkerFailure("provider_request_failed", retry_after_s=30, details=detail)
 
 
 class ExecutionContext:
@@ -467,42 +498,53 @@ def zcode(route, prompt, task, context):
     selection = {"providerId": route.provider, "modelId": route.model}
     if route.effort:
         selection["options"] = {"reasoningLevel": route.effort}
+    # Newer ZCode CLIs make selection.options.reasoningLevel mandatory for
+    # personal api-key providers even when no model rule lists values, so a
+    # level-less selection gets one bounded retry with the default level
+    # (verified accepted by openai-responses relays before shipping).
+    attempts = [selection] if "options" in selection else [selection, {**selection, "options": {"reasoningLevel": ZCODE_DEFAULT_EFFORT}}]
     try:
         params = {
             "workspace": {"workspacePath": str(context.workspace), "workspaceKey": str(context.workspace)},
-            "selection": selection, "prompt": prompt, "tools": [], "operationId": operation,
-            "querySource": "main_turn"}
+            "prompt": prompt, "tools": [], "querySource": "main_turn"}
         if task.max_output_tokens is not None:
             params["maxOutputTokens"] = task.max_output_tokens
         if options.get("zcode_payload") == "messages":
             params["messages"] = [{"role": "user", "content": params.pop("prompt")}]
-        transport.send({"id": "generate", "method": "workspace/generateText", "params": params})
-        while True:
-            message = transport.read()
-            if message.get("id") == "generate":
-                answered = True
-                if "error" in message:
-                    raise classify_error(message["error"])
-                result = message.get("result", {})
-                if not isinstance(result, dict):
-                    raise WorkerFailure("native_protocol_mismatch", scope="source", details={"contract_reason":"unexpected_native_frame_root"})
-                last_usage = positive_usage(result.get("usage", {}))
-                actual = result.get("selection")
-                compatible = (isinstance(actual, dict) and actual.get("providerId") == route.provider and actual.get("modelId") == route.model and
-                    (not route.effort or isinstance(actual.get("options"), dict) and actual["options"].get("reasoningLevel") == route.effort))
-                if (options.get("selection_validation", "exact") == "exact" and actual != selection) or not compatible:
-                    raise WorkerFailure("model_selection_mismatch")
-                if result.get("toolCalls"):
-                    raise WorkerFailure("unexpected_tool_call")
-                if result.get("finishReason") in {"length", "max_tokens", "max_output_tokens"}:
-                    raise truncation_failure(task.max_output_tokens, result.get("text", ""), result.get("usage"))
-                actual_selection = dict(selection)
-                native_options = actual.get("options", {})
-                if isinstance(native_options, dict) and isinstance(native_options.get("maxOutputTokens"), int) and not isinstance(native_options["maxOutputTokens"], bool) and 0 < native_options["maxOutputTokens"] <= 16777216:
-                    actual_selection["options"] = dict(selection.get("options", {})) | {"maxOutputTokens": native_options["maxOutputTokens"]}
-                return {"text": result.get("text", ""), "usage": last_usage, "actual_selection": actual_selection, "tool_calls": [], "observed_urls": []}
-            if message.get("method") and message.get("id"):
-                transport.send({"id": message["id"], "error": {"code": -32601, "message": "Coordinator permits no tool/client action"}})
+        for attempt, selection in enumerate(attempts):
+            params["selection"] = selection
+            params["operationId"] = operation if attempt == 0 else operation + "-effort-retry"
+            transport.send({"id": "generate", "method": "workspace/generateText", "params": params})
+            while True:
+                message = transport.read()
+                if message.get("id") == "generate":
+                    answered = True
+                    if "error" in message:
+                        failure = classify_error(message["error"])
+                        if failure.code == "reasoning_level_required" and attempt + 1 < len(attempts):
+                            answered = False
+                            break
+                        raise failure
+                    result = message.get("result", {})
+                    if not isinstance(result, dict):
+                        raise WorkerFailure("native_protocol_mismatch", scope="source", details={"contract_reason":"unexpected_native_frame_root"})
+                    last_usage = positive_usage(result.get("usage", {}))
+                    actual = result.get("selection")
+                    compatible = (isinstance(actual, dict) and actual.get("providerId") == route.provider and actual.get("modelId") == route.model and
+                        (not route.effort or isinstance(actual.get("options"), dict) and actual["options"].get("reasoningLevel") == route.effort))
+                    if (options.get("selection_validation", "exact") == "exact" and actual != selection) or not compatible:
+                        raise WorkerFailure("model_selection_mismatch")
+                    if result.get("toolCalls"):
+                        raise WorkerFailure("unexpected_tool_call")
+                    if result.get("finishReason") in {"length", "max_tokens", "max_output_tokens"}:
+                        raise truncation_failure(task.max_output_tokens, result.get("text", ""), result.get("usage"))
+                    actual_selection = dict(selection)
+                    native_options = actual.get("options", {})
+                    if isinstance(native_options, dict) and isinstance(native_options.get("maxOutputTokens"), int) and not isinstance(native_options["maxOutputTokens"], bool) and 0 < native_options["maxOutputTokens"] <= 16777216:
+                        actual_selection["options"] = dict(selection.get("options", {})) | {"maxOutputTokens": native_options["maxOutputTokens"]}
+                    return {"text": result.get("text", ""), "usage": last_usage, "actual_selection": actual_selection, "tool_calls": [], "observed_urls": []}
+                if message.get("method") and message.get("id"):
+                    transport.send({"id": message["id"], "error": {"code": -32601, "message": "Coordinator permits no tool/client action"}})
     except WorkerFailure as failure:
         if not failure.metering.get("generation_not_started") and ((not answered and failure.code in {"timeout","provider_request_failed","native_connection_failed"}) or failure.code=="native_protocol_mismatch"):
             failure.metering["unknown_paid_outcome"] = True

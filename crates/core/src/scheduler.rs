@@ -8,6 +8,10 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Sentinel pool expiry (2^53-1, the coordinator's own validation ceiling):
+/// a row leased permanently never counts as expired.
+pub const PERMANENT_EXPIRES_AT: u64 = 9_007_199_254_740_991;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PoolEntry {
     pub route_id: String,
@@ -15,11 +19,25 @@ pub struct PoolEntry {
     pub tags: Vec<String>,
 }
 
+impl PoolEntry {
+    pub fn is_permanent(&self) -> bool {
+        self.expires_at == PERMANENT_EXPIRES_AT
+    }
+
+    pub fn is_live(&self, now_ms: u64) -> bool {
+        self.is_permanent() || self.expires_at > now_ms
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
     pub title: String,
     pub route_id: String,
+    /// Reasoning effort this node's calls run at; the coordinator refuses a
+    /// check or a production run while it is empty on any model node.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
     #[serde(default = "model_node")]
     pub node_type: String,
     #[serde(default)]
@@ -122,6 +140,9 @@ pub struct Settings {
     pub workflows: Vec<Workflow>,
     #[serde(default = "inherit_profile")]
     pub call_profile: Value,
+    /// User-added reasoning-effort presets offered by the node menu.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effort_presets: Vec<String>,
 }
 
 fn inherit_profile() -> Value {
@@ -138,6 +159,7 @@ impl Default for Settings {
             pool: Vec::new(),
             workflows: Vec::new(),
             call_profile: inherit_profile(),
+            effort_presets: Vec::new(),
         }
     }
 }
@@ -421,7 +443,7 @@ impl Workflow {
         {
             sequence += 1;
         }
-        self.nodes.push(Node { id: format!("node-{sequence}"), title: route.model.clone(), route_id: route.route_id.clone(), node_type: "model".into(), role: String::new(), fallback_routes: Vec::new(), tags: Vec::new(),
+        self.nodes.push(Node { id: format!("node-{sequence}"), title: route.model.clone(), route_id: route.route_id.clone(), effort: String::new(), node_type: "model".into(), role: String::new(), fallback_routes: Vec::new(), tags: Vec::new(),
             x: x.clamp(-10_000.0, 10_000.0), y: y.clamp(-10_000.0, 10_000.0),
             task: json!({"kind":"extract","prompt":"分析输入材料，返回完整且有证据的 JSON 报告。","max_output_tokens":8192,"token_budget":48000,"deadline_s":300,"hard_deadline_s":900}) });
         Ok(self.nodes.len() - 1)
@@ -445,6 +467,7 @@ impl Workflow {
             id: format!("node-{sequence}"),
             title: "母节点 · Codex 接口".into(),
             route_id: String::new(),
+            effort: String::new(),
             node_type: "codex".into(),
             role: "真实 Codex 调用方：检查完整拓扑、切片分配、确认修正并验收下游工作。".into(),
             fallback_routes: Vec::new(),
@@ -1244,5 +1267,58 @@ mod tests {
         assert_eq!(g.edges, before);
         g.connect(0, 2).unwrap();
         assert_eq!(g.edges.len(), 3);
+    }
+    #[test]
+    fn permanent_pool_leases_never_count_as_expired() {
+        let permanent = PoolEntry {
+            route_id: "r".into(),
+            expires_at: PERMANENT_EXPIRES_AT,
+            tags: Vec::new(),
+        };
+        let timed = PoolEntry {
+            route_id: "t".into(),
+            expires_at: 1,
+            tags: Vec::new(),
+        };
+        assert!(permanent.is_permanent());
+        assert!(
+            permanent.is_live(u64::MAX),
+            "the sentinel outlives any clock"
+        );
+        assert!(!timed.is_permanent());
+        assert!(!timed.is_live(2));
+    }
+    #[test]
+    fn node_effort_roundtrips_and_legacy_nodes_default_to_unset() {
+        let node = Node {
+            id: "n".into(),
+            title: "n".into(),
+            route_id: "r".into(),
+            effort: "high".into(),
+            node_type: "model".into(),
+            role: String::new(),
+            fallback_routes: Vec::new(),
+            tags: Vec::new(),
+            x: 1.0,
+            y: 1.0,
+            task: json!({"kind":"extract","prompt":"p"}),
+        };
+        let encoded = serde_json::to_value(&node).unwrap();
+        assert_eq!(encoded["effort"], "high");
+        // Workflows saved before the field existed still parse, as unset.
+        let legacy = serde_json::from_value::<Node>(json!({
+            "id": "n", "title": "n", "route_id": "r", "node_type": "model",
+            "role": "", "fallback_routes": [], "tags": [],
+            "x": 1.0, "y": 1.0, "task": {"kind":"extract","prompt":"p"}
+        }))
+        .unwrap();
+        assert_eq!(legacy.effort, "");
+        // An unset effort is omitted from the wire form, so drafts stay clean.
+        let unset = serde_json::to_value(&Node {
+            effort: String::new(),
+            ..node
+        })
+        .unwrap();
+        assert!(unset.get("effort").is_none());
     }
 }

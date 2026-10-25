@@ -662,6 +662,7 @@ class OperatorWorkflow:
                                 prompt += '\n审阅真实操作收据与 after_files/file_diffs，串联回报的原始执行证据在 report_evidence；不将提案当作完成证明，excerpt_only 表示片段不是全文。报告 review:{"accepted":boolean,"issues":array}；存在错误或证据不足时 accepted=false，修正必须交真实 Codex 确认，不自行执行。'
                             task = {**spec["task"], "prompt": prompt, "context": context, "preferred_route": spec["route_id"],
                                 "allowed_routes": [spec["route_id"], *spec["fallback_routes"]], "workflow_id": run["workflow_id"],
+                                "route_effort": spec.get("effort", ""),
                                 "work_key": "operator:" + run_id + ":" + ident + ":" + str(node.get("work_revision", 1))}
                             if spec["node_type"] in {"operator", "reviewer"}:
                                 task.update(fanout=1, verify=False)

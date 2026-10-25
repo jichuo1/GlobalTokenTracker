@@ -37,13 +37,25 @@ const M_LINK_BOTH: &str = "双向：任务与回报";
 const M_RUN_SHOW: &str = "显示输入与结果";
 const M_RUN_HIDE: &str = "隐藏输入与结果";
 
+/// Built-in reasoning-effort presets offered by the node menu: (level token,
+/// Chinese label). Custom levels live in `Settings::effort_presets`.
+const EFFORT_PRESETS: [(&str, &str); 5] = [
+    ("low", "低"),
+    ("medium", "中"),
+    ("high", "高"),
+    ("xhigh", "超高"),
+    ("max", "最大"),
+];
+
 pub enum Action {
     Load,
     Refresh,
     Start,
     Save,
     Reload,
-    Check(String),
+    /// (route id, reasoning effort) — the effort is the node's chosen level,
+    /// empty when a bare route (model list) is checked at its own level.
+    Check(String, String),
     Received(Result<Value, String>),
     StopDrag,
     CaptureLost,
@@ -72,7 +84,6 @@ pub enum Action {
     Budget(String),
     Parallel(String),
     MaxRounds(String),
-    Supervision(bool),
     AddMaster,
     DisconnectNode,
     AddTemplate(usize),
@@ -97,6 +108,16 @@ pub enum Action {
     PoolNode,
     ConnectFromNode,
     DismissCheck,
+    /// Set the selected model node's reasoning effort ("" clears it).
+    SetEffort(String),
+    /// Text of the custom-effort input row inside the node menu.
+    EffortDraft(String),
+    ToggleEffortInput,
+    ApplyEffortDraft,
+    /// Luna supervision lives with the Codex mother node, not the settings page.
+    ToggleSupervision,
+    /// Permanent (never-expiring) pool lease for subsequent 入池/续期.
+    PoolPermanent(bool),
     Fit,
     CloseInspector,
     Acknowledge(bool),
@@ -259,6 +280,12 @@ pub struct State {
     /// The box shows this, not the stored number, so clearing it or typing
     /// an intermediate value is not overwritten by the last valid number.
     numeric_drafts: std::collections::BTreeMap<&'static str, String>,
+    /// Raw text of the custom-effort input row in the node menu.
+    effort_draft: String,
+    /// Whether that input row is open.
+    effort_input_open: bool,
+    /// Whether 入池/续期 lease the route permanently instead of by minutes.
+    pool_permanent: bool,
     link_mode: LinkMode,
     /// Connectivity check started from the node menu: (route id, node title).
     pending_check: Option<(String, String)>,
@@ -321,6 +348,9 @@ impl Default for State {
             connect_mode: false,
             numeric_drafts: std::collections::BTreeMap::new(),
             link_mode: LinkMode::Task,
+            effort_draft: String::new(),
+            effort_input_open: false,
+            pool_permanent: false,
             pending_check: None,
             check_feedback: None,
             last_blank_press: None,
@@ -388,6 +418,14 @@ impl State {
         {
             return Some("请先为模型节点选择模型，或从模型库拖入节点框。");
         }
+        if w.nodes
+            .iter()
+            .any(|n| n.is_model_backed() && n.effort.is_empty())
+        {
+            return Some(
+                "有模型节点尚未设定思考程度：右键节点「思考程度」选择或自定义，保存后再运行。",
+            );
+        }
         if self.draft.mode == "directed"
             && self
                 .draft
@@ -407,7 +445,7 @@ impl State {
                 .iter()
                 .any(|v| v["workflow_id"].as_str() == Some(self.workflow_id.as_str()))
         {
-            return Some("需要同一工作流的在线 Luna；可在工作流设置中关闭监工。");
+            return Some("需要同一工作流的在线 Luna；可右键 Codex 母节点关闭监工。");
         }
         None
     }
@@ -529,8 +567,12 @@ impl State {
         self.draft.workflows.get_mut(self.selected)
     }
     fn add_pool(&mut self, route_id: String) {
-        let mins = self.ttl.parse::<u64>().unwrap_or(120).clamp(1, 10080);
-        let expiry = model::now_ms() + mins * 60_000;
+        let expiry = if self.pool_permanent {
+            model::PERMANENT_EXPIRES_AT
+        } else {
+            let mins = self.ttl.parse::<u64>().unwrap_or(120).clamp(1, 10080);
+            model::now_ms() + mins * 60_000
+        };
         if let Some(row) = self.draft.pool.iter_mut().find(|r| r.route_id == route_id) {
             row.expires_at = expiry;
         } else if self.draft.pool.len() < 128 {
@@ -567,7 +609,7 @@ impl State {
                         | Action::Start
                         | Action::Save
                         | Action::Reload
-                        | Action::Check(_)
+                        | Action::Check(..)
                         | Action::Run
                         | Action::Poll(_)
                         | Action::Detail(_)
@@ -580,26 +622,72 @@ impl State {
             Action::Load => self.request("router_scheduling", json!({}), ctx),
             Action::Refresh => self.request("router_scheduling", json!({"action":"refresh"}), ctx),
             Action::Start => self.request("router_start", json!({}), ctx),
-            Action::Check(id) => self.request(
-                "router_scheduling",
-                json!({"action":"check","route_id":id,"workflow_id":self.workflow_id,"luna_supervision":self.workflow().map_or(self.probe_supervision,|w|w.luna_supervision)}),
-                ctx,
-            ),
+            Action::Check(route, effort) => {
+                // The coordinator rejects an empty effort string when present,
+                // so a bare-route check (model list) simply omits the override
+                // and probes at the route's own level.
+                let mut params = json!({"action":"check","route_id":route,"workflow_id":self.workflow_id,
+                    "luna_supervision":self.workflow().map_or(self.probe_supervision,|w|w.luna_supervision)});
+                if !effort.is_empty() {
+                    params["effort"] = json!(effort);
+                }
+                self.request("router_scheduling", params, ctx);
+            }
             Action::StopDrag => self.drag.cancel(),
             Action::CaptureLost => self.drag.lost(),
-            Action::Menu(next) => {self.open_menu=None;self.update(*next,ctx);},
-            Action::MenuPick(label) => {if let Some(next)=self.menu_action(&label){self.update(next,ctx);}},
-            Action::TabNamed(label) => {if let Some((id,_))=TABS.iter().find(|(_,l)|*l==label){self.open_menu=None;self.tab=id;}},
-            Action::CloseMenu => self.open_menu=None,
-            Action::EditNode => {self.show_node_details=true;self.show_params=false;},
-            Action::ClearSelection => {self.node=None;self.show_node_details=false;self.drag.cancel();},
-            Action::ClearFlash(id) => {if self.flash.as_ref().is_some_and(|f|f.1==id) {self.flash=None;}},
-            Action::PickTemplate(v) => {if let Some(i)=v {self.template_index=i.min(self.templates.len().saturating_sub(1));}},
-            Action::ShowParams => {self.tab="workflow";self.show_params=true;self.show_node_details=false;},
-            Action::ToggleRun => {self.tab="workflow";self.show_run = !self.show_run;},
+            Action::Menu(next) => {
+                self.open_menu = None;
+                self.update(*next, ctx);
+            }
+            Action::MenuPick(label) => {
+                if let Some(next) = self.menu_action(&label) {
+                    self.update(next, ctx);
+                }
+            }
+            Action::TabNamed(label) => {
+                if let Some((id, _)) = TABS.iter().find(|(_, l)| *l == label) {
+                    self.open_menu = None;
+                    self.tab = id;
+                }
+            }
+            Action::CloseMenu => self.open_menu = None,
+            Action::EditNode => {
+                self.show_node_details = true;
+                self.show_params = false;
+            }
+            Action::ClearSelection => {
+                self.node = None;
+                self.show_node_details = false;
+                self.drag.cancel();
+            }
+            Action::ClearFlash(id) => {
+                if self.flash.as_ref().is_some_and(|f| f.1 == id) {
+                    self.flash = None;
+                }
+            }
+            Action::PickTemplate(v) => {
+                if let Some(i) = v {
+                    self.template_index = i.min(self.templates.len().saturating_sub(1));
+                }
+            }
+            Action::ShowParams => {
+                self.tab = "workflow";
+                self.show_params = true;
+                self.show_node_details = false;
+            }
+            Action::ToggleRun => {
+                self.tab = "workflow";
+                self.show_run = !self.show_run;
+            }
             // The pan tool belongs to move mode: turning it on leaves connect
             // mode instead of silently re-enabling drags that move the view.
-            Action::TogglePan => { self.pan_tool = !self.pan_tool; if self.pan_tool { self.connect_mode = false; } self.drag.cancel(); },
+            Action::TogglePan => {
+                self.pan_tool = !self.pan_tool;
+                if self.pan_tool {
+                    self.connect_mode = false;
+                }
+                self.drag.cancel();
+            }
             Action::ToggleConnectMode => self.toggle_connect_mode(),
             Action::LinkMode(mode) => self.set_link_mode(mode),
             Action::CheckNode => {
@@ -607,11 +695,23 @@ impl State {
                     .node
                     .and_then(|i| self.workflow().and_then(|w| w.nodes.get(i)))
                     .filter(|n| n.is_model_backed() && !n.route_id.is_empty())
-                    .map(|n| (n.route_id.clone(), n.title.clone()));
-                if let Some((route, title)) = target {
+                    .map(|n| (n.route_id.clone(), n.title.clone(), n.effort.clone()));
+                if let Some((route, title, effort)) = target {
                     self.check_feedback = None;
-                    self.pending_check = Some((route.clone(), title));
-                    self.update(Action::Check(route), ctx);
+                    if effort.is_empty() {
+                        // The gate is here, not on the coordinator: a check
+                        // without a stated level answers nothing about the
+                        // level production will actually run at.
+                        self.check_feedback = Some((
+                            InfoBarSeverity::Warning,
+                            format!(
+                                "「{title}」尚未设定思考程度：请在右键菜单「思考程度」中选择或自定义后再检测。"
+                            ),
+                        ));
+                    } else {
+                        self.pending_check = Some((route.clone(), title));
+                        self.update(Action::Check(route, effort), ctx);
+                    }
                 }
             }
             Action::PoolNode => {
@@ -626,24 +726,149 @@ impl State {
             }
             Action::ConnectFromNode => self.toggle_connect_mode(),
             Action::DismissCheck => self.check_feedback = None,
-            Action::Fit => { let (width,height)=self.viewport.get(); if let Some(w)=self.workflow() { let transform=w.fit_view((width-210.0).max(100.0),height);self.pan=transform.0;self.zoom=transform.1; } },
-            Action::CloseInspector => {self.show_params=false;self.show_node_details=false;},
-            Action::AddFallback(id) => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)) && n.is_model_backed() && id!=n.route_id && !n.fallback_routes.contains(&id) && n.fallback_routes.len()<8 {n.fallback_routes.push(id);self.dirty=true;}}
-            Action::ClearFallback => {if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)){n.fallback_routes.clear();self.dirty=true;}}
-            Action::Acknowledge(v) => self.acknowledge=v,
-            Action::Collect(id) => self.request("router_collect",json!({"job_id":id,"max_chars":12000}),ctx),
-            Action::Tab(tab) => {self.open_menu=None;self.tab=tab;},
-            Action::Section(id, open) => { if open { self.expanded.insert(id); } else { self.expanded.remove(&id); } }
-            Action::CallPreset(i) => { if let Some(p)=self.snapshot.call_presets.get(i){self.draft.call_profile=p["value"].clone();self.profile_editor=serde_json::to_string_pretty(&self.draft.call_profile).unwrap_or_default();self.dirty=true;} }
-            Action::ProfileEditor(v) => self.profile_editor=v,
-            Action::ApplyProfile => match serde_json::from_str::<Value>(&self.profile_editor){Ok(v) if v.is_object()=>{self.draft.call_profile=v;self.dirty=true;},_=>self.error=Some("调用配置需要合法的 JSON 对象".into())},
-            Action::Plan => {self.show_run=true;self.tab="workflow";if let Some(w)=self.workflow(){self.request("router_workflow_plan",json!({"definition":w,"workflow_id":self.workflow_id}),ctx);}},
+            Action::SetEffort(effort) => {
+                if let Some(i) = self.node
+                    && let Some(n) = self
+                        .workflow_mut()
+                        .and_then(|w| w.nodes.get_mut(i))
+                        .filter(|n| n.is_model_backed())
+                {
+                    n.effort = effort;
+                    self.dirty = true;
+                }
+            }
+            Action::EffortDraft(v) => self.effort_draft = v,
+            Action::ToggleEffortInput => {
+                self.effort_input_open = !self.effort_input_open;
+                if !self.effort_input_open {
+                    self.effort_draft.clear();
+                }
+            }
+            Action::ApplyEffortDraft => {
+                let value = self.effort_draft.trim().to_owned();
+                let count = value.chars().count();
+                if value.is_empty() || count > 32 {
+                    self.error = Some("自定义思考程度需为 1–32 个字符。".into());
+                } else {
+                    // The preset list is shared across nodes and persists with
+                    // the settings; the built-ins and existing customs are not
+                    // duplicated.
+                    let known = EFFORT_PRESETS.iter().any(|(key, _)| *key == value)
+                        || self.draft.effort_presets.contains(&value);
+                    if !known && self.draft.effort_presets.len() >= 16 {
+                        self.error =
+                            Some("自定义思考程度预设最多 16 个；仍可直接输入到节点。".into());
+                    } else {
+                        if !known {
+                            self.draft.effort_presets.push(value.clone());
+                        }
+                        self.update(Action::SetEffort(value), ctx);
+                        self.effort_draft.clear();
+                        self.effort_input_open = false;
+                    }
+                }
+            }
+            Action::ToggleSupervision => {
+                let next = !self.workflow().is_some_and(|w| w.luna_supervision);
+                self.probe_supervision = next;
+                if let Some(w) = self.workflow_mut()
+                    && w.luna_supervision != next
+                {
+                    w.luna_supervision = next;
+                    self.dirty = true;
+                }
+            }
+            Action::PoolPermanent(v) => self.pool_permanent = v,
+            Action::Fit => {
+                let (width, height) = self.viewport.get();
+                if let Some(w) = self.workflow() {
+                    let transform = w.fit_view((width - 210.0).max(100.0), height);
+                    self.pan = transform.0;
+                    self.zoom = transform.1;
+                }
+            }
+            Action::CloseInspector => {
+                self.show_params = false;
+                self.show_node_details = false;
+            }
+            Action::AddFallback(id) => {
+                if let Some(i) = self.node
+                    && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
+                    && n.is_model_backed()
+                    && id != n.route_id
+                    && !n.fallback_routes.contains(&id)
+                    && n.fallback_routes.len() < 8
+                {
+                    n.fallback_routes.push(id);
+                    self.dirty = true;
+                }
+            }
+            Action::ClearFallback => {
+                if let Some(i) = self.node
+                    && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
+                {
+                    n.fallback_routes.clear();
+                    self.dirty = true;
+                }
+            }
+            Action::Acknowledge(v) => self.acknowledge = v,
+            Action::Collect(id) => self.request(
+                "router_collect",
+                json!({"job_id":id,"max_chars":12000}),
+                ctx,
+            ),
+            Action::Tab(tab) => {
+                self.open_menu = None;
+                self.tab = tab;
+            }
+            Action::Section(id, open) => {
+                if open {
+                    self.expanded.insert(id);
+                } else {
+                    self.expanded.remove(&id);
+                }
+            }
+            Action::CallPreset(i) => {
+                if let Some(p) = self.snapshot.call_presets.get(i) {
+                    self.draft.call_profile = p["value"].clone();
+                    self.profile_editor =
+                        serde_json::to_string_pretty(&self.draft.call_profile).unwrap_or_default();
+                    self.dirty = true;
+                }
+            }
+            Action::ProfileEditor(v) => self.profile_editor = v,
+            Action::ApplyProfile => match serde_json::from_str::<Value>(&self.profile_editor) {
+                Ok(v) if v.is_object() => {
+                    self.draft.call_profile = v;
+                    self.dirty = true;
+                }
+                _ => self.error = Some("调用配置需要合法的 JSON 对象".into()),
+            },
+            Action::Plan => {
+                self.show_run = true;
+                self.tab = "workflow";
+                if let Some(w) = self.workflow() {
+                    self.request(
+                        "router_workflow_plan",
+                        json!({"definition":w,"workflow_id":self.workflow_id}),
+                        ctx,
+                    );
+                }
+            }
             Action::Reload => {
-                self.dirty = false;self.node=None;self.show_node_details=false;self.drag.cancel();
+                self.dirty = false;
+                self.node = None;
+                self.show_node_details = false;
+                self.drag.cancel();
                 self.request("router_scheduling", json!({}), ctx);
             }
             Action::Save => {
-                if self.draft.workflows.iter().any(|w| !w.nodes.is_empty() && w.order().is_err()) {
+                if self
+                    .draft
+                    .workflows
+                    .iter()
+                    .any(|w| !w.nodes.is_empty() && w.order().is_err())
+                {
                     self.error = Some("工作流依赖无效，请修正后保存".into());
                     return;
                 }
@@ -666,7 +891,9 @@ impl State {
                                 if !self.dirty || self.saving {
                                     self.numeric_drafts.clear();
                                     self.draft = snapshot.settings.clone();
-                                    self.profile_editor=serde_json::to_string_pretty(&self.draft.call_profile).unwrap_or_default();
+                                    self.profile_editor =
+                                        serde_json::to_string_pretty(&self.draft.call_profile)
+                                            .unwrap_or_default();
                                     self.dirty = false;
                                 }
                                 if self.workflow_id.is_empty() {
@@ -708,7 +935,9 @@ impl State {
                                     self.run_id = id.into();
                                     self.show_run = true;
                                     let id = self.run_id.clone();
-                                    ctx.spawn_background(move |_| Msg::Scheduling(Action::Poll(id)));
+                                    ctx.spawn_background(move |_| {
+                                        Msg::Scheduling(Action::Poll(id))
+                                    });
                                 }
                                 self.snapshot = snapshot;
                                 self.loaded = true;
@@ -716,14 +945,21 @@ impl State {
                             }
                         }
                     }
-                        Ok(value) => {
-                            if value.get("results").is_some(){self.report_text=bounded_pretty(&value);self.report_detail=Some(value);self.inv.invalidate();return;}
+                    Ok(value) => {
+                        if value.get("results").is_some() {
+                            self.report_text = bounded_pretty(&value);
+                            self.report_detail = Some(value);
+                            self.inv.invalidate();
+                            return;
+                        }
                         if let Some(id) = value["run_id"].as_str() {
                             self.run_id = id.into();
                         }
                         self.notice = value["state"].as_str().unwrap_or("已返回").into();
-                        let active =
-                            matches!(value["state"].as_str(), Some("running" | "cancelling" | "awaiting_codex"));
+                        let active = matches!(
+                            value["state"].as_str(),
+                            Some("running" | "cancelling" | "awaiting_codex")
+                        );
                         self.detail_text = bounded_pretty(&value);
                         self.detail = Some(value);
                         if active && !self.run_id.is_empty() {
@@ -738,14 +974,23 @@ impl State {
                 self.inv.invalidate();
             }
             Action::Enabled(v) => {
-                if self.draft.enabled != v { self.draft.enabled = v; self.dirty = true; }
+                if self.draft.enabled != v {
+                    self.draft.enabled = v;
+                    self.dirty = true;
+                }
             }
             Action::Directed(v) => {
-                let mode=if v { "directed" } else { "auto" };
-                if self.draft.mode != mode {self.draft.mode=mode.into(); self.dirty=true;}
+                let mode = if v { "directed" } else { "auto" };
+                if self.draft.mode != mode {
+                    self.draft.mode = mode.into();
+                    self.dirty = true;
+                }
             }
             Action::Source(id, v) => {
-                if self.draft.sources.get(&id).copied().unwrap_or(true)!=v { self.draft.sources.insert(id, v); self.dirty = true; }
+                if self.draft.sources.get(&id).copied().unwrap_or(true) != v {
+                    self.draft.sources.insert(id, v);
+                    self.dirty = true;
+                }
             }
             Action::Query(v) => {
                 self.query = v;
@@ -777,78 +1022,166 @@ impl State {
             Action::Select(i) => {
                 self.numeric_drafts.clear();
                 self.selected = i;
-                self.node = None;self.show_node_details=false;
+                self.node = None;
+                self.show_node_details = false;
             }
             Action::Name(v) => {
                 if let Some(w) = self.workflow_mut()
-                    && w.name != v { w.name = v; self.dirty = true; }
+                    && w.name != v
+                {
+                    w.name = v;
+                    self.dirty = true;
+                }
             }
             Action::Budget(v) => {
                 let parsed = numeric_field(&v, NumericField::Budget);
                 self.numeric_drafts.insert(NumericField::Budget.key(), v);
                 if let (Some(w), Ok(b)) = (self.workflow_mut(), parsed)
-                    && w.token_budget != b { w.token_budget = b; self.dirty = true; }
+                    && w.token_budget != b
+                {
+                    w.token_budget = b;
+                    self.dirty = true;
+                }
             }
             Action::Parallel(v) => {
                 let parsed = numeric_field(&v, NumericField::Parallel);
                 self.numeric_drafts.insert(NumericField::Parallel.key(), v);
                 if let (Some(w), Ok(p)) = (self.workflow_mut(), parsed)
-                    && w.max_parallel as u64 != p { w.max_parallel = p as usize; self.dirty = true; }
+                    && w.max_parallel as u64 != p
+                {
+                    w.max_parallel = p as usize;
+                    self.dirty = true;
+                }
             }
             Action::MaxRounds(v) => {
                 let parsed = numeric_field(&v, NumericField::Rounds);
                 self.numeric_drafts.insert(NumericField::Rounds.key(), v);
                 if let (Some(w), Ok(r)) = (self.workflow_mut(), parsed)
-                    && w.max_rounds as u64 != r { w.max_rounds = r as usize; self.dirty = true; }
+                    && w.max_rounds as u64 != r
+                {
+                    w.max_rounds = r as usize;
+                    self.dirty = true;
+                }
             }
             Action::SelectNode(i) => self.node = Some(i),
-            Action::Supervision(value) => { self.probe_supervision=value; if let Some(w)=self.workflow_mut()&& w.luna_supervision!=value {w.luna_supervision=value;self.dirty=true;} }
-            Action::RemoveWorkflow => {if self.selected<self.draft.workflows.len(){self.draft.workflows.remove(self.selected);self.selected=0;self.node=None;self.dirty=true;}}
-            Action::AddTemplate(i) => { if let Some(t)=self.templates.get(i).cloned(){
-                let route=self.draft.pool.iter().find(|p|p.expires_at>model::now_ms()).and_then(|p|self.snapshot.routes.iter().find(|r|r.route_id==p.route_id)).cloned();
-                if self.workflow().is_none() && self.draft.workflows.len()<16 {self.draft.workflows.push(Workflow::new(format!("workflow-{}",model::now_ms())));self.selected=self.draft.workflows.len()-1;}
-                if let Some(w)=self.workflow_mut(){match w.add_template(&t,route.as_ref()){Ok(n)=>{self.node=Some(n);self.dirty=true;},Err(e)=>self.error=Some(e.to_string())}}
-            }}
-            Action::ApplyTemplate(i) => {if let (Some(t),Some(n))=(self.templates.get(i).cloned(),self.node)&& let Some(w)=self.workflow_mut(){match w.apply_template(n,&t){Ok(())=>self.dirty=true,Err(e)=>self.error=Some(e.to_string())}}}
-            Action::Role(v) => {if let Some(i)=self.node&& let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i))&& n.role!=v {n.role=v;self.dirty=true;}}
-            Action::TaskEditor(v) => self.task_editor=v,
-            Action::ApplyTaskEditor => { match serde_json::from_str::<Value>(&self.task_editor){Ok(value) if value.is_object()=>{if let Some(i)=self.node&& let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i)){n.task=value;self.dirty=true;}},_=>self.error=Some("节点参数需要合法的 JSON 对象".into())} }
+            Action::RemoveWorkflow => {
+                if self.selected < self.draft.workflows.len() {
+                    self.draft.workflows.remove(self.selected);
+                    self.selected = 0;
+                    self.node = None;
+                    self.dirty = true;
+                }
+            }
+            Action::AddTemplate(i) => {
+                if let Some(t) = self.templates.get(i).cloned() {
+                    let route = self
+                        .draft
+                        .pool
+                        .iter()
+                        .find(|p| p.expires_at > model::now_ms())
+                        .and_then(|p| {
+                            self.snapshot
+                                .routes
+                                .iter()
+                                .find(|r| r.route_id == p.route_id)
+                        })
+                        .cloned();
+                    if self.workflow().is_none() && self.draft.workflows.len() < 16 {
+                        self.draft
+                            .workflows
+                            .push(Workflow::new(format!("workflow-{}", model::now_ms())));
+                        self.selected = self.draft.workflows.len() - 1;
+                    }
+                    if let Some(w) = self.workflow_mut() {
+                        match w.add_template(&t, route.as_ref()) {
+                            Ok(n) => {
+                                self.node = Some(n);
+                                self.dirty = true;
+                            }
+                            Err(e) => self.error = Some(e.to_string()),
+                        }
+                    }
+                }
+            }
+            Action::ApplyTemplate(i) => {
+                if let (Some(t), Some(n)) = (self.templates.get(i).cloned(), self.node)
+                    && let Some(w) = self.workflow_mut()
+                {
+                    match w.apply_template(n, &t) {
+                        Ok(()) => self.dirty = true,
+                        Err(e) => self.error = Some(e.to_string()),
+                    }
+                }
+            }
+            Action::Role(v) => {
+                if let Some(i) = self.node
+                    && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
+                    && n.role != v
+                {
+                    n.role = v;
+                    self.dirty = true;
+                }
+            }
+            Action::TaskEditor(v) => self.task_editor = v,
+            Action::ApplyTaskEditor => match serde_json::from_str::<Value>(&self.task_editor) {
+                Ok(value) if value.is_object() => {
+                    if let Some(i) = self.node
+                        && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
+                    {
+                        n.task = value;
+                        self.dirty = true;
+                    }
+                }
+                _ => self.error = Some("节点参数需要合法的 JSON 对象".into()),
+            },
             Action::NodeTitle(v) => {
                 if let Some(i) = self.node
                     && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
-                        && n.title!=v {n.title = v; self.dirty = true;}
+                    && n.title != v
+                {
+                    n.title = v;
+                    self.dirty = true;
+                }
             }
             Action::Tags(v) => {
                 if let Some(i) = self.node
-                    && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i)) {
-                        let tags:Vec<String> = v
-                            .split([',', '，'])
-                            .map(str::trim)
-                            .filter(|t| !t.is_empty())
-                            .map(str::to_owned)
-                            .collect();
-                        if n.tags!=tags {n.tags=tags;self.dirty = true;}
+                    && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
+                {
+                    let tags: Vec<String> = v
+                        .split([',', '，'])
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    if n.tags != tags {
+                        n.tags = tags;
+                        self.dirty = true;
                     }
+                }
             }
             Action::Param(key, v) => {
-                if let Some(i)=self.node && let Some(n)=self.workflow_mut().and_then(|w|w.nodes.get_mut(i))
-                    && model::edit_parameter(&mut n.task,&key,&v) { self.dirty=true; }
+                if let Some(i) = self.node
+                    && let Some(n) = self.workflow_mut().and_then(|w| w.nodes.get_mut(i))
+                    && model::edit_parameter(&mut n.task, &key, &v)
+                {
+                    self.dirty = true;
+                }
             }
             Action::RemoveNode => {
                 if let Some(i) = self.node.take()
-                    && let Some(w) = self.workflow_mut() {
-                        w.remove(i);
-                        self.dirty = true;
-                    }
+                    && let Some(w) = self.workflow_mut()
+                {
+                    w.remove(i);
+                    self.dirty = true;
+                }
             }
             Action::AddMaster => {
                 // Drop-in entry point at the canvas center; the workflow is
                 // created on demand, mirroring a first model drop.
                 if self.workflow().is_none() {
-                    self.draft.workflows.push(Workflow::new(format!(
-                        "workflow-{}",
-                        model::now_ms()
-                    )));
+                    self.draft
+                        .workflows
+                        .push(Workflow::new(format!("workflow-{}", model::now_ms())));
                     self.selected = self.draft.workflows.len() - 1;
                 }
                 let (width, height) = self.viewport.get();
@@ -867,21 +1200,23 @@ impl State {
             }
             Action::DisconnectNode => {
                 if let Some(i) = self.node
-                    && let Some(w) = self.workflow_mut() {
-                        w.disconnect(i);
-                        self.dirty = true;
-                    }
+                    && let Some(w) = self.workflow_mut()
+                {
+                    w.disconnect(i);
+                    self.dirty = true;
+                }
             }
             Action::MoveNode(delta) => {
                 if let Some(i) = self.node
-                    && let Some(w) = self.workflow_mut() {
-                        let next = i.saturating_add_signed(delta as isize);
-                        if next < w.nodes.len() {
-                            w.nodes.swap(i, next);
-                            self.node = Some(next);
-                            self.dirty = true;
-                        }
+                    && let Some(w) = self.workflow_mut()
+                {
+                    let next = i.saturating_add_signed(delta as isize);
+                    if next < w.nodes.len() {
+                        w.nodes.swap(i, next);
+                        self.node = Some(next);
+                        self.dirty = true;
                     }
+                }
             }
             Action::Chain => {
                 if let Some(w) = self.workflow_mut() {
@@ -912,15 +1247,34 @@ impl State {
                         self.update(Action::Palette(if notches < 0.0 { 1 } else { -1 }), ctx);
                     } else {
                         let anchor = (p.x - 210.0, p.y);
-                        let world = ((anchor.0 - self.pan.0) / self.zoom, (anchor.1 - self.pan.1) / self.zoom);
+                        let world = (
+                            (anchor.0 - self.pan.0) / self.zoom,
+                            (anchor.1 - self.pan.1) / self.zoom,
+                        );
                         self.zoom = (self.zoom * 1.12f64.powf(notches)).clamp(0.1, 1.8);
-                        self.pan = (anchor.0 - world.0 * self.zoom, anchor.1 - world.1 * self.zoom);
+                        self.pan = (
+                            anchor.0 - world.0 * self.zoom,
+                            anchor.1 - world.1 * self.zoom,
+                        );
                     }
                 }
             }
-            Action::Zoom(delta) => { let (width,height)=self.viewport.get(); let anchor=((width-210.0)/2.0,height/2.0);let world=((anchor.0-self.pan.0)/self.zoom,(anchor.1-self.pan.1)/self.zoom);self.zoom=(self.zoom+delta).clamp(0.1,1.8);self.pan=(anchor.0-world.0*self.zoom,anchor.1-world.1*self.zoom); },
+            Action::Zoom(delta) => {
+                let (width, height) = self.viewport.get();
+                let anchor = ((width - 210.0) / 2.0, height / 2.0);
+                let world = (
+                    (anchor.0 - self.pan.0) / self.zoom,
+                    (anchor.1 - self.pan.1) / self.zoom,
+                );
+                self.zoom = (self.zoom + delta).clamp(0.1, 1.8);
+                self.pan = (
+                    anchor.0 - world.0 * self.zoom,
+                    anchor.1 - world.1 * self.zoom,
+                );
+            }
             Action::Press(p) => {
-                self.pointer=(p.x,p.y);self.error=None;
+                self.pointer = (p.x, p.y);
+                self.error = None;
                 if self.blank_double_click(p) {
                     self.toggle_connect_mode();
                 } else if p.is_right_button_pressed && p.x >= 210.0 {
@@ -934,11 +1288,13 @@ impl State {
                         self.menu_at = (p.x, p.y);
                         self.open_menu = Some("node");
                     } else if self.can_pan() {
-                        self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
+                        self.drag
+                            .begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
                     }
                 } else if p.is_middle_button_pressed || (self.pan_tool && p.x >= 210.0) {
                     if self.can_pan() {
-                        self.drag.begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
+                        self.drag
+                            .begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
                     }
                 } else if p.x < 200.0 && p.y >= 42.0 {
                     // Only rows the page actually draws start a drag: the old
@@ -957,38 +1313,58 @@ impl State {
                 } else {
                     let (x, y) = self.point(p);
                     if let Some(w) = self.workflow()
-                        && let Some(i) = w.hit(x, y) {
-                            let n = &w.nodes[i];
-                            // The mode decides, not where on the node the press
-                            // landed: no hit strip to miss or to graze.
-                            let drag = if self.connect_mode {
-                                Drag::Edge(i, self.link_mode)
-                            } else {
-                                Drag::Node(i, x - n.x, y - n.y)
-                            };
-                            self.node = Some(i);
-                            self.drag.begin(drag);
-                        } else if p.x >= 210.0 && self.can_pan() { self.drag.begin(Drag::Pan(p.x-self.pan.0,p.y-self.pan.1)); }
+                        && let Some(i) = w.hit(x, y)
+                    {
+                        let n = &w.nodes[i];
+                        // The mode decides, not where on the node the press
+                        // landed: no hit strip to miss or to graze.
+                        let drag = if self.connect_mode {
+                            Drag::Edge(i, self.link_mode)
+                        } else {
+                            Drag::Node(i, x - n.x, y - n.y)
+                        };
+                        self.node = Some(i);
+                        self.drag.begin(drag);
+                    } else if p.x >= 210.0 && self.can_pan() {
+                        self.drag
+                            .begin(Drag::Pan(p.x - self.pan.0, p.y - self.pan.1));
+                    }
                 }
             }
             Action::Move(p) => {
                 let (x, y) = self.point(p);
-                if self.drag.current.is_none(){let hover=if p.x>=210.0 {self.workflow().and_then(|w|w.hit(x,y))} else {None};if hover==self.hover{return;}self.hover=hover;}
-                self.pointer=(p.x,p.y);
+                if self.drag.current.is_none() {
+                    let hover = if p.x >= 210.0 {
+                        self.workflow().and_then(|w| w.hit(x, y))
+                    } else {
+                        None
+                    };
+                    if hover == self.hover {
+                        return;
+                    }
+                    self.hover = hover;
+                }
+                self.pointer = (p.x, p.y);
                 match self.drag.movement() {
-                    Some(Drag::Node(i,dx,dy)) => self.reposition(i,x-dx,y-dy),
+                    Some(Drag::Node(i, dx, dy)) => self.reposition(i, x - dx, y - dy),
                     Some(Drag::Pan(dx, dy)) => self.pan = (p.x - dx, p.y - dy),
                     _ => {}
                 }
             }
             Action::Release(p) => {
-                self.pointer=(p.x,p.y);
+                self.pointer = (p.x, p.y);
                 let (x, y) = self.point(p);
                 match self.drag.release() {
-                    Some(Drag::Node(i,dx,dy)) => self.reposition(i,x-dx,y-dy),
-                    Some(Drag::Pan(dx,dy)) => self.pan=(p.x-dx,p.y-dy),
+                    Some(Drag::Node(i, dx, dy)) => self.reposition(i, x - dx, y - dy),
+                    Some(Drag::Pan(dx, dy)) => self.pan = (p.x - dx, p.y - dy),
                     Some(Drag::Model(index)) => {
-                        if p.x < 210.0 || p.y < 0.0 || p.y > self.viewport.get().1 || p.x > self.viewport.get().0 { return; }
+                        if p.x < 210.0
+                            || p.y < 0.0
+                            || p.y > self.viewport.get().1
+                            || p.x > self.viewport.get().0
+                        {
+                            return;
+                        }
                         if let Some(route) = self.routes().get(index).map(|r| (*r).clone()) {
                             // The flash acknowledges a model landing on the
                             // canvas — not selection (every click-release used
@@ -1007,16 +1383,25 @@ impl State {
                                 // after it is renamed along with the swap.
                                 let old_model = hit.and_then(|i| {
                                     let id = &self.workflow()?.nodes.get(i)?.route_id;
-                                    self.snapshot.routes.iter().find(|r| &r.route_id == id).map(|r| r.model.clone())
+                                    self.snapshot
+                                        .routes
+                                        .iter()
+                                        .find(|r| &r.route_id == id)
+                                        .map(|r| r.model.clone())
                                 });
                                 if let Some(w) = self.workflow_mut() {
                                     if let Some(i) = hit {
-                                        if !w.nodes[i].is_model_backed() { self.error=Some("本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板".into()); return; }
+                                        if !w.nodes[i].is_model_backed() {
+                                            self.error=Some("本地节点不绑定模型；请拖到空白处创建模型节点，或先套用模型职责模板".into());
+                                            return;
+                                        }
                                         // Replace the model in place: id, edges, role and
                                         // prompt stay; only the binding (and a title that
                                         // merely named the old model) changes.
                                         let node = &mut w.nodes[i];
-                                        if node.title.is_empty() || old_model.as_deref() == Some(node.title.as_str()) {
+                                        if node.title.is_empty()
+                                            || old_model.as_deref() == Some(node.title.as_str())
+                                        {
                                             node.title.clone_from(&route.model);
                                         }
                                         node.fallback_routes.retain(|r| r != &route.route_id);
@@ -1025,7 +1410,10 @@ impl State {
                                         landed = true;
                                     } else {
                                         match w.add_route(&route, x, y) {
-                                            Ok(i) => { self.node = Some(i); landed = true; }
+                                            Ok(i) => {
+                                                self.node = Some(i);
+                                                landed = true;
+                                            }
                                             Err(e) => self.error = Some(e.to_string()),
                                         }
                                     }
@@ -1059,22 +1447,46 @@ impl State {
             Action::ExecutionRoot(v) => self.execution_root = v,
             Action::WritablePaths(v) => self.writable_paths = v,
             Action::Run => {
-                self.show_run=true;
+                self.show_run = true;
                 if self.dirty {
                     self.error = Some("请先保存工作流和模型池".into());
                 } else if let Some(w) = self.workflow().cloned() {
                     let execution = if w.nodes.iter().any(|n| n.node_type == "operator") {
                         match execution_grant(&self.execution_root, &self.writable_paths) {
                             Ok(value) => Some(value),
-                            Err(error) => { self.error=Some(error);return; }
+                            Err(error) => {
+                                self.error = Some(error);
+                                return;
+                            }
                         }
-                    } else { None };
+                    } else {
+                        None
+                    };
                     let signature=serde_json::to_string(&json!({"definition":w,"input":self.input,"workflow":self.workflow_id,"execution":execution})).unwrap_or_default();
-                    let finished=self.detail.as_ref().and_then(|d|d["state"].as_str()).is_some_and(|s|matches!(s,"succeeded"|"failed"|"cancelled"|"interrupted"));
-                    if self.submit_key.is_empty() || signature!=self.submit_signature || finished {self.submit_key=format!("desktop-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());self.submit_signature=signature;}
-                    let mut params=json!({"definition":w,"input_text":self.input,"workflow_id":self.workflow_id,"request_id":self.submit_key,"acknowledge_unknown_risk":self.acknowledge});
-                    if let Some(execution)=execution {params["execution"]=execution;}
-                    self.request("router_workflow_submit",params,ctx);
+                    let finished = self
+                        .detail
+                        .as_ref()
+                        .and_then(|d| d["state"].as_str())
+                        .is_some_and(|s| {
+                            matches!(s, "succeeded" | "failed" | "cancelled" | "interrupted")
+                        });
+                    if self.submit_key.is_empty() || signature != self.submit_signature || finished
+                    {
+                        self.submit_key = format!(
+                            "desktop-{}-{}",
+                            std::process::id(),
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos()
+                        );
+                        self.submit_signature = signature;
+                    }
+                    let mut params = json!({"definition":w,"input_text":self.input,"workflow_id":self.workflow_id,"request_id":self.submit_key,"acknowledge_unknown_risk":self.acknowledge});
+                    if let Some(execution) = execution {
+                        params["execution"] = execution;
+                    }
+                    self.request("router_workflow_submit", params, ctx);
                 }
             }
             Action::Poll(id) | Action::Detail(id) => {
@@ -1663,6 +2075,9 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
     // so the row is greyed with the reason visible — a disabled button shows
     // no tooltip, so the reason is a line under the row, not a hover text.
     let switch_off = bound && !state.snapshot.settings.enabled;
+    // A check without a stated level proves nothing about the level
+    // production will run at, so the row stays greyed until one is chosen.
+    let effort_missing = bound && node.is_some_and(|n| n.effort.is_empty());
     let separator = || -> View {
         Border::new()
             .height(1.0)
@@ -1670,7 +2085,119 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
             .background(theme.divider)
             .into()
     };
-    let items: Vec<View> = vec![
+    // Quick effort presets for a bound model node: the built-ins, the user's
+    // saved customs, and an inline custom input. Kept in the menu (not the
+    // inspector) because it is the one thing every node needs before check
+    // and production.
+    let mut effort_rows: Vec<View> = Vec::new();
+    if bound {
+        let current = node.map_or("", |n| n.effort.as_str());
+        let route_effort = route.map_or("", |r| r.effort.as_str());
+        effort_rows.push(separator());
+        effort_rows.push(
+            Border::new()
+                .padding(Thickness::new(11.0, 6.0, 8.0, 6.0))
+                .content(vstack(
+                    3.0,
+                    vec![
+                        TextBlock::new()
+                            .text("思考程度")
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .into(),
+                        TextBlock::new()
+                            .text(if current.is_empty() {
+                                format!(
+                                    "未设定 · 检测与运行前必须选择（路线默认：{}）",
+                                    if route_effort.is_empty() {
+                                        "无"
+                                    } else {
+                                        route_effort
+                                    }
+                                )
+                            } else {
+                                format!("当前 {current}")
+                            })
+                            .font_size(theme.label_size)
+                            .foreground(if current.is_empty() {
+                                theme.warn
+                            } else {
+                                theme.ok
+                            })
+                            .text_wrapping(TextWrapping::Wrap)
+                            .into(),
+                    ],
+                )),
+        );
+        let mut offered: Vec<&str> = EFFORT_PRESETS.iter().map(|(key, _)| *key).collect();
+        offered.extend(state.draft.effort_presets.iter().map(String::as_str));
+        if !route_effort.is_empty() && !offered.contains(&route_effort) {
+            offered.insert(0, route_effort);
+        }
+        for level in offered {
+            let label = match EFFORT_PRESETS.iter().find(|(key, _)| *key == level) {
+                Some((key, label)) => format!("{label}（{key}）"),
+                None => level.to_owned(),
+            };
+            let label = if level == current {
+                format!("✓ {label}")
+            } else {
+                label
+            };
+            let level = level.to_owned();
+            effort_rows.push(command(
+                Symbol::FourBars,
+                &label,
+                "设定本节点的思考努力程度；检测与正式运行前必须选择，可自定义。",
+                move || Action::SetEffort(level.clone()),
+                true,
+                ctx,
+            ));
+        }
+        effort_rows.push(command(
+            Symbol::Add,
+            if state.effort_input_open {
+                "收起自定义输入"
+            } else {
+                "自定义程度…"
+            },
+            "输入一个自定义程度值（1–32 个字符），会同时存入预设列表。",
+            || Action::ToggleEffortInput,
+            true,
+            ctx,
+        ));
+        if state.effort_input_open {
+            effort_rows.push(
+                Border::new()
+                    .padding(Thickness::new(11.0, 4.0, 8.0, 4.0))
+                    .content(
+                        Grid::new()
+                            .columns([GridLength::STAR, GridLength::Auto])
+                            .column_spacing(8.0)
+                            .children((
+                                TextBox::new()
+                                    .placeholder_text("自定义程度，如 ultra")
+                                    .min_height(32.0)
+                                    .text(state.effort_draft.clone())
+                                    .on_text_changed(ctx.callback(|v: String| {
+                                        Msg::Scheduling(Action::EffortDraft(v))
+                                    })),
+                                button("添加", || Action::ApplyEffortDraft, ctx),
+                            )),
+                    ),
+            );
+        }
+        if !current.is_empty() {
+            effort_rows.push(command(
+                Symbol::Cancel,
+                "清除思考程度",
+                "回到未设定状态；检测与运行会重新被阻止。",
+                || Action::SetEffort(String::new()),
+                true,
+                ctx,
+            ));
+        }
+    }
+    let mut items: Vec<View> = vec![
         Border::new()
             .padding(Thickness::new(11.0, 6.0, 8.0, 6.0))
             .content(vstack(
@@ -1698,6 +2225,26 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
             true,
             ctx,
         ),
+    ];
+    // Luna supervision belongs to the mother node: the toggle lives here, not
+    // in the workflow settings page, so its intent is visible where Codex
+    // plans and accepts work.
+    if node.is_some_and(|n| n.node_type == "codex") {
+        let supervised = state.workflow().is_some_and(|w| w.luna_supervision);
+        items.push(command(
+            Symbol::Permissions,
+            if supervised {
+                "Luna 监工：开启（点击关闭）"
+            } else {
+                "Luna 监工：关闭（点击开启）"
+            },
+            "监工与母节点协同：开启需同一工作流的在线监工；关闭仍保留预算、模型池和恢复保护。",
+            || Action::ToggleSupervision,
+            true,
+            ctx,
+        ));
+    }
+    items.extend([
         command(
             Symbol::Refresh,
             if checking {
@@ -1705,13 +2252,15 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
             } else {
                 "检测连通性"
             },
-            if bound {
-                "发起一次真实生成检测（会产生少量用量），结果显示在画布上方。"
-            } else {
+            if !bound {
                 "仅绑定了模型的模型节点可以检测。"
+            } else if effort_missing {
+                "先在下方「思考程度」中选择或自定义一个程度，再检测。"
+            } else {
+                "发起一次真实生成检测（会产生少量用量），结果显示在画布上方。"
             },
             || Action::CheckNode,
-            bound && !checking && !state.busy && !switch_off,
+            bound && !checking && !state.busy && !switch_off && !effort_missing,
             ctx,
         ),
         if switch_off {
@@ -1730,9 +2279,22 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
                         .foreground(theme.warn)
                         .text_wrapping(TextWrapping::Wrap),
                 )
+        } else if effort_missing {
+            Border::new()
+                .padding(Thickness::new(39.0, 0.0, 8.0, 4.0))
+                .content(
+                    TextBlock::new()
+                        .text("思考程度未设定：选择或自定义一个程度后才能检测")
+                        .font_size(theme.label_size)
+                        .foreground(theme.warn)
+                        .text_wrapping(TextWrapping::Wrap),
+                )
         } else {
             Border::new().into()
         },
+    ]);
+    items.extend(effort_rows);
+    items.extend([
         command(
             Symbol::Add,
             if pooled {
@@ -1740,7 +2302,7 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
             } else {
                 "加入模型池"
             },
-            "按来源页的有效期把本节点的模型加入限时模型池（已在池则续期），保存后生效。定向模式只使用池内模型。",
+            "按来源页的有效期把本节点的模型加入模型池（已在池则续期，来源页可选永久租期），保存后生效。定向模式只使用池内模型。",
             || Action::PoolNode,
             bound,
             ctx,
@@ -1799,7 +2361,7 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
             true,
             ctx,
         ),
-    ];
+    ]);
     let base = theme
         .page_bg
         .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
@@ -2280,7 +2842,7 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                         // wrapped to two lines it pushed the two boxes out of
                         // baseline and read as broken text.
                         .columns([GridLength::STAR, GridLength::Pixel(200.0)])
-                        .rows([GridLength::Auto, GridLength::Auto])
+                        .rows([GridLength::Auto, GridLength::Auto, GridLength::Auto])
                         .column_spacing(16.0)
                         .row_spacing(6.0)
                         .children([
@@ -2319,6 +2881,24 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                                     .on_text_changed(
                                         ctx.callback(|v: String| Msg::Scheduling(Action::Ttl(v))),
                                     ),
+                            ),
+                            // The permanent lease answers "keep re-renewing
+                            // every 120 minutes" with one deliberate choice;
+                            // the minutes box still applies when it is off.
+                            rcell(
+                                1,
+                                2,
+                                row(vec![
+                                    TextBlock::new()
+                                        .text("永久租期（忽略分钟数）")
+                                        .vertical_alignment(VerticalAlignment::Center)
+                                        .into(),
+                                    crate::pages::switch(
+                                        theme,
+                                        state.pool_permanent,
+                                        ctx.callback(|v| Msg::Scheduling(Action::PoolPermanent(v))),
+                                    ),
+                                ]),
                             ),
                         ]),
                 ),
@@ -2377,7 +2957,8 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                             "生成检测：会产生少量用量",
                             {
                                 let probe_id = probe_id.clone();
-                                move || Action::Check(probe_id.clone())
+                                let probe_effort = r.effort.clone();
+                                move || Action::Check(probe_id.clone(), probe_effort.clone())
                             },
                             ctx,
                         ),
@@ -2458,7 +3039,16 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                 .iter()
                 .find(|r| r.route_id == p.route_id)
                 .map_or(p.route_id.as_str(), |r| r.model.as_str());
-            let left = p.expires_at.saturating_sub(model::now_ms()) / 60000;
+            let lease = if p.is_permanent() {
+                "永久".to_owned()
+            } else {
+                let left = p.expires_at.saturating_sub(model::now_ms()) / 60000;
+                if left == 0 {
+                    "已到期".into()
+                } else {
+                    format!("剩余 {left} 分钟")
+                }
+            };
             let id = p.route_id.clone();
             pool_rows.push(table_row(
                 theme,
@@ -2467,15 +3057,7 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                     tcell(
                         0,
                         TextBlock::new()
-                            .text(format!(
-                                "{} · {name} · {}",
-                                i + 1,
-                                if left == 0 {
-                                    "已到期".into()
-                                } else {
-                                    format!("剩余 {left} 分钟")
-                                }
-                            ))
+                            .text(format!("{} · {name} · {lease}", i + 1))
                             .text_wrapping(TextWrapping::Wrap),
                     ),
                     tcell(
@@ -3150,21 +3732,11 @@ fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                     )),
             );
         }
-        blocks.push(w::ruled_row(
-            theme,
-            label_actions(
-                "Luna 监工".into(),
-                vec![crate::pages::switch(
-                    theme,
-                    state
-                        .workflow()
-                        .map_or(state.probe_supervision, |w| w.luna_supervision),
-                    ctx.callback(|v| Msg::Scheduling(Action::Supervision(v))),
-                )],
-            ),
-        ));
+        // The supervision switch itself moved into the Codex mother node's
+        // context menu — it reads as the mother node's own behaviour there,
+        // not an unrelated page-level option.
         blocks.push(secondary(
-            "开启时需有同一工作流的在线监工；关闭仍保留预算、模型池和恢复保护。",
+            "Luna 监工随母节点控制：右键 Codex 母节点「Luna 监工」开关；开启需同一工作流的在线监工，关闭仍保留预算、模型池和恢复保护。",
         ));
         blocks.push(section(
             theme,
@@ -3210,6 +3782,27 @@ fn inspector(state: &State, theme: &Theme, ctx: &ViewContext<Shell>) -> View {
                 .into(),
         );
         blocks.push(line("节点名称", n.title.clone(), Action::NodeTitle, ctx));
+        if n.is_model_backed() {
+            blocks.push(
+                TextBlock::new()
+                    .text(format!(
+                        "思考程度：{}",
+                        if n.effort.is_empty() {
+                            "未设定（检测与运行前必须选择，右键节点可快速设定）"
+                        } else {
+                            &n.effort
+                        }
+                    ))
+                    .foreground(if n.effort.is_empty() {
+                        theme.warn
+                    } else {
+                        theme.ok
+                    })
+                    .text_wrapping(TextWrapping::Wrap)
+                    .max_width(280.0)
+                    .into(),
+            );
+        }
         blocks.push(line(
             "分类标签（逗号分隔）",
             n.tags.join(", "),
@@ -3405,7 +3998,10 @@ fn refusal_text(code: &str) -> Option<&'static str> {
             "定向模式的模型池已全部到期——请续期模型池（右键节点或来源页），然后保存修改"
         }
         "luna_supervisor_required" => {
-            "需要同一工作流的在线 Luna 监工——请启动监工，或在工作流设置中关闭 Luna 监工"
+            "需要同一工作流的在线 Luna 监工——请启动监工，或右键 Codex 母节点关闭 Luna 监工"
+        }
+        "effort_not_set" => {
+            "有模型节点未设定思考程度——请右键节点「思考程度」选择或自定义，保存后再检测或运行"
         }
         "external_interface_disabled" => "外部协同接口已关闭——请在「设置」中开启外部接口",
         "external_interface_settings_invalid" => {
@@ -3471,9 +4067,23 @@ fn check_feedback(
     let retry = check["retry_after_s"]
         .as_u64()
         .map_or_else(String::new, |s| format!("，约 {s} 秒后可重试"));
+    // The coordinator's bounded provider answer: the classifier's code alone
+    // once hid the real cause (a CLI protocol break read as an outage).
+    let detail = check["detail"]
+        .as_str()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            let bounded: String = d.chars().take(120).collect();
+            format!("（{bounded}）")
+        })
+        .unwrap_or_default();
     (
         InfoBarSeverity::Error,
-        format!("「{title}」检测失败：{}{retry}。", reason(&code("code"))),
+        format!(
+            "「{title}」检测失败：{}{retry}{detail}。",
+            reason(&code("code"))
+        ),
     )
 }
 
@@ -4187,6 +4797,10 @@ mod gesture_tests {
         state.dirty = true;
         assert!(state.run_disabled_reason().unwrap().contains("保存"));
         state.dirty = false;
+        // The effort gate sits before the Luna gate: an unset level is the
+        // first thing a production run must state explicitly.
+        assert!(state.run_disabled_reason().unwrap().contains("思考程度"));
+        state.draft.workflows[0].nodes[0].effort = "high".into();
         assert!(state.run_disabled_reason().unwrap().contains("Luna"));
         state.draft.workflows[0].luna_supervision = false;
         assert!(state.run_disabled_reason().is_none());
@@ -4247,6 +4861,43 @@ mod gesture_tests {
         );
         assert_eq!(skipped.0, windows_reactor::InfoBarSeverity::Warning);
         assert!(skipped.1.contains("预算"));
+    }
+
+    #[test]
+    fn check_failure_shows_the_bounded_provider_detail() {
+        use super::check_feedback;
+        use serde_json::json;
+        let failed = check_feedback(
+            "A",
+            Some(&json!({
+                "checked": true, "success": false, "code": "provider_request_failed",
+                "detail": "ModelProtocolError: Reasoning level is required for p/m"
+            })),
+            None,
+        );
+        assert_eq!(failed.0, windows_reactor::InfoBarSeverity::Error);
+        assert!(
+            failed.1.contains("Reasoning level is required"),
+            "the raw provider answer must reach the bar: {failed:?}"
+        );
+        // Absent or empty detail stays silent instead of dangling punctuation.
+        let bare = check_feedback(
+            "A",
+            Some(&json!({"checked": true, "success": false, "code": "timeout"})),
+            None,
+        );
+        assert!(bare.1.ends_with("。"), "{bare:?}");
+    }
+
+    #[test]
+    fn effort_not_set_refusal_reads_as_canvas_guidance() {
+        use super::{readable_error, refusal_text};
+        assert!(refusal_text("effort_not_set").is_some());
+        let message = readable_error("effort_not_set: node-3");
+        assert!(
+            message.contains("思考程度") && message.contains("（effort_not_set）"),
+            "{message}"
+        );
     }
 
     #[test]

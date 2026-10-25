@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+import copy
 import sqlite3
 import sys
 import tempfile
@@ -619,6 +620,108 @@ class RouterTests(unittest.TestCase):
         self.assertTrue(result["checked"], result)
         self.assertTrue(result["success"], result)
 
+    def test_manual_recheck_applies_the_node_effort_override(self):
+        r = route()
+        seen = []
+        def adapter(route_arg, *a):
+            seen.append(route_arg.effort)
+            return response("GTT_RECOVERY_OK")
+        service = self.service([r], adapter)
+        self.make_due(service, r)
+        result = service.recovery.recheck(r.id, supervision_required=False, effort="high")
+        self.assertTrue(result["success"], result)
+        # The adapter call carries the node's chosen level; the catalog route
+        # (and every pool/gate decision keyed on it) is untouched.
+        self.assertEqual(seen, ["high"])
+        self.assertEqual(service.catalog.routes[0].effort, "")
+
+    def test_failed_check_returns_the_bounded_provider_message(self):
+        r = route()
+        def adapter(*a):
+            raise WorkerFailure("provider_request_failed", retry_after_s=0,
+                                details={"provider_message": "ModelProtocolError: no level for p/m"})
+        service = self.service([r], adapter)
+        self.make_due(service, r)
+        result = service.recovery.recheck(r.id, supervision_required=False)
+        self.assertTrue(result["checked"], result)
+        self.assertFalse(result["success"], result)
+        self.assertEqual(result["code"], "provider_request_failed")
+        self.assertIn("no level for p/m", result["detail"])
+
+    def test_classification_flags_reasoning_level_contract_breaks(self):
+        failure = classify_error({"code": -32603, "data": {"name": "ModelProtocolError",
+                                                           "message": "Reasoning level is required for p/m"}})
+        self.assertEqual(failure.code, "reasoning_level_required")
+        self.assertEqual(failure.scope, "source")
+        self.assertIn("Reasoning level is required", failure.details["provider_message"])
+        # Unknown failures keep their raw answer too — the code alone read as a
+        # provider outage for weeks while the CLI was naming the real problem.
+        generic = classify_error({"data": {"name": "AiSdkModelAdapterError", "message": "Provider rejected the model request"}})
+        self.assertEqual(generic.code, "provider_request_failed")
+        self.assertIn("Provider rejected", generic.details["provider_message"])
+
+    def test_zcode_retries_once_with_the_default_reasoning_level(self):
+        from gtt_router import adapters as adapters_module
+        from gtt_router.models import Task as ModelTask
+        r = Route(source="zcode", provider="p", model="m", effort="", adapter="zcode_rpc",
+                  runtime={"builtin_config": "b", "provider_config": "c", "command": ["cmd"]})
+        sent = []
+        class FakeChannel:
+            def __init__(self, command, context, env):
+                self.answers = [
+                    {"id": "generate", "error": {"code": -32603, "data": {"name": "ModelProtocolError",
+                                                                          "message": "Reasoning level is required for p/m"}}},
+                    {"id": "generate", "result": {"selection": {"providerId": "p", "modelId": "m",
+                                                                "options": {"reasoningLevel": adapters_module.ZCODE_DEFAULT_EFFORT}},
+                                                  "text": "ok", "usage": {"total_tokens": 7}}},
+                ]
+            def send(self, message):
+                sent.append(message["params"]["selection"])
+            def read(self):
+                return self.answers.pop(0)
+            def try_send(self, message):
+                pass
+            def close(self):
+                pass
+        task = ModelTask(kind="extract", prompt="bounded", max_output_tokens=512)
+        context = ExecutionContext(threading.Event(), time.monotonic() + 10, self.root / "zcode-probe")
+        with patch.object(adapters_module, "ProcessChannel", FakeChannel):
+            raw = adapters_module.zcode(r, "bounded", task, context)
+        self.assertEqual(raw["text"], "ok")
+        self.assertEqual(len(sent), 2)
+        self.assertNotIn("options", sent[0])
+        self.assertEqual(sent[1]["options"]["reasoningLevel"], adapters_module.ZCODE_DEFAULT_EFFORT)
+
+    def test_graph_requires_node_effort_before_production(self):
+        from gtt_router.scheduling import graph
+        node = {"id": "n1", "title": "n1", "route_id": "r", "node_type": "model", "x": 1, "y": 1,
+                "task": {"kind": "extract", "prompt": "bounded"}}
+        base = {"id": "w", "name": "w", "nodes": [dict(node)], "edges": []}
+        with self.assertRaises(ValueError) as error:
+            graph(copy.deepcopy(base))
+        self.assertIn("effort_not_set", str(error.exception))
+        # Drafts (settings save) stay tolerant: the level is chosen per node
+        # from the canvas before the workflow ever runs.
+        draft = graph(copy.deepcopy(base), allow_draft=True)
+        self.assertEqual(draft["nodes"][0]["effort"], "")
+        production = graph(copy.deepcopy(base) | {"nodes": [dict(node, effort="high")]})
+        self.assertEqual(production["nodes"][0]["effort"], "high")
+        # Local nodes never need one.
+        local = graph(copy.deepcopy(base) | {"nodes": [dict(node, node_type="output", route_id="", effort="")]})
+        self.assertEqual(local["nodes"][0]["node_type"], "output")
+
+    def test_effort_presets_are_a_bounded_deduped_list(self):
+        from gtt_router.scheduling import validate
+        settings = validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [],
+                             "effort_presets": ["ultra", "ultra", "turbo"]})
+        self.assertEqual(settings["effort_presets"], ["ultra", "turbo"])
+        with self.assertRaises(ValueError):
+            validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [],
+                      "effort_presets": [""]})
+        with self.assertRaises(ValueError):
+            validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [],
+                      "effort_presets": [f"level{i}" for i in range(17)]})
+
     def test_model_list_or_wrong_probe_answer_does_not_restore_route(self):
         r = route()
         service = self.service([r], lambda *a: response("available models: m"))
@@ -667,6 +770,109 @@ class RouterTests(unittest.TestCase):
         self.make_due(service, r)
         service.limits["source_parallel"] = {r.source: 0}
         self.assertEqual(service.recovery.tick()["reason"], "no_due_route")
+
+
+    def test_validate_accepts_permanent_pool_expiry(self):
+        from gtt_router.scheduling import PERMANENT_POOL_EXPIRY, validate
+        settings = validate({"enabled": True, "mode": "directed", "sources": {}, "pool": [
+            {"route_id": "r", "expires_at": PERMANENT_POOL_EXPIRY, "tags": ["always"]}], "workflows": [], "effort_presets": []})
+        self.assertEqual(settings["pool"][0]["expires_at"], PERMANENT_POOL_EXPIRY)
+        # The sentinel is exactly the accepted upper bound: one beyond it stays invalid.
+        with self.assertRaises(ValueError):
+            validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [
+                {"route_id": "r", "expires_at": PERMANENT_POOL_EXPIRY + 1, "tags": []}], "workflows": [], "effort_presets": []})
+
+    def test_permanent_pool_entry_never_expires_in_route_reason(self):
+        from gtt_router.scheduling import PERMANENT_POOL_EXPIRY, route_reason, validate
+        member = route()
+        value = validate({"enabled": True, "mode": "directed", "sources": {}, "pool": [
+            {"route_id": member.id, "expires_at": PERMANENT_POOL_EXPIRY, "tags": []}], "workflows": [], "effort_presets": []})
+        # Pure comparison, no arithmetic on pool expiry: the sentinel stays live forever.
+        self.assertIsNone(route_reason(value, member))
+        expired = validate({"enabled": True, "mode": "directed", "sources": {}, "pool": [
+            {"route_id": member.id, "expires_at": 1, "tags": []}], "workflows": [], "effort_presets": []})
+        self.assertEqual(route_reason(expired, member), "directed_pool_expired")
+
+    def test_permanent_pool_does_not_block_directed_dispatch_gate(self):
+        from gtt_router.controls import DispatchBlocked
+        from gtt_router.scheduling import PERMANENT_POOL_EXPIRY
+        member = route()
+        service = self.service([member], lambda *a: response("ok"))
+
+        def settings_file(expires_at):
+            return json.dumps({"enabled": True, "mode": "directed", "sources": {}, "pool": [
+                {"route_id": member.id, "expires_at": expires_at, "tags": []}],
+                "workflows": [], "effort_presets": []})
+
+        (service.state_dir / "scheduling.json").write_text(settings_file(PERMANENT_POOL_EXPIRY), encoding="utf-8")
+        # A permanent lease must not raise directed_pool_expired.
+        service.require_scheduling()
+        (service.state_dir / "scheduling.json").write_text(settings_file(1), encoding="utf-8")
+        with self.assertRaises(DispatchBlocked) as error:
+            service.require_scheduling()
+        self.assertEqual(error.exception.code, "directed_pool_expired")
+
+    def test_workflow_templates_differentiate_budgets_within_limits(self):
+        from gtt_router.profiles import ABS_LIMITS, DEFAULT_LIMITS
+        from gtt_router.scheduling import graph
+        templates = json.loads((Path(__file__).resolve().parents[1] / "workflow-templates.json").read_text(encoding="utf-8"))
+        self.assertTrue(templates)
+        parsed = {}
+        for template in templates:
+            # The UI applies the template task verbatim onto a node; mirror the
+            # scheduling.graph() validation it goes through when saved.
+            graph({"id": "tpl-" + template["id"], "name": "template", "nodes": [
+                {"id": "n1", "node_type": template["node_type"], "role": template["role"],
+                 "tags": template["tags"], "task": template["task"]}], "edges": []}, allow_draft=True)
+            for limits in (ABS_LIMITS, DEFAULT_LIMITS):
+                task = Task.parse({"kind": "extract", "prompt": "Complete the supplied material.", **template["task"]},
+                                  runtime_limits=limits)
+                self.assertLessEqual(task.deadline_s, task.hard_deadline_s, template["id"])
+            parsed[template["id"]] = Task.parse(
+                {"kind": "extract", "prompt": "Complete the supplied material.", **template["task"]},
+                runtime_limits=DEFAULT_LIMITS)
+        heavy, light = parsed["research"], parsed["extract"]
+        # Heavy research keeps a strictly larger envelope and longer windows
+        # than light extraction, so roles stay distinguishable on the canvas.
+        self.assertGreater(heavy.max_output_tokens, light.max_output_tokens)
+        self.assertGreater(heavy.token_budget, light.token_budget)
+        self.assertGreater(heavy.deadline_s, light.deadline_s)
+        self.assertGreater(heavy.hard_deadline_s, light.hard_deadline_s)
+        self.assertGreater(parsed["review"].token_budget, light.token_budget)
+        self.assertGreater(parsed["review"].deadline_s, light.deadline_s)
+
+    def test_prompts_disclose_the_effective_output_budget(self):
+        from gtt_router.service import output_budget_note
+        seen = []
+        def adapter(r, prompt, task, ctx):
+            seen.append(prompt)
+            return response()
+        service = self.service([route()], adapter)
+        data = {"kind": "extract", "prompt": "bounded", "max_output_tokens": 2048, "token_budget": 12000}
+        job = service.submit(dict(data), _supervision_required=False)
+        self.wait(service, job["job_id"])
+        self.assertEqual(len(seen), 1)
+        note = output_budget_note(2048)
+        self.assertIn("2048 tokens", note)
+        self.assertNotIn("报告上限", note)
+        # The disclosure is a suffix appended after the whole user payload,
+        # never inside the cacheable prefix.
+        self.assertLess(seen[0].index('"web_tool_budget"'), seen[0].index("输出预算"))
+        self.assertTrue(seen[0].endswith(note), seen[0][-200:])
+        twin = service.submit(dict(data), _supervision_required=False)
+        self.wait(service, twin["job_id"])
+        self.assertEqual(len(seen), 2)
+        # The same budget twice injects byte-identical text (prompt-cache friendly).
+        self.assertTrue(seen[1].endswith(note), seen[1][-200:])
+        self.assertEqual(seen[0][-len(note):], seen[1][-len(note):])
+        custom = service.submit(dict(data, report_max_chars=60000), _supervision_required=False)
+        self.wait(service, custom["job_id"])
+        self.assertEqual(len(seen), 3)
+        self.assertIn("2048 tokens", seen[2])
+        self.assertIn("报告上限 60000 字符", seen[2])
+        self.assertEqual(output_budget_note(2048), output_budget_note(2048))
+        self.assertNotEqual(output_budget_note(2048), output_budget_note(4096))
+        self.assertIn("报告上限 60000 字符", output_budget_note(2048, 60000))
 
 
 if __name__ == "__main__":

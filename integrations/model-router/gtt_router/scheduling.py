@@ -14,10 +14,20 @@ from .controls import DispatchBlocked
 from .models import Task, now_ms, reject_secrets
 
 FILE_NAME = "scheduling.json"
-DEFAULT = {"revision": 0, "enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [], "call_profile": {"preset":"inherit"}}
+DEFAULT = {"revision": 0, "enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [], "call_profile": {"preset":"inherit"},
+           "effort_presets": []}
+# Reasoning effort a production node must state explicitly before its route is
+# checked or dispatched: newer native CLIs reject level-less selections, and a
+# silent catalog default would hide that choice from the person paying for it.
+MAX_EFFORT_PRESETS = 16
+EFFORT_PRESET_LIMIT = 32
 TERMINAL = {"succeeded", "failed", "blocked", "unknown", "cancelled", "interrupted"}
 INFORMATION_PROMPT = "\n证据不足时报告 information_requests:[{question,reason}]。补充已有请求时，仅用上下文提供的准确 ID 返回 information_support:[{request_id,summary,evidence}]；每个问题分别绑定，不得将缺失证据视为已解决。"
 MODEL_TYPES = {"model", "operator", "reviewer"}
+# Permanent-lease marker for the directed model pool: a pool row whose
+# expires_at equals this sentinel never expires (the UI sends exactly this
+# value; it is also the upper bound accepted by validate()).
+PERMANENT_POOL_EXPIRY = 2**53 - 1
 
 
 def controlled(definition):
@@ -73,7 +83,7 @@ def graph(value, *, allow_draft=False):
         raise ValueError("Workflow exceeds the 256-node / 4096-edge protocol envelope")
     ids = set()
     for node in nodes:
-        if not isinstance(node, dict) or set(node) - {"id", "title", "route_id", "tags", "x", "y", "task", "node_type", "role", "fallback_routes"}:
+        if not isinstance(node, dict) or set(node) - {"id", "title", "route_id", "tags", "x", "y", "task", "node_type", "role", "fallback_routes", "effort"}:
             raise ValueError("Invalid workflow node fields")
         ident = text(node.get("id"), "node id")
         if ident in ids:
@@ -85,6 +95,9 @@ def graph(value, *, allow_draft=False):
         fallbacks=node.get("fallback_routes",[])
         if not isinstance(fallbacks,list) or len(fallbacks)>8:raise ValueError("At most eight explicit fallback routes per node")
         fallbacks=list(dict.fromkeys(text(r,"fallback route") for r in fallbacks))
+        effort = text(node.get("effort", ""), "node effort", EFFORT_PRESET_LIMIT, empty=True)
+        if not allow_draft and node_type in MODEL_TYPES and not effort:
+            raise ValueError("effort_not_set: " + ident)
         task = node.get("task", {})
         allowed = {"kind", "prompt", "needs_web", "min_quality", "deadline_s", "hard_deadline_s", "ttft_s", "idle_s",
                    "stall_grace_s", "timeout_mode", "max_output_tokens", "output_mode", "token_budget", "report_max_chars", "queue_wait_s", "max_attempts", "allow_fallback", "fanout", "verify"}
@@ -105,7 +118,7 @@ def graph(value, *, allow_draft=False):
         result["nodes"].append({"id": ident, "title": text(node.get("title", ident), "node title", 100),
             "route_id": text(node.get("route_id", ""), "route id", empty=allow_draft or node_type not in MODEL_TYPES),
             "node_type": node_type, "role": text(node.get("role", ""), "node role", ABS_LIMITS["max_node_role_chars"], empty=True),
-            "fallback_routes":fallbacks,
+            "fallback_routes":fallbacks, "effort": effort,
             "tags": labels(node.get("tags", [])), **pos,
             "task": {"kind": parsed.kind, "prompt": parsed.prompt, **copy.deepcopy(task)}})
     seen = set()
@@ -197,13 +210,24 @@ def validate(value):
         if ident in seen:
             raise ValueError("Duplicate pool route")
         seen.add(ident)
-        pool.append({"route_id": ident, "expires_at": integer(row.get("expires_at"), "pool expiry", 1, 2**53 - 1), "tags": labels(row.get("tags", []))})
+        # The upper bound admits PERMANENT_POOL_EXPIRY on purpose: that sentinel
+        # is the permanent-lease marker and stays a legal pool expiry.
+        pool.append({"route_id": ident, "expires_at": integer(row.get("expires_at"), "pool expiry", 1, PERMANENT_POOL_EXPIRY), "tags": labels(row.get("tags", []))})
     result["pool"] = pool
     if not isinstance(result["workflows"], list) or len(result["workflows"]) > 16:
         raise ValueError("At most 16 workflows may be stored")
     result["workflows"] = [graph(v, allow_draft=True) for v in result["workflows"]]
     if len({g["id"] for g in result["workflows"]}) != len(result["workflows"]):
         raise ValueError("Duplicate workflow id")
+    if not isinstance(result["effort_presets"], list) or len(result["effort_presets"]) > MAX_EFFORT_PRESETS:
+        raise ValueError("Effort presets exceed the bounded list")
+    presets, seen_efforts = [], set()
+    for entry in result["effort_presets"]:
+        value = text(entry, "effort preset", EFFORT_PRESET_LIMIT)
+        if value not in seen_efforts:
+            seen_efforts.add(value)
+            presets.append(value)
+    result["effort_presets"] = presets
     return result
 
 
@@ -243,6 +267,8 @@ def route_reason(value, route):
     if value["sources"].get(route.source) is False:
         return "source_dispatch_disabled"
     if value["mode"] == "directed":
+        # Comparison only, no arithmetic: a PERMANENT_POOL_EXPIRY row is always
+        # greater than now_ms(), so a permanent entry keeps the pool live.
         live = [r for r in value["pool"] if r["expires_at"] > now_ms()]
         if not live:
             return "directed_pool_expired" if value["pool"] else "directed_pool_empty"
@@ -326,7 +352,7 @@ class Scheduling:
                 node["information_requests"] = [{**q, "question": q["question"][:300], "reason": q["reason"][:300]} for q in requests[:8]]
         return result
 
-    def control(self, action="get", value=None, expected_revision=None, route_id=None, workflow_id="default", luna_supervision=True):
+    def control(self, action="get", value=None, expected_revision=None, route_id=None, workflow_id="default", luna_supervision=True, effort=None):
         if not isinstance(luna_supervision, bool):
             raise ValueError("luna_supervision must be a boolean")
         if action == "save":
@@ -359,7 +385,9 @@ class Scheduling:
         if action == "refresh":
             self.service.catalog.refresh(force=True)
         if action == "check":
-            check = self.service.recovery.recheck(text(route_id, "route id"), workflow_id, supervision_required=luna_supervision)
+            if effort is not None and (not isinstance(effort, str) or not effort or len(effort) > EFFORT_PRESET_LIMIT):
+                raise ValueError("effort must be a bounded reasoning level")
+            check = self.service.recovery.recheck(text(route_id, "route id"), workflow_id, supervision_required=luna_supervision, effort=effort)
         value = settings(self.service.store)
         # A plain get does not launch native discovery or a generation probe.
         routes = []
@@ -418,7 +446,8 @@ class Scheduling:
         definition = graph(definition)
         self._check_limits(definition)
         return {"workflow": definition, "nodes": [{"id": n["id"], "plan": self.service.plan({**n["task"],
-            "preferred_route": n["route_id"], "allowed_routes":[n["route_id"],*n["fallback_routes"]],"workflow_id": workflow_id})
+            "preferred_route": n["route_id"], "allowed_routes":[n["route_id"],*n["fallback_routes"]],
+            "route_effort": n["effort"], "workflow_id": workflow_id})
             if n["node_type"] in MODEL_TYPES else {"local_node": n["node_type"], "generates_content": False,
                 "caller_required": n["node_type"] == "codex"}} for n in definition["nodes"]],
             "required_features": ["operator_workflow_v1", "feedback_edges_v1"] if controlled(definition) else []}
@@ -603,6 +632,7 @@ class Scheduling:
                         task_data = {**spec["task"], "prompt": "职责：" + spec["role"] + "\n" + spec["task"]["prompt"] + INFORMATION_PROMPT,
                             "context": context, "preferred_route": spec["route_id"],
                             "allowed_routes": [spec["route_id"], *spec["fallback_routes"]], "workflow_id": run["workflow_id"],
+                            "route_effort": spec["effort"],
                             "work_key": "visual:" + run_id + ":" + spec["id"]}
                         try:
                             budget = self.service.parse_task(task_data).token_budget

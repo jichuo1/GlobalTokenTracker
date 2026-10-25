@@ -58,7 +58,7 @@ def dispatch_management(service, method, params):
         return historical[method](**(params or {}))
     if method != "router_scheduling":
         raise ValueError("Unknown local management method")
-    params = _group_args(params or {}, {"action", "value", "expected_revision", "route_id", "workflow_id", "luna_supervision"}, set())
+    params = _group_args(params or {}, {"action", "value", "expected_revision", "route_id", "workflow_id", "luna_supervision", "effort"}, set())
     return service.scheduling.control(**params)
 
 
@@ -83,9 +83,9 @@ def dispatch(service, method, params):
         target = service.scheduling.cancel if method.endswith("cancel") else service.scheduling.status
         return target(**params)
     if method == "router_recheck":
-        if "route_id" not in params or set(params) - {"route_id", "workflow_id"}:
+        if "route_id" not in params or set(params) - {"route_id", "workflow_id", "effort"}:
             raise ValueError("router_recheck requires route_id and optional workflow_id")
-        return service.recovery.recheck(params["route_id"], params.get("workflow_id", "default"))
+        return service.recovery.recheck(params["route_id"], params.get("workflow_id", "default"), effort=params.get("effort"))
     if method == "router_preferences":
         _group_args(params, {"action", "scope_id", "preferences", "ttl_s"}, {"action"})
         return service.preferences(**params)

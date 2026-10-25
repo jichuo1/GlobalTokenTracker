@@ -133,6 +133,9 @@ class Task:
     queue_wait_s: float = 120
     report_max_chars: int = DEFAULT_REPORT_CHARS
     allowed_routes: list | None = None
+    # Node-level reasoning effort override (scheduling graphs): the route keeps
+    # its catalog identity for pool/gating, the adapter call uses this level.
+    route_effort: str = ""
 
     @classmethod
     def parse(cls, data, max_context_chars=64000, *, runtime_limits=None):
@@ -227,7 +230,7 @@ class Task:
             raise ValueError("focus_urls must contain at most four public web URLs")
         if not isinstance(task.focus_terms, list) or len(task.focus_terms) > 8 or any(not isinstance(t, str) or not t or len(t) > 64 for t in task.focus_terms):
             raise ValueError("focus_terms must be a bounded keyword list")
-        for key in ["base_revision", "context_label", "workflow_id", "work_key"]:
+        for key in ["base_revision", "context_label", "workflow_id", "work_key", "route_effort"]:
             if not isinstance(getattr(task, key), str) or len(getattr(task, key)) > 300:
                 raise ValueError(f"{key} must be a bounded string")
         if task.preferred_route is not None and not isinstance(task.preferred_route, str):

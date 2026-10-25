@@ -74,6 +74,20 @@ def make_prompt(task, worker_index=0, verifier_context=None):
             "The payload follows as JSON:\n" + json.dumps(payload, ensure_ascii=False))
 
 
+def output_budget_note(effective_output_tokens, report_max_chars=DEFAULT_REPORT_CHARS):
+    """Byte-stable suffix telling the model its output envelope up front.
+
+    The prompt is assembled before route admission, so the effective
+    per-attempt ceiling only exists at the adapter call; appending here keeps
+    the user-payload prefix byte-identical for the same budget (prompt-cache
+    friendly). The adapters' hard truncation safety net stays unchanged.
+    """
+    note = "\n输出预算：本次输出上限 " + str(int(effective_output_tokens)) + " tokens"
+    if report_max_chars != DEFAULT_REPORT_CHARS:
+        note += "、报告上限 " + str(int(report_max_chars)) + " 字符"
+    return note + "。请在预算内一次输出完整 JSON 报告，不要写超后被截断。\n"
+
+
 def reported_tokens(usage):
     return total_tokens(usage)
 
@@ -300,6 +314,8 @@ class RouterService:
         from .scheduling import settings, route_reason
         value = settings(self.store, selector_only=True)
         reason = route_reason(value, route) if route is not None else (None if value["enabled"] else "scheduling_disabled")
+        # Comparison only, no arithmetic: a PERMANENT_POOL_EXPIRY pool row is
+        # always > now_ms(), so a permanent lease never reads as expired.
         if reason is None and route is None and value["mode"] == "directed" and not any(r["expires_at"] > now_ms() for r in value["pool"]):
             reason = "directed_pool_expired" if value["pool"] else "directed_pool_empty"
         if reason:
@@ -751,12 +767,21 @@ class RouterService:
                 request_started = True
                 execution_route = route
                 options = getattr(task, "_native_options", {}).get(route.source, {})
-                if options or route.source in getattr(task, "_source_parallel", {}):
+                effort_override = getattr(task, "route_effort", "")
+                if options or route.source in getattr(task, "_source_parallel", {}) or effort_override:
                     execution_route = copy.copy(route)
                     execution_route.runtime = dict(route.runtime) | {"gtt_call_options": options}
                     execution_route.max_parallel = getattr(task, "_source_parallel", {}).get(route.source, route.max_parallel)
+                    if effort_override:
+                        # Node-level reasoning effort: pool membership and every
+                        # gate stay keyed on the catalog route identity; only the
+                        # adapter call carries the chosen level.
+                        execution_route.effort = effort_override
                 attempt["call_policy"] = {"limits": task._runtime_limits, "source_options": options}
-                raw = adapter(execution_route, prompt, execution_task, context)
+                # Disclose this attempt's real output envelope as a suffix; the
+                # number only exists after admission, never in the cached prefix.
+                raw = adapter(execution_route, prompt + output_budget_note(decision["effective_output_tokens"], task.report_max_chars),
+                              execution_task, context)
                 attempt.update({k: raw[k] for k in ("native_dedup_key", "native_backed") if k in raw})
                 if isinstance(raw.get("actual_selection"), dict):
                     attempt["actual_model"] = raw["actual_selection"].get("model", route.model)

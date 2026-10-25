@@ -11,7 +11,7 @@ from .models import now_ms
 from .usage import project_attempt
 
 REPEATED_CONNECTIVITY_ERRORS = {"timeout", "provider_request_failed", "adapter_error"}
-SOURCE_CONTRACT_ERRORS = {"native_protocol_mismatch", "native_configuration_error"}
+SOURCE_CONTRACT_ERRORS = {"native_protocol_mismatch", "native_configuration_error", "reasoning_level_required"}
 VERIFICATION_ERRORS = {"auth_failed", "quota_exhausted", "model_unavailable", *SOURCE_CONTRACT_ERRORS}
 
 

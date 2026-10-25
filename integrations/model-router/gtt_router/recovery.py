@@ -55,7 +55,7 @@ class RecoveryController:
     def _keys(self, route):
         return ["route:" + route.id, "provider:" + route.failure_domain, "source:" + route.source]
 
-    def recheck(self, route_id, workflow_id="default", *, supervision_required=True):
+    def recheck(self, route_id, workflow_id="default", *, supervision_required=True, effort=None):
         if not isinstance(route_id, str) or not route_id or len(route_id) > 200:
             raise ValueError("route_id must be a bounded route identity")
         # Explicit requests bypass old cooldowns and the hourly recovery probe
@@ -65,9 +65,13 @@ class RecoveryController:
             raise ValueError("workflow_id must be a bounded workflow identity")
         if not isinstance(supervision_required, bool):
             raise ValueError("supervision_required must be a boolean")
-        return self.tick(route_id=route_id, workflow_id=workflow_id, supervision_required=supervision_required)
+        # A node-level reasoning effort override: the route keeps its catalog
+        # identity for every gate, only the probe call carries the level.
+        if effort is not None and (not isinstance(effort, str) or not effort or len(effort) > 32):
+            raise ValueError("effort must be a bounded reasoning level")
+        return self.tick(route_id=route_id, workflow_id=workflow_id, supervision_required=supervision_required, effort=effort)
 
-    def tick(self, route_id=None, workflow_id=None, supervision_required=True):
+    def tick(self, route_id=None, workflow_id=None, supervision_required=True, effort=None):
         service = self.service
         profile = service.call_profile()
         with service.capacity:
@@ -157,6 +161,8 @@ class RecoveryController:
             started = True
             execution_route = copy.copy(route)
             execution_route.runtime = dict(route.runtime) | {"gtt_call_options":profile["source_options"].get(route.source,{})}
+            if effort:
+                execution_route.effort = effort
             raw = adapter(execution_route, prompt, task, context)
             from .service import reported_tokens
             measured = reported_tokens(raw.get("usage"))
@@ -194,7 +200,12 @@ class RecoveryController:
                 service.record_failure(route, failure)
             service.store.defer_probe(keys, delay, failed=True)
             record_probe(False, failure.code, charged)
-            return {"checked": True, "route_id": route.id, "success": False, "code": failure.code, "retry_after_s": delay}
+            # The classifier's code alone hides the actual provider answer
+            # (the zcode reasoningLevel contract break read as a provider
+            # outage for weeks); the bounded, redacted text comes along.
+            detail = failure.details.get("provider_message")
+            return {"checked": True, "route_id": route.id, "success": False, "code": failure.code, "retry_after_s": delay,
+                    **({"detail": str(detail)[:240]} if isinstance(detail, str) and detail else {})}
         except Exception:
             service.record_failure(route, WorkerFailure("adapter_error", retry_after_s=30))
             service.store.defer_probe(keys, 1800, failed=True)
