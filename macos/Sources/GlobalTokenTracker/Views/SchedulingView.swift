@@ -152,6 +152,10 @@ private struct ScheduleSettings: Codable {
     var callProfile: SchedulerJSON = .object(["preset": .string("inherit")])
 }
 
+/// Pool expiry meaning "never expires" — the same sentinel as core's
+/// PERMANENT_EXPIRES_AT and the coordinator's PERMANENT_POOL_EXPIRY (2^53 - 1).
+private let permanentLease: UInt64 = 9_007_199_254_740_991
+
 struct SchedulingView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ViewState private var settings = ScheduleSettings()
@@ -347,8 +351,14 @@ struct SchedulingView: View {
                         Text("\(index + 1)").monospacedDigit().foregroundStyle(.secondary).frame(minWidth: 20, alignment: .trailing)
                         Text(routes.first { $0.id == entry.id }?.model ?? entry.id).lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 8)
-                        Text(entry.expiresAt > now ? "剩余 \((entry.expiresAt - now) / 60000) 分钟" : "已到期")
+                        Text(entry.expiresAt == permanentLease ? "永久" : entry.expiresAt > now ? "剩余 \((entry.expiresAt - now) / 60000) 分钟" : "已到期")
                             .font(.caption).monospacedDigit().foregroundStyle(entry.expiresAt > now ? Color.secondary : Color.orange)
+                        Toggle("永久", isOn: Binding(get: { entry.expiresAt == permanentLease }, set: { on in
+                            if let i = settings.pool.firstIndex(where: { $0.id == entry.id }) {
+                                settings.pool[i].expiresAt = on ? permanentLease : now + UInt64(minutes) * 60000
+                                dirty = true
+                            }
+                        })).toggleStyle(.switch).controlSize(.mini).fixedSize().help("开启后此模型永不到期；关闭则按入池有效期重新计时")
                         ControlGroup {
                             Button { movePool(index, -1) } label: { Image(systemName: "chevron.up") }.disabled(index == 0).help("上移")
                             Button { movePool(index, 1) } label: { Image(systemName: "chevron.down") }.disabled(index == settings.pool.count - 1).help("下移")
@@ -928,7 +938,7 @@ struct SchedulingView: View {
         Binding(get: { settings.workflows[selected].nodes[index][keyPath: path] }, set: { v in mutate { $0.nodes[index][keyPath: path] = v } })
     }
     private func mutate(_ body: (inout ScheduleGraph) -> Void) { guard settings.workflows.indices.contains(selected) else { return }; body(&settings.workflows[selected]); dirty = true }
-    private func pool(_ id: String) { let expiry = now + UInt64(minutes) * 60000; if let i = settings.pool.firstIndex(where: { $0.id == id }) { settings.pool[i].expiresAt = expiry } else if settings.pool.count < 128 { settings.pool.append(SchedulePool(routeId: id, expiresAt: expiry)) }; dirty = true }
+    private func pool(_ id: String) { let expiry = now + UInt64(minutes) * 60000; if let i = settings.pool.firstIndex(where: { $0.id == id }) { if settings.pool[i].expiresAt != permanentLease { settings.pool[i].expiresAt = expiry } } else if settings.pool.count < 128 { settings.pool.append(SchedulePool(routeId: id, expiresAt: expiry)) }; dirty = true }
     private func movePool(_ i: Int, _ delta: Int) { let j = i + delta; if settings.pool.indices.contains(j) { settings.pool.swapAt(i, j); dirty = true } }
     private func moveNode(_ i: Int, _ delta: Int) { let j = i + delta; mutate { if $0.nodes.indices.contains(j) { $0.nodes.swapAt(i, j) } } }
     private func addCodex() {
