@@ -2134,3 +2134,25 @@
 - **测试**：Python 新增 6 项（graph 生产强制/草稿容忍、effort_presets 校验、recheck effort 覆盖进适配器、失败结果带 detail、classify_error 新码+原始文本、zcode 默认等级重试〔FakeChannel 补丁 ProcessChannel，断言两次 selection：首无 options、次带 high〕）全过；Rust 新增 4 项（core 永久租期、Node.effort serde 往返/旧数据默认空；UI 检测详情展示、effort_not_set 指引），更新 1 项既有（运行门控断言顺序）。
 - **验证**：`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警（修掉自查出的 2 处：表达式分号、if 折叠）；`cargo test --workspace --locked` 399 项通过、4 项既有 ignored。Python：py_compile 全部通过；`timeout 300 python -m unittest tests.test_router` Ran 71 tests，FAILED (failures=5, errors=25)——与基线（Ran 66, 同 5+25，luna_supervisor_required 等既有遗留）逐项一致，+11 全为新测试；tests_native_agents/observations/processes 37 项与基线同（1+2 既有）。zcode 重试与 effort 覆盖未对真实 CLI 做端到端实测（需重启共享守护进程并产生用量，待用户确认后验证）。
 - **并发边界**：两个并行子代理（S174 永久租期 Python、S175 模板/输出披露）与本轮 Rust/UI 轨道按文件分块，无重叠；Python 三方对 scheduling.py/service.py 的改动已逐块核对 git diff 归属，哨兵常量两侧值已交叉验证。未提交；正式协调器守护进程直接运行本仓库 router.py，改动需重启后生效（S173 先例：确认无受理记录后按 router.py call 拉起新进程）；独立仓库 D:/GTT-Model-Coordinator 同步清单需带上本轮全部 Python 改动。
+
+## S177 S174–S176 全套调度的本机安装交付（2026-10-25）
+
+- **提交**：c5efe0c（14 个文件，+1340/−234，含 S174/S175/S176 全部改动；commit-msg 钩子校验通过）。注：Mimosa 钩子在提交前未得到完整扫描结论（scanner_enobufs），按兼容策略放行，安全状态未宣称，待完整审计。
+- **构建**：`installer/package.ps1` → dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.91 MB，sha256 0e9384f9…c233e7d4，未签名——本机无 GTT_SIGN_* 配置，与历次交付一致）。
+- **安装前检查**：无未终止运行（jobs 全部终态）、近期无 dispatch；旧守护进程（PID 11784，09:54 启动）确认为旧代码（settings 无 effort_presets、节点无 effort）；GUI PID 20496 运行中（--minimized）。旧 UI（780ee92f…，与 S173 记录一致）/CLI/installed-build.json 备份于 target\diagnostics\preinstall-c5efe0c-20261025。
+- **安装**：结束 GUI 后 --quiet 安装，退出码 0、无 .gtt-new 残留；安装后 UI eee5e779…、CLI ad9746a4… 与 target\release 产物逐字节一致。installed-build.json 仍为上次 CI 构建出处记录（安装器不改写，同 S160 先例）。
+- **协调器重启**：旧守护进程直接结束后经 `router.py call`（客户端 ensure_running + 启动锁）拉起新守护进程 PID 24944：health 0.6.0 / contract 2；设置完整保留（directed、revision 14、模型池 11、工作流 1）；新 schema 生效（settings.effort_presets 出现、节点含 effort）。只读目录为空，执行一次只读重扫恢复 146 条路线（zcode 6 / antigravity 6 / opencode 111 / claude 3 / workbuddy 20，无发现错误；路线 effort 含 enable/high/low/max/medium/none/xhigh）。4 个既有 `router.py mcp` 子进程为各客户端持有、仍旧代码，随客户端重连自然替换，未强杀。
+- **GUI**：以 --minimized 重新拉起（PID 35060）。未发起真实生成检测（产生用量）；思考程度菜单/检测门控/永久租期开关/Luna 母节点开关的实际体验待用户在界面确认。
+
+## S178 调度响应与通信性能：批量健康快照、模板缓存、HTTP/1.1 keep-alive 与客户端连接池（2026-10-25）
+
+- **基线测量**（`target/diagnostics/perf-s178/`，curl×30 对真实守护进程 + sqlite 副本微基准）：`router_scheduling` get 端到端 mean 7.8ms / p50 7.6ms / p95 10.6ms；构成 = 传输 ~1.3ms（HTTP/1.0 每请求新建 TCP + 客户端每请求新建 ureq Agent）+ 处理 ~6.5ms，其中 438 次逐键 health SELECT（146 路线×3 键，health 表实际仅 ~94 行）占 4.39ms、模板 JSON 每请求重读重解析 0.12ms；workflow_status 轮询 1.8ms。
+- **优化 1（批量健康快照）**：`store.py` 抽出 `default_health(key)`（形状契约单点定义，`health()` 复用）并新增 `health_map()`——一次全表 SELECT 在锁内取整表快照；`scheduling.control()` 的路线循环改为快照查表 + 缺省回填。438 次 SELECT → 1 次，且整表单快照比逐键读取**一致性更强**（不再可能读到中途被并发修改的混合状态）。单键 `health()` 保留供恢复探测/服务内部使用，行为不变。
+- **优化 2（模板缓存）**：`scheduling.templates_payload()` 以 (mtime_ns, size) 戳缓存 workflow-templates.json（与 settings 同款模式），文件不变则返回同一对象；调用方只做序列化、无变更路径（settings() 的 deepcopy 是因为调用方会改草稿，此处只读）。
+- **优化 3（守护进程 keep-alive）**：daemon Handler `protocol_version = "HTTP/1.1"` + `timeout = 65`（空闲连接到期释放线程）。全部响应路径都经 `respond()` 且始终带 Content-Length（HTTP/1.1 唯一硬要求）；ThreadingHTTPServer 线程粒度=连接，GUI 客户端池化后仅持有 1–2 条常连接。
+- **优化 4（客户端连接池）**：core `pooled_agent()` 以 (端口, 令牌, 超时) 键控缓存 ureq Agent（OnceLock+Mutex 小池，上限 8；两处调用点超时 150s/10s 各占一池）。端点文件每次仍读取（守护进程重启→新端口→新池），**不做任何发送后重试**，歧义结果依旧原样上浮（保持既有"未知结果请先查询"语义）。
+- **实测对比**（同机同法复测）：UI 实际路径（keep-alive 连接）**mean 7.8ms→4.3ms（-45%），p95 10.6ms→5.4ms（-49%），min 6.9→3.0ms，且无离群尖峰**（逐连接复测的 p95 尖峰 24ms 为本机 TCP 连接抖动，keep-alive 路径完全消除）；守护进程单请求处理（逐连接测）p50 7.6→4.8ms。微基准：438 次 SELECT 4.39ms → 单次全表 0.1ms 级。
+- **取舍**：zcode 适配器每调用冷启动 node app-server（复现脚本观察 ~1s 级）未做进程池——收益集中在人触发的检测/派发首跳，而常驻进程池引入生命周期、超时与环境固化的正确性风险，本轮以"保证效果"为先不做；JSON 响应体缓存（settings 未变时整响应复用）因失效面大同样搁置。
+- **测试与验证**：Python 新增 2 项（health_map 快照与逐键读取逐字段一致 + control/get 经快照给出 last_error/verification_required；模板缓存同对象复用），`Ran 73 tests, FAILED (failures=5, errors=25)` 与基线逐项一致（30 项既有遗留）；`py_compile` 通过。Rust：`cargo fmt --check`、`cargo clippy --workspace --all-targets --locked -D warnings`（修掉自查的 type_complexity：PooledClient 类型别名）、`cargo test --workspace --locked` 全绿。
+- **交付**：守护进程已重启加载新 Python（PID 经 ensure_running 拉起；设置保留 revision 21/池 11，只读重扫恢复 147 条路线）；`package.ps1` 产出安装包 sha256 393fe16a…6d5a35，--quiet 安装退出码 0，安装后 UI df4e5c80… / CLI 04b2d0d7… 与产物逐字节一致，GUI 以 --minimized 重新拉起（PID 42152），旧版备份于 target\diagnostics\preinstall-s178-20261025。实测期间在真实设置中观察到操作员节点已带 effort=max（S176 功能在用）。
+- **未提交**：本轮与 S177 的文档/代码改动提交被 Mimosa 钩子拦截——四处定位经逐一核对均为既有代码且属误报性质（test_router.py:103 红队夹具假凭据 "very-private"、benchmarks.py:44 常量 URL+环境变量密钥、dispatch.py:246 与 store.py:54 的常量字符串 SQL 拼接、外部输入均参数化），非本轮引入；按钩子"只处理与候选代码直接相关的修复"的指引未做范围外重构，待用户决定（最小等价重构/完整审计/白名单）。

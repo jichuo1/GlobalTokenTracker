@@ -15,6 +15,14 @@ SOURCE_CONTRACT_ERRORS = {"native_protocol_mismatch", "native_configuration_erro
 VERIFICATION_ERRORS = {"auth_failed", "quota_exhausted", "model_unavailable", *SOURCE_CONTRACT_ERRORS}
 
 
+def default_health(key):
+    """Shape contract for a health row that has never been written."""
+    return {"key": key, "failures": 0, "successes": 0, "latency_ms": None, "cooldown_until": 0, "last_error": None, "tokens_ema": None,
+            "penalty": 0, "penalty_updated_at": 0, "failure_streak": 0, "next_probe_at": 0, "probe_failures": 0, "last_probe_at": 0,
+            "verification_required": 0, "input_chars_ema": None, "last_verified_at": 0,
+            "measured_tokens_ema": None, "measured_samples": 0, "measured_input_chars_ema": None}
+
+
 class StateStore:
     def __init__(self, path):
         path = Path(path)
@@ -209,10 +217,15 @@ class StateStore:
     def health(self, key):
         with self.lock:
             row = self.conn.execute("SELECT * FROM health WHERE key=?", (key,)).fetchone()
-        return dict(row) if row else {"key": key, "failures": 0, "successes": 0, "latency_ms": None, "cooldown_until": 0, "last_error": None, "tokens_ema": None,
-                                     "penalty": 0, "penalty_updated_at": 0, "failure_streak": 0, "next_probe_at": 0, "probe_failures": 0, "last_probe_at": 0,
-                                     "verification_required": 0, "input_chars_ema": None, "last_verified_at": 0,
-                                     "measured_tokens_ema": None, "measured_samples": 0, "measured_input_chars_ema": None}
+        return dict(row) if row else default_health(key)
+
+    def health_map(self):
+        """All health rows in one query. Readers that need every route's
+        state (the scheduling snapshot builds 3 keys per route) take one
+        lock-protected snapshot instead of hundreds of single-row SELECTs —
+        and a single snapshot is also more consistent than per-key reads."""
+        with self.lock:
+            return {row["key"]: dict(row) for row in self.conn.execute("SELECT * FROM health").fetchall()}
 
     def availability(self, key, half_life_s=1800):
         state = self.health(key)

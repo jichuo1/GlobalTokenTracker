@@ -841,12 +841,39 @@ fn local_client(timeout: Duration) -> Result<(u16, String, ureq::Agent)> {
         })
         .context("协调器认证元数据无效")?
         .to_owned();
+    let agent = pooled_agent(port, &token, timeout);
+    Ok((port, token, agent))
+}
+
+/// One shared connection pool per (endpoint, timeout): the UI polls every
+/// second, and building a fresh agent — therefore a fresh TCP connection —
+/// for every request paid the connection setup in each round-trip. Keyed by
+/// the endpoint identity, so a coordinator restart (new port and token) gets
+/// a brand-new pool; requests are never retried after a send either way, so
+/// an ambiguous outcome still surfaces instead of being replayed.
+type PooledClient = (u16, String, Duration, ureq::Agent);
+
+fn pooled_agent(port: u16, token: &str, timeout: Duration) -> ureq::Agent {
+    static POOL: std::sync::OnceLock<std::sync::Mutex<Vec<PooledClient>>> =
+        std::sync::OnceLock::new();
+    let pool = POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut guard = pool.lock().expect("coordinator client pool poisoned");
+    if let Some((_, _, _, agent)) = guard
+        .iter()
+        .find(|(p, t, d, _)| *p == port && t == token && *d == timeout)
+    {
+        return agent.clone();
+    }
     let agent = ureq::Agent::config_builder()
         .proxy(None)
         .timeout_global(Some(timeout))
         .build()
         .new_agent();
-    Ok((port, token, agent))
+    guard.push((port, token.to_owned(), timeout, agent.clone()));
+    // Two distinct call-site timeouts are expected; the cap only bounds a
+    // pathological loop of coordinator restarts.
+    guard.truncate(8);
+    agent
 }
 
 /// Call the versioned dispatch facade after proving that the resident service

@@ -722,6 +722,30 @@ class RouterTests(unittest.TestCase):
             validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [],
                       "effort_presets": [f"level{i}" for i in range(17)]})
 
+    def test_health_map_is_one_snapshot_matching_per_key_reads(self):
+        from gtt_router.store import default_health
+        r = route()
+        service = self.service([r], lambda *a: response())
+        service.store.failure("route:" + r.id, "auth_failed", 0)
+        service.store.failure("provider:" + r.failure_domain, "timeout", 0)
+        snapshot = service.store.health_map()
+        for key in ("route:" + r.id, "provider:" + r.failure_domain,
+                    "source:" + r.source, "route:not-recorded"):
+            per_key = service.store.health(key)
+            expected = snapshot.get(key, default_health(key))
+            self.assertEqual(expected, per_key, key)
+        # The batched snapshot is served to the scheduling response unchanged.
+        result = service.scheduling.control("get")
+        target = next(row for row in result["routes"] if row["route_id"] == r.id)
+        self.assertEqual(target["last_error"], "auth_failed")
+        self.assertEqual(target["connectivity"], "verification_required")
+
+    def test_templates_payload_is_stamped_not_reparsed(self):
+        from gtt_router.scheduling import templates_payload
+        first = templates_payload()
+        self.assertIs(templates_payload(), first, "an unchanged file must reuse the cached payload")
+        self.assertIsInstance(first, list)
+
     def test_model_list_or_wrong_probe_answer_does_not_restore_route(self):
         r = route()
         service = self.service([r], lambda *a: response("available models: m"))

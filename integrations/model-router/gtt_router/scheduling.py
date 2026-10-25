@@ -12,6 +12,7 @@ import uuid
 
 from .controls import DispatchBlocked
 from .models import Task, now_ms, reject_secrets
+from .store import default_health
 
 FILE_NAME = "scheduling.json"
 DEFAULT = {"revision": 0, "enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [], "call_profile": {"preset":"inherit"},
@@ -28,6 +29,23 @@ MODEL_TYPES = {"model", "operator", "reviewer"}
 # expires_at equals this sentinel never expires (the UI sends exactly this
 # value; it is also the upper bound accepted by validate()).
 PERMANENT_POOL_EXPIRY = 2**53 - 1
+
+# Repo-shipped workflow templates, cached by file stamp like settings(): a
+# scheduling get must not re-read and re-parse the file on every request.
+# The cached value is shared read-only; callers serialize it, none mutates.
+_templates_cache = None
+
+
+def templates_payload():
+    global _templates_cache
+    path = Path(__file__).parent.parent / "workflow-templates.json"
+    stat = path.stat()
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    if _templates_cache is not None and _templates_cache[0] == stamp:
+        return _templates_cache[1]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    _templates_cache = (stamp, payload)
+    return payload
 
 
 def controlled(definition):
@@ -390,11 +408,14 @@ class Scheduling:
             check = self.service.recovery.recheck(text(route_id, "route id"), workflow_id, supervision_required=luna_supervision, effort=effort)
         value = settings(self.service.store)
         # A plain get does not launch native discovery or a generation probe.
+        # One health snapshot serves the whole route table; per-key SELECTs
+        # (three per route) dominated this request's handler time.
+        health = self.service.store.health_map()
         routes = []
         for route in self.service.catalog.routes:
-            h = self.service.store.health("route:" + route.id)
-            p = self.service.store.health("provider:" + route.failure_domain)
-            s = self.service.store.health("source:" + route.source)
+            h = health.get("route:" + route.id) or default_health("route:" + route.id)
+            p = health.get("provider:" + route.failure_domain) or default_health("provider:" + route.failure_domain)
+            s = health.get("source:" + route.source) or default_health("source:" + route.source)
             verified = h.get("last_verified_at", 0)
             routes.append({"route_id": route.id, "source": route.source, "model": route.model, "effort": route.effort,
                 "output_limit": route.output_limit, "pricing": route.pricing, "capabilities": route.capabilities,
@@ -410,7 +431,7 @@ class Scheduling:
             "discovery_errors": getattr(self.service.catalog, "discovery_errors", []), "refreshed_at": self.service.catalog.refreshed_at,
             "supervisors": [{"workflow_id": a["workflow_id"], "id": a["id"]} for a in self.service._active_supervisors()],
             "runs": [{k: r[k] for k in ["id", "name", "workflow_id", "state", "tokens_used"]} for r in runs], "check": check,
-            "templates": json.loads((Path(__file__).parent.parent / "workflow-templates.json").read_text(encoding="utf-8")),
+            "templates": templates_payload(),
             "call_presets": presets(),
             "effective_profile": self.service.call_profile()}
 

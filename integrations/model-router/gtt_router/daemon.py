@@ -235,6 +235,14 @@ def serve(config_path):
     service = RouterService(config)
     token = secrets.token_urlsafe(32)
     class Handler(BaseHTTPRequestHandler):
+        # HTTP/1.1 keep-alive: the desktop client polls every second, and a
+        # fresh TCP connection per request paid the setup in every round-trip.
+        # Every response path goes through respond(), which always sets
+        # Content-Length — the one thing HTTP/1.1 requires.
+        protocol_version = "HTTP/1.1"
+        # Idle keep-alive connections release their thread after this.
+        timeout = 65
+
         def log_message(self, format, *args):
             pass
 
