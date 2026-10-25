@@ -2174,3 +2174,18 @@
 - **取舍**：画布点击后 TextBox 的焦点环/光标仍在（WinUI 无 ClearFocus，画布不可聚焦；加隐形焦点_sink 按钮会引入无标签可聚焦元素的无障碍问题）——实质问题（保存）已解决，视觉焦点属平台行为，未处理。macOS SwiftUI 的 TextField 失焦即提交绑定，无此问题。sync_editor 在 Press 时重建 JSON 编辑器文本为既有行为（选中新节点需同步），本改动保证有效内容先落盘再重建。
 - **测试与验证**：新增 `clicking_away_settles_waiting_fields_without_losing_work`（真实失焦回退无效数值草稿 / 画布按下不回退 / effort 草稿提交含 trim 与预设入列 / 超长草稿静默跳过 / JSON 有效应用无效跳过 / dirty 语义）。`cargo fmt --check`、`clippy --workspace --all-targets --locked -D warnings`、`cargo test --workspace --locked` 全绿（core 309、ui 60）。`cargo test -p windows-reactor` 的 lib test 目标为既有损坏（vendoring 缺 component_tests.rs，workspace 不含该目标，非本轮引入）。LostFocus 订阅的运行时实效未在真实 GUI 实测（槽位已实证核序、代码模式与在产事件一致，S173 滚轮事件先例），待装机确认。
 - **未安装**：需重装 GUI 生效（框架+UI 均在客户端）；守护进程无改动。
+
+## S181 S179–S180 客户端改动的本机安装交付（2026-10-25）
+
+- **提交**：S179=b75d9a1（模板套用整体替换 + 协调级母节点默认 + 全模板高级键），S180=c8625f5（TextBox LostFocus 框架事件 + 点击外部自动提交）。
+- **构建与安装**：`package.ps1` → dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.92 MB，sha256 b483c988…5dd34fa，未签名）；安装前确认无 in-flight 作业；旧 UI/CLI 备份于 target\diagnostics\preinstall-s179-s180-20261025；结束 GUI（PID 42152）后 --quiet 安装退出码 0、无 .gtt-new 残留；安装后 UI f9f978cc… / CLI 5cf70265… 与 target\release 产物逐字节一致；GUI 以 --minimized 重新拉起（PID 43088）。
+- **守护进程**：本轮（S179 数据 + S180 客户端）无需重启——S180 零 Python 改动；S179 的模板数据经 templates_payload() 的 mtime 戳缓存自动生效，装后只读核验：守护进程下发的 codex 模板已为协调级（max_output_tokens 65536 / ttft_s 600 / report_max_chars 1048576），routes 147、设置 revision 21 保持。
+- **待用户确认**：① 套用模板后节点高级参数是否整体随职责变化、新建 Codex 母节点是否自带协调级配置；② 输入框输入完毕点击外部（按钮/画布）字段是否自动保存、无效数值草稿点击按钮后是否回退退出等待态。
+
+## S182 永久租期改为限时模型池逐行开关（2026-10-25）
+
+- **问题**：来源页「有效期」下方的全局「永久租期（忽略分钟数）」开关右对齐时超出卡片边缘；而且它作用于“之后的入池/续期”，看不出哪些模型已经是永久租期。
+- **改动（Windows）**：移除全局开关和 `pool_permanent` 状态，筛选区恢复成两行。`Action::PoolPermanent(bool)` 改为 `Action::PoolLease(route_id, bool)`。限时模型池表格在「上移」前新增「永久」列，宽度 Pixel(84)，与来源表一样用右对齐 `right_cell` 放置 `pages::switch`，每行的开关轨道对齐且不越界。开启后租期写成 `PERMANENT_EXPIRES_AT`，行文字显示「永久」，永不到期；关闭后按「有效期」分钟数从当前时刻重新计时（`timed_expiry()`）。入池/续期遇到永久行时保持永久，只有该行自己的开关能关掉永久。节点菜单的提示改为「可在限时模型池中逐个设为永久」。
+- **改动（macOS）**：`SchedulingView` 的池行加 `.switch` 样式的 mini Toggle「永久」，语义与 Windows 一致，续期同样不降级永久行。未在本机编译（无 Swift 工具链），交由 CI 的 verify-branch 编译。
+- **验证**：新增测试 `pool_rows_switch_between_permanent_and_timed_leases`。`cargo clippy` 零问题，`cargo test --workspace` 404 通过、4 忽略。用调试版和只读数据副本截图：来源页搜索框与有效期框对齐，模型池「永久 / 上移 / 下移 / 移出」列对齐、无溢出。通过 UIA TogglePattern 打开第 1 行开关后，行文字从「已到期」变为「永久」，页面标记为未保存（未保存，数据副本不变）。
+- **未提交、未安装**。

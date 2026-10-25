@@ -120,8 +120,9 @@ pub enum Action {
     ApplyEffortDraft,
     /// Luna supervision lives with the Codex mother node, not the settings page.
     ToggleSupervision,
-    /// Permanent (never-expiring) pool lease for subsequent 入池/续期.
-    PoolPermanent(bool),
+    /// Switch one pool row between a permanent lease and a timed one (the
+    /// 有效期 minutes from now).
+    PoolLease(String, bool),
     Fit,
     CloseInspector,
     Acknowledge(bool),
@@ -288,8 +289,6 @@ pub struct State {
     effort_draft: String,
     /// Whether that input row is open.
     effort_input_open: bool,
-    /// Whether 入池/续期 lease the route permanently instead of by minutes.
-    pool_permanent: bool,
     link_mode: LinkMode,
     /// Connectivity check started from the node menu: (route id, node title).
     pending_check: Option<(String, String)>,
@@ -354,7 +353,6 @@ impl Default for State {
             link_mode: LinkMode::Task,
             effort_draft: String::new(),
             effort_input_open: false,
-            pool_permanent: false,
             pending_check: None,
             check_feedback: None,
             last_blank_press: None,
@@ -628,15 +626,34 @@ impl State {
             self.dirty = true;
         }
     }
-    fn add_pool(&mut self, route_id: String) {
-        let expiry = if self.pool_permanent {
+    /// Expiry for a timed lease starting now, from the 有效期 minutes box.
+    fn timed_expiry(&self) -> u64 {
+        let mins = self.ttl.parse::<u64>().unwrap_or(120).clamp(1, 10080);
+        model::now_ms() + mins * 60_000
+    }
+    /// The model pool's per-row 永久 switch: on = never expires, off = a timed
+    /// lease of the 有效期 minutes from now.
+    fn set_lease(&mut self, route_id: &str, permanent: bool) {
+        let expiry = if permanent {
             model::PERMANENT_EXPIRES_AT
         } else {
-            let mins = self.ttl.parse::<u64>().unwrap_or(120).clamp(1, 10080);
-            model::now_ms() + mins * 60_000
+            self.timed_expiry()
         };
-        if let Some(row) = self.draft.pool.iter_mut().find(|r| r.route_id == route_id) {
+        if let Some(row) = self.draft.pool.iter_mut().find(|r| r.route_id == route_id)
+            && row.expires_at != expiry
+        {
             row.expires_at = expiry;
+            self.dirty = true;
+        }
+    }
+    fn add_pool(&mut self, route_id: String) {
+        let expiry = self.timed_expiry();
+        if let Some(row) = self.draft.pool.iter_mut().find(|r| r.route_id == route_id) {
+            // 续期 renews a timed lease; a permanent one is left permanent —
+            // only its own 永久 switch in the pool turns that off.
+            if !row.is_permanent() {
+                row.expires_at = expiry;
+            }
         } else if self.draft.pool.len() < 128 {
             self.draft.pool.push(model::PoolEntry {
                 route_id,
@@ -841,7 +858,7 @@ impl State {
                     self.dirty = true;
                 }
             }
-            Action::PoolPermanent(v) => self.pool_permanent = v,
+            Action::PoolLease(route_id, permanent) => self.set_lease(&route_id, permanent),
             Action::Fit => {
                 let (width, height) = self.viewport.get();
                 if let Some(w) = self.workflow() {
@@ -2373,7 +2390,7 @@ fn node_menu(state: &State, theme: &Theme, max_height: f64, ctx: &ViewContext<Sh
             } else {
                 "加入模型池"
             },
-            "按来源页的有效期把本节点的模型加入模型池（已在池则续期，来源页可选永久租期），保存后生效。定向模式只使用池内模型。",
+            "按来源页的有效期把本节点的模型加入模型池（已在池则续期；可在限时模型池中逐个设为永久），保存后生效。定向模式只使用池内模型。",
             || Action::PoolNode,
             bound,
             ctx,
@@ -2916,7 +2933,7 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                         // wrapped to two lines it pushed the two boxes out of
                         // baseline and read as broken text.
                         .columns([GridLength::STAR, GridLength::Pixel(200.0)])
-                        .rows([GridLength::Auto, GridLength::Auto, GridLength::Auto])
+                        .rows([GridLength::Auto, GridLength::Auto])
                         .column_spacing(16.0)
                         .row_spacing(6.0)
                         .children([
@@ -2955,24 +2972,6 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                                     .on_text_changed(
                                         ctx.callback(|v: String| Msg::Scheduling(Action::Ttl(v))),
                                     ),
-                            ),
-                            // The permanent lease answers "keep re-renewing
-                            // every 120 minutes" with one deliberate choice;
-                            // the minutes box still applies when it is off.
-                            rcell(
-                                1,
-                                2,
-                                row(vec![
-                                    TextBlock::new()
-                                        .text("永久租期（忽略分钟数）")
-                                        .vertical_alignment(VerticalAlignment::Center)
-                                        .into(),
-                                    crate::pages::switch(
-                                        theme,
-                                        state.pool_permanent,
-                                        ctx.callback(|v| Msg::Scheduling(Action::PoolPermanent(v))),
-                                    ),
-                                ]),
                             ),
                         ]),
                 ),
@@ -3090,8 +3089,12 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
         ));
 
         // ---- 限时模型池 ----
+        // 永久 sits before the move/remove glyphs: a switch per row, the same
+        // right-aligned switch cell the 来源 table uses (Pixel column, so the
+        // track lines up on every row and never overflows the card edge).
         let pool_cols = vec![
             GridLength::STAR,
+            GridLength::Pixel(84.0),
             GridLength::Pixel(40.0),
             GridLength::Pixel(40.0),
             GridLength::Pixel(40.0),
@@ -3101,6 +3104,7 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
             pool_cols.clone(),
             vec![
                 ("顺序 · 模型 · 剩余", HorizontalAlignment::Stretch),
+                ("永久", HorizontalAlignment::Right),
                 ("上移", HorizontalAlignment::Center),
                 ("下移", HorizontalAlignment::Center),
                 ("移出", HorizontalAlignment::Center),
@@ -3134,16 +3138,23 @@ pub fn page(state: &State, theme: &Theme, ctx: &mut ViewContext<Shell>) -> Vec<V
                             .text(format!("{} · {name} · {lease}", i + 1))
                             .text_wrapping(TextWrapping::Wrap),
                     ),
-                    tcell(
+                    right_cell(
                         1,
-                        glyph_button(theme, "↑", "上移", move || Action::MovePool(i, -1), ctx),
+                        crate::pages::switch(theme, p.is_permanent(), {
+                            let id = id.clone();
+                            ctx.callback(move |v| Msg::Scheduling(Action::PoolLease(id.clone(), v)))
+                        }),
                     ),
                     tcell(
                         2,
-                        glyph_button(theme, "↓", "下移", move || Action::MovePool(i, 1), ctx),
+                        glyph_button(theme, "↑", "上移", move || Action::MovePool(i, -1), ctx),
                     ),
                     tcell(
                         3,
+                        glyph_button(theme, "↓", "下移", move || Action::MovePool(i, 1), ctx),
+                    ),
+                    tcell(
+                        4,
                         glyph_button(
                             theme,
                             "✕",
@@ -5107,6 +5118,30 @@ mod gesture_tests {
         }
         assert!(numeric_field("0", NumericField::Parallel).is_err());
         assert_eq!(numeric_field(" 200000 ", NumericField::Budget), Ok(200_000));
+    }
+
+    #[test]
+    fn pool_rows_switch_between_permanent_and_timed_leases() {
+        use globaltokentracker_core::scheduler::{PERMANENT_EXPIRES_AT, PoolEntry};
+        let mut state = super::State::default();
+        state.draft.pool.push(PoolEntry {
+            route_id: "r".into(),
+            expires_at: 1,
+            tags: Vec::new(),
+        });
+        state.set_lease("r", true);
+        assert_eq!(state.draft.pool[0].expires_at, PERMANENT_EXPIRES_AT);
+        assert!(state.dirty);
+        // 续期 from the node menu or Sources page leaves it permanent.
+        state.add_pool("r".into());
+        assert!(state.draft.pool[0].is_permanent());
+        // Switching it off gives a timed lease of the 有效期 minutes from now.
+        state.ttl = "30".into();
+        state.set_lease("r", false);
+        let left = state.draft.pool[0]
+            .expires_at
+            .saturating_sub(globaltokentracker_core::scheduler::now_ms());
+        assert!((29 * 60_000..=30 * 60_000).contains(&left), "{left}");
     }
 
     #[test]
