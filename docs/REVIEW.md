@@ -2189,3 +2189,10 @@
 - **改动（macOS）**：`SchedulingView` 的池行加 `.switch` 样式的 mini Toggle「永久」，语义与 Windows 一致，续期同样不降级永久行。未在本机编译（无 Swift 工具链），交由 CI 的 verify-branch 编译。
 - **验证**：新增测试 `pool_rows_switch_between_permanent_and_timed_leases`。`cargo clippy` 零问题，`cargo test --workspace` 404 通过、4 忽略。用调试版和只读数据副本截图：来源页搜索框与有效期框对齐，模型池「永久 / 上移 / 下移 / 移出」列对齐、无溢出。通过 UIA TogglePattern 打开第 1 行开关后，行文字从「已到期」变为「永久」，页面标记为未保存（未保存，数据副本不变）。
 - **未提交、未安装**。
+
+## S183 S182 的本机安装交付（2026-10-25）
+
+- **提交**：S182 = 7d55407（分支 feat/per-row-permanent-lease，Verify branch 40178503867 的 Windows 与 macOS 作业均通过，Swift 改动已由 CI 编译），以 7360de5 合入 main 并推送；本地 main 上其他会话的 c5efe0c / a263fe3 / b75d9a1 / c8625f5 随之推送。
+- **构建与安装**：`package.ps1` → dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.92 MB，sha256 02d7ecc1…477550b4，未签名）。旧 UI 与 installed-build.json 备份于 target\diagnostics\preinstall-s182-20261025。结束 GUI（PID 43088）后 --quiet 安装，退出码 0、无 .gtt-new 残留；安装后 UI a1f9376e… 与 target\release 产物逐字节一致，CLI 5cf70265… 未变。GUI 以 --minimized 重新拉起（PID 36936），gtt_panic.log 未新增。
+- **守护进程**：本轮零 Python 改动，无需重启。
+- **待用户确认**：限时模型池「永久」开关打开后保存，该模型是否长期显示「永久」、不再到期。
