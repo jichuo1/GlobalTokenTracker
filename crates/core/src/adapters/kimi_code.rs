@@ -35,6 +35,43 @@ use std::path::{Path, PathBuf};
 
 pub struct KimiCode;
 
+fn data_roots() -> Vec<PathBuf> {
+    vec![
+        data_root(),
+        std::env::var_os("KIMI_SHARE_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| crate::sync::home(".kimi")),
+    ]
+}
+
+fn discover_in(roots: &[PathBuf]) -> Vec<SourceItem> {
+    let mut seen = std::collections::HashSet::new();
+    roots
+        .iter()
+        .flat_map(|root| crate::sync::collect_files(&root.join("sessions"), "jsonl", 8))
+        .filter(|p| p.file_name().is_some_and(|name| name == "wire.jsonl"))
+        .filter(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())))
+        .map(|path| SourceItem {
+            key: path.to_string_lossy().into_owned(),
+            path,
+            kind: SourceKind::Jsonl,
+        })
+        .collect()
+}
+
+fn wire_session(path: &Path) -> Option<String> {
+    path.ancestors()
+        .find(|dir| {
+            dir.parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "sessions")
+        })
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
 /// `$KIMI_CODE_HOME` > `~/.kimi-code`.
 fn data_root() -> PathBuf {
     if let Ok(dir) = std::env::var("KIMI_CODE_HOME")
@@ -66,23 +103,14 @@ impl SourceAdapter for KimiCode {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![data_root().join("sessions")]
+        data_roots()
+            .into_iter()
+            .map(|root| root.join("sessions"))
+            .collect()
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        // sessions/<wd>/<sid>/agents/<agent>/wire.jsonl — depth 6 also covers
-        // any nested agent dirs the layout may grow.
-        Ok(
-            crate::sync::collect_files(&data_root().join("sessions"), "jsonl", 6)
-                .into_iter()
-                .filter(|p| p.file_name().is_some_and(|n| n == "wire.jsonl"))
-                .map(|p| SourceItem {
-                    key: p.to_string_lossy().to_string(),
-                    path: p,
-                    kind: SourceKind::Jsonl,
-                })
-                .collect(),
-        )
+        Ok(discover_in(&data_roots()))
     }
 
     fn parse_jsonl(
@@ -97,16 +125,7 @@ impl SourceAdapter for KimiCode {
             consumed,
             ..Default::default()
         };
-        // <sessionId>/agents/<agent>/wire.jsonl
-        // <sessionId>/agents/<agent>/wire.jsonl — the agent name lives inside
-        // item.key (the file path), so dedup keys stay unique across agents.
-        let session_id = item
-            .path
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().to_string());
+        let session_id = wire_session(&item.path);
 
         let mut state: WireState = prior_state
             .and_then(|s| serde_json::from_str(s).ok())
@@ -123,6 +142,50 @@ impl SourceAdapter for KimiCode {
             let Ok(v) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
+            // Python kimi-cli persists timestamp + WireMessageEnvelope; the
+            // TypeScript kimi-code journal below remains a separate format.
+            let mut envelope = &v["message"];
+            for _ in 0..8 {
+                if envelope["type"].as_str() != Some("SubagentEvent") {
+                    break;
+                }
+                envelope = &envelope["payload"]["event"];
+            }
+            if envelope["type"].as_str() == Some("StatusUpdate") {
+                let payload = &envelope["payload"];
+                let usage = &payload["token_usage"];
+                let counts = [
+                    num(&usage["input_other"]),
+                    num(&usage["output"]),
+                    num(&usage["input_cache_read"]),
+                    num(&usage["input_cache_creation"]),
+                ];
+                if usage.is_object() && counts.iter().any(|n| *n > 0) {
+                    let key = text(&payload["message_id"]).map_or_else(
+                        || format!("kimi_code:cli:{}:{line_start}", item.key),
+                        |id| format!("kimi_code:cli:response:{id}"),
+                    );
+                    let timestamp = v["timestamp"]
+                        .as_f64()
+                        .filter(|t| t.is_finite() && *t >= 0.0 && *t < 9_223_372_036_854_775.0)
+                        .map(|t| (t * 1000.0) as i64);
+                    out.events.push(UsageEvent {
+                        dedup_key: key,
+                        app: apps::KIMI_CODE.into(),
+                        session_id: session_id.clone(),
+                        project: state.project.clone(),
+                        ts_start: timestamp,
+                        input_tokens: counts[0],
+                        output_tokens: counts[1],
+                        cache_read_tokens: counts[2],
+                        cache_write_5m_tokens: counts[3],
+                        provenance: Provenance::LocalJsonl,
+                        raw_ref: Some(format!("{}@{line_start}", item.path.display())),
+                        ..Default::default()
+                    });
+                }
+                continue;
+            }
             match v.get("type").and_then(Value::as_str) {
                 // First config.update seen wins — a session can emit several.
                 Some("config.update") => {
@@ -350,5 +413,89 @@ mod tests {
         let last_nl = body.rfind('\n').unwrap() + 1;
         assert_eq!(out.consumed as usize, last_nl);
         assert!(last_nl < data.len());
+    }
+    #[test]
+    fn python_wire_usage_is_step_delta_not_context_occupancy() {
+        let item = SourceItem {
+            key: "cli-wire".into(),
+            path: PathBuf::from("/tmp/.kimi/sessions/hash/sid/wire.jsonl"),
+            kind: SourceKind::Jsonl,
+        };
+        let data = concat!(
+            "{\"type\":\"metadata\",\"protocol_version\":\"1.1\"}\n",
+            "{\"timestamp\":1792900000.125,\"message\":{\"type\":\"StatusUpdate\",\"payload\":{\"message_id\":\"m1\",\"token_usage\":{\"input_other\":11,\"output\":7,\"input_cache_read\":13,\"input_cache_creation\":3}}}}\n",
+            "{\"timestamp\":1792900001.0,\"message\":{\"type\":\"StatusUpdate\",\"payload\":{\"context_tokens\":90000,\"context_usage\":0.9,\"token_usage\":null}}}\n"
+        );
+        let out = KimiCode
+            .parse_jsonl(&item, 0, data.as_bytes(), None)
+            .unwrap();
+        assert_eq!(out.events.len(), 1);
+        let event = &out.events[0];
+        assert_eq!(
+            (
+                event.input_tokens,
+                event.output_tokens,
+                event.cache_read_tokens,
+                event.cache_write_5m_tokens
+            ),
+            (11, 7, 13, 3)
+        );
+        assert_eq!(event.ts_start, Some(1_792_900_000_125));
+        assert_eq!(event.session_id.as_deref(), Some("sid"));
+        assert!(event.model.is_none());
+    }
+
+    #[test]
+    fn python_forwarded_usage_reuses_response_identity() {
+        let item = SourceItem {
+            key: "parent".into(),
+            path: PathBuf::from("/tmp/.kimi/sessions/hash/sid/wire.jsonl"),
+            kind: SourceKind::Jsonl,
+        };
+        let payload =
+            serde_json::json!({"message_id":"same","token_usage":{"input_other":10,"output":2}});
+        let direct = serde_json::json!({"timestamp":1792900000.25,"message":{"type":"StatusUpdate","payload":payload}});
+        let forwarded = serde_json::json!({"timestamp":1792900000.25,"message":{"type":"SubagentEvent","payload":{"agent_id":"child","event":direct["message"]}}});
+        let input = format!("{direct}\n{forwarded}\n");
+        let out = KimiCode
+            .parse_jsonl(&item, 0, input.as_bytes(), None)
+            .unwrap();
+        assert_eq!(out.events.len(), 2);
+        assert_eq!(out.events[0].dedup_key, out.events[1].dedup_key);
+        let mut other = direct;
+        other["message"]["payload"]["message_id"] = serde_json::json!("different");
+        let out2 = KimiCode
+            .parse_jsonl(
+                &item,
+                input.len() as u64,
+                format!("{other}\n").as_bytes(),
+                out.new_state.as_deref(),
+            )
+            .unwrap();
+        assert_ne!(out.events[0].dedup_key, out2.events[0].dedup_key);
+        assert_eq!(
+            wire_session(Path::new(
+                "/tmp/.kimi/sessions/hash/sid/subagents/child/wire.jsonl"
+            ))
+            .as_deref(),
+            Some("sid")
+        );
+    }
+
+    #[test]
+    fn dual_client_discovery_only_reads_each_wire_once() {
+        let (root, dir) = wire_dir("dual");
+        std::fs::write(dir.join("wire.jsonl"), "{}\n").unwrap();
+        std::fs::write(dir.join("context.jsonl"), "{}\n").unwrap();
+        let cli = root.0.join("sessions/hash/cli");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::write(cli.join("wire.jsonl"), "{}\n").unwrap();
+        let found = discover_in(&[root.0.clone(), root.0.clone()]);
+        assert_eq!(found.len(), 2);
+        assert!(
+            found
+                .iter()
+                .all(|item| item.path.file_name().unwrap() == "wire.jsonl")
+        );
     }
 }

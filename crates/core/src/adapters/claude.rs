@@ -15,6 +15,10 @@ use std::path::PathBuf;
 
 pub struct Claude;
 
+fn projects_root() -> PathBuf {
+    crate::sync::env_home("CLAUDE_CONFIG_DIR", ".claude").join("projects")
+}
+
 /// Timestamp of the latest `user` input line (prompt or tool result) per
 /// `isSidechain` value — the start of the next assistant call. Persisted so a
 /// call whose input landed in an earlier chunk still gets its duration.
@@ -36,12 +40,12 @@ impl SourceAdapter for Claude {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![crate::sync::home(".claude/projects")]
+        vec![projects_root()]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        let root = crate::sync::home(".claude/projects");
-        Ok(crate::sync::collect_files(&root, "jsonl", 3)
+        let root = projects_root();
+        Ok(crate::sync::collect_files(&root, "jsonl", 6)
             .into_iter()
             .map(|p| SourceItem {
                 key: p.to_string_lossy().to_string(),

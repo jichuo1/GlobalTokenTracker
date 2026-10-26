@@ -29,6 +29,50 @@ const MSG_SCHEMA_STATE: &str = "msg-v2";
 
 pub struct OpenCode;
 
+fn data_root() -> PathBuf {
+    crate::sync::env_home("XDG_DATA_HOME", ".local/share").join("opencode")
+}
+
+fn databases() -> Vec<PathBuf> {
+    let root = data_root();
+    if let Some(value) = std::env::var_os("OPENCODE_DB").filter(|value| !value.is_empty()) {
+        if value == ":memory:" {
+            return vec![];
+        }
+        let path = PathBuf::from(value);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        return path.is_file().then_some(path).into_iter().collect();
+    }
+    let mut paths = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| {
+                        name == "opencode.db"
+                            || (name.starts_with("opencode-")
+                                && path
+                                    .extension()
+                                    .is_some_and(|ext| ext.eq_ignore_ascii_case("db")))
+                    })
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
+    paths
+}
+
 impl SourceAdapter for OpenCode {
     fn id(&self) -> &'static str {
         apps::OPENCODE
@@ -41,18 +85,17 @@ impl SourceAdapter for OpenCode {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![crate::sync::home(".local/share/opencode")]
+        vec![data_root()]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        let p = crate::sync::home(".local/share/opencode/opencode.db");
-        Ok(p.exists()
-            .then(|| SourceItem {
-                key: p.to_string_lossy().to_string(),
-                path: p,
+        Ok(databases()
+            .into_iter()
+            .map(|path| SourceItem {
+                key: path.to_string_lossy().into_owned(),
+                path,
                 kind: SourceKind::Sqlite,
             })
-            .into_iter()
             .collect())
     }
 
@@ -61,65 +104,84 @@ impl SourceAdapter for OpenCode {
         let conn = open_ro(&item.path)?;
         let mut out = ScanOutcome::default();
 
-        // The message table is the source of truth; fail loudly on any other
-        // schema era instead of silently reporting zero usage.
-        let core_tables: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type='table' AND name IN ('session','message')",
-            [],
-            |r| r.get(0),
-        )?;
-        if core_tables != 2 {
+        let tables = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        let legacy = tables.contains("session") && tables.contains("message");
+        let modern = tables.contains("session_v2") && tables.contains("session_message");
+        if !legacy && !modern {
             bail!(
-                "{}: unsupported opencode schema (no session/message tables)",
+                "{}: unsupported opencode schema (no session/message or session_v2/session_message tables)",
                 item.path.display()
             );
         }
-
-        // One-time migration: drop legacy session-grain rows and rewind the
-        // watermark so every message is ingested under `opencode:msg:*`.
+        let schema_state = if modern { "msg-v3" } else { MSG_SCHEMA_STATE };
+        let migrated = cur.state.as_deref() != Some(schema_state);
         let mut since = cur.offset.saturating_sub(1000);
-        if cur.state.as_deref() != Some(MSG_SCHEMA_STATE) {
-            let n = store.delete_app_events(apps::OPENCODE)?;
-            if n > 0 {
-                out.notes
-                    .push(format!("purged {n} legacy session-level opencode events"));
-            }
+        if migrated {
             since = 0;
         }
-
-        let mut st = conn.prepare(
-            "SELECT m.id, m.session_id, s.directory,
-                    json_extract(m.data,'$.cost'),
-                    json_extract(m.data,'$.tokens.input'),
-                    json_extract(m.data,'$.tokens.output'),
-                    json_extract(m.data,'$.tokens.reasoning'),
-                    json_extract(m.data,'$.tokens.cache.read'),
-                    json_extract(m.data,'$.tokens.cache.write'),
-                    json_extract(m.data,'$.tokens.total'),
-                    json_extract(m.data,'$.modelID'),
-                    json_extract(m.data,'$.providerID'),
-                    json_extract(m.data,'$.agent'),
-                    json_extract(m.data,'$.time.created'),
-                    json_extract(m.data,'$.time.completed'),
-                    json_extract(m.data,'$.error'),
-                    m.time_created,
-                    m.time_updated
-             FROM message m JOIN session s ON s.id = m.session_id
-             WHERE json_extract(m.data,'$.role') = 'assistant'
-               AND m.time_updated > ?1",
-        )?;
+        // Identifiers and JSON paths below are fixed schema alternatives.
+        let query = |current: bool| {
+            let (message, session, predicate, model, provider) = if current {
+                (
+                    "session_message",
+                    "session_v2",
+                    "m.type IN ('assistant','compaction')",
+                    "$.model.id",
+                    "$.model.providerID",
+                )
+            } else {
+                (
+                    "message",
+                    "session",
+                    "json_extract(m.data,'$.role') = 'assistant'",
+                    "$.modelID",
+                    "$.providerID",
+                )
+            };
+            let exclude = if !current && modern {
+                " AND NOT EXISTS (SELECT 1 FROM session_message v WHERE v.id = m.id)"
+            } else {
+                ""
+            };
+            let pending = if current {
+                "CASE WHEN m.type='compaction' THEN COALESCE(json_extract(m.data,'$.status'),'') NOT IN ('completed','failed') ELSE COALESCE(json_extract(m.data,'$.time.completed'),0)<=0 END"
+            } else {
+                "0"
+            };
+            format!("SELECT m.id, m.session_id, s.directory,
+                json_extract(m.data,'$.cost'), json_extract(m.data,'$.tokens.input'),
+                json_extract(m.data,'$.tokens.output'), json_extract(m.data,'$.tokens.reasoning'),
+                json_extract(m.data,'$.tokens.cache.read'), json_extract(m.data,'$.tokens.cache.write'),
+                json_extract(m.data,'$.tokens.total'), json_extract(m.data,'{model}'),
+                json_extract(m.data,'{provider}'), json_extract(m.data,'$.agent'),
+                json_extract(m.data,'$.time.created'), json_extract(m.data,'$.time.completed'),
+                json_extract(m.data,'$.error'), m.time_created, m.time_updated, {pending}
+                FROM {message} m JOIN {session} s ON s.id = m.session_id
+                WHERE {predicate} AND m.time_updated > ?1{exclude}")
+        };
+        let mut queries = Vec::new();
+        if modern {
+            queries.push(query(true));
+        }
+        if legacy {
+            queries.push(query(false));
+        }
+        let sql = queries.join(" UNION ALL ");
+        let mut st = conn.prepare(&sql)?;
         let rows = st.query_map(rusqlite::params![since as i64], |r| {
             Ok(MsgRow {
                 id: r.get(0)?,
                 session_id: r.get(1)?,
                 directory: r.get(2)?,
                 cost: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                tin: r.get::<_, Option<i64>>(4)?.unwrap_or(0) as u64,
-                tout: r.get::<_, Option<i64>>(5)?.unwrap_or(0) as u64,
-                treason: r.get::<_, Option<i64>>(6)?.unwrap_or(0) as u64,
-                tcr: r.get::<_, Option<i64>>(7)?.unwrap_or(0) as u64,
-                tcw: r.get::<_, Option<i64>>(8)?.unwrap_or(0) as u64,
+                tin: r.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0) as u64,
+                tout: r.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0) as u64,
+                treason: r.get::<_, Option<i64>>(6)?.unwrap_or(0).max(0) as u64,
+                tcr: r.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u64,
+                tcw: r.get::<_, Option<i64>>(8)?.unwrap_or(0).max(0) as u64,
                 ttotal: r.get::<_, Option<i64>>(9)?,
                 model: r.get(10)?,
                 provider: r.get(11)?,
@@ -129,14 +191,27 @@ impl SourceAdapter for OpenCode {
                 error: r.get::<_, Option<String>>(15)?,
                 created_col: r.get::<_, Option<i64>>(16)?.unwrap_or(0),
                 updated: r.get::<_, Option<i64>>(17)?.unwrap_or(0),
+                pending: r.get(18)?,
             })
         })?;
 
-        let mut max_updated = cur.offset as i64;
+        let mut max_updated = if migrated { 0 } else { cur.offset as i64 };
+        let mut first_pending: Option<i64> = None;
         let mut total_mismatches = 0u64;
+        let mut migrated_sessions = std::collections::HashSet::new();
         for row in rows {
             let m = row?;
             max_updated = max_updated.max(m.updated);
+            if m.pending {
+                first_pending = Some(first_pending.map_or(m.updated, |v| v.min(m.updated)));
+            }
+            if migrated && migrated_sessions.insert(m.session_id.clone()) {
+                // Replace only the aggregate whose exact session is present here.
+                store.conn().execute(
+                    "DELETE FROM usage_events WHERE app=?1 AND dedup_key=?2",
+                    rusqlite::params![apps::OPENCODE, format!("opencode:session:{}", m.session_id)],
+                )?;
+            }
             // Self-audit: OpenCode records tokens.total as the billed sum;
             // flag when it disagrees with the component fields we ingest.
             if let Some(t) = m.ttotal
@@ -184,14 +259,17 @@ impl SourceAdapter for OpenCode {
                 "{total_mismatches} message(s) where tokens.total != component sum"
             ));
         }
-        if (max_updated as u64) > cur.offset || cur.state.as_deref() != Some(MSG_SCHEMA_STATE) {
+        if let Some(pending) = first_pending {
+            max_updated = max_updated.min(pending.saturating_sub(1).max(0));
+        }
+        if (max_updated as u64) != cur.offset || migrated {
             store.save_cursor(
                 self.id(),
                 &item.key,
                 &item.path,
                 max_updated.max(0) as u64,
                 0,
-                Some(MSG_SCHEMA_STATE),
+                Some(schema_state),
             )?;
         }
         out.consumed = max_updated.max(0) as u64;
@@ -218,14 +296,11 @@ struct MsgRow {
     error: Option<String>,
     created_col: i64,
     updated: i64,
+    pending: bool,
 }
 
 pub(crate) fn open_ro(path: &std::path::Path) -> Result<Connection> {
-    let uri = format!("file:{}?mode=ro", path.to_string_lossy().replace('\\', "/"));
-    let conn = Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(std::time::Duration::from_millis(1500))?;
     Ok(conn)
 }
@@ -494,5 +569,215 @@ mod tests {
         let err = OpenCode.scan_sqlite(&item(&src), &store).unwrap_err();
         assert!(format!("{err:#}").contains("unsupported opencode schema"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+    fn modern_fixture(path: &std::path::Path) -> Connection {
+        let db = Connection::open(path).unwrap();
+        db.execute_batch("CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT);
+            CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,time_created INTEGER,time_updated INTEGER,data TEXT);
+            INSERT INTO session_v2 VALUES('v2-session','/new-project');").unwrap();
+        db
+    }
+
+    fn modern_data(completed: Option<i64>) -> String {
+        serde_json::json!({"agent":"build","model":{"id":"modern-model","providerID":"vendor"},
+            "tokens":{"input":10,"output":7,"reasoning":3,"cache":{"read":20,"write":5}},
+            "cost":0.25,"time":{"created":100,"completed":completed}})
+        .to_string()
+    }
+
+    #[test]
+    fn modern_schema_counts_cache_and_reasoning_once() {
+        let dir = tmpdir("modern");
+        let path = dir.join("opencode.db");
+        let db = modern_fixture(&path);
+        db.execute(
+            "INSERT INTO session_message VALUES('new','v2-session','assistant',1,100,200,?1)",
+            [modern_data(Some(200))],
+        )
+        .unwrap();
+        drop(db);
+        let store = Store::open_memory().unwrap();
+        let out = OpenCode.scan_sqlite(&item(&path), &store).unwrap();
+        assert_eq!(out.events.len(), 1);
+        let event = &out.events[0];
+        assert_eq!(event.dedup_key, "opencode:msg:new");
+        assert_eq!(event.model.as_deref(), Some("modern-model"));
+        assert_eq!(event.provider_id.as_deref(), Some("vendor"));
+        assert_eq!(event.project.as_deref(), Some("/new-project"));
+        assert_eq!(
+            (
+                event.input_tokens,
+                event.output_tokens,
+                event.reasoning_tokens,
+                event.cache_read_tokens,
+                event.cache_write_5m_tokens
+            ),
+            (10, 10, 3, 20, 5)
+        );
+    }
+
+    #[test]
+    fn coexisting_schema_and_new_database_preserve_message_records() {
+        let dir = tmpdir("coexisting");
+        let path = dir.join("one.db");
+        let db = fixture(&path);
+        db.execute_batch("INSERT INTO session VALUES('s1','p','/old',NULL,NULL,1,1);")
+            .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES('same','s1',100,200,?1)",
+            [msg_json("old", "p", 0.0, (1, 2, 0), (100, 200))],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES('only-old','s1',100,200,?1)",
+            [msg_json("old", "p", 0.0, (1, 2, 0), (100, 200))],
+        )
+        .unwrap();
+        drop(db);
+        let db = modern_fixture(&path);
+        db.execute(
+            "INSERT INTO session_message VALUES('same','v2-session','assistant',1,100,200,?1)",
+            [modern_data(Some(200))],
+        )
+        .unwrap();
+        drop(db);
+        let store = Store::open_memory().unwrap();
+        let out = OpenCode.scan_sqlite(&item(&path), &store).unwrap();
+        assert_eq!(out.events.len(), 2);
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|v| v.dedup_key == "opencode:msg:same")
+                .count(),
+            1
+        );
+        for event in &out.events {
+            store.upsert_event(event).unwrap();
+        }
+        store
+            .upsert_event(&UsageEvent {
+                dedup_key: "opencode:session:other-profile".into(),
+                app: apps::OPENCODE.into(),
+                input_tokens: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        let second = dir.join("two.db");
+        let db = modern_fixture(&second);
+        db.execute(
+            "INSERT INTO session_message VALUES('second','v2-session','assistant',1,100,200,?1)",
+            [modern_data(Some(200))],
+        )
+        .unwrap();
+        drop(db);
+        OpenCode.scan_sqlite(&item(&second), &store).unwrap();
+        let count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE app='opencode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "a new database cannot purge existing messages or another profile aggregate"
+        );
+    }
+
+    #[test]
+    fn modern_pending_row_is_revisited_after_late_finalization() {
+        let dir = tmpdir("pending");
+        let path = dir.join("opencode.db");
+        let db = modern_fixture(&path);
+        db.execute(
+            "INSERT INTO session_message VALUES('pending','v2-session','assistant',1,100,100,?1)",
+            [modern_data(None)],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_message VALUES('later','v2-session','assistant',2,10000,10000,?1)",
+            [modern_data(Some(10000))],
+        )
+        .unwrap();
+        let store = Store::open_memory().unwrap();
+        OpenCode.scan_sqlite(&item(&path), &store).unwrap();
+        assert!(store.load_cursor(&item(&path).key).unwrap().offset < 100);
+        db.execute(
+            "UPDATE session_message SET data=?1 WHERE id='pending'",
+            [modern_data(Some(200))],
+        )
+        .unwrap();
+        drop(db);
+        let out = OpenCode.scan_sqlite(&item(&path), &store).unwrap();
+        assert!(out.events.iter().any(|event|event.dedup_key=="opencode:msg:pending" && event.ts_end==Some(200)));
+        assert_eq!(store.load_cursor(&item(&path).key).unwrap().offset, 10000);
+    }
+
+    #[test]
+    fn compaction_watermark_follows_status_without_completed_timestamp() {
+        let dir = tmpdir("compaction-watermark");
+        let path = dir.join("opencode.db");
+        let db = modern_fixture(&path);
+        let data = |status| {
+            serde_json::json!({"status":status,"tokens":{"input":10,"output":2},
+                "time":{"created":100}})
+            .to_string()
+        };
+        db.execute(
+            "INSERT INTO session_message VALUES('compact','v2-session','compaction',1,100,100,?1)",
+            [data("running")],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_message VALUES('later','v2-session','assistant',2,10000,10000,?1)",
+            [modern_data(Some(10000))],
+        )
+        .unwrap();
+        for status in ["completed", "failed"] {
+            db.execute(
+                "UPDATE session_message SET data=?1 WHERE id='compact'",
+                [data("running")],
+            )
+            .unwrap();
+            let store = Store::open_memory().unwrap();
+            OpenCode.scan_sqlite(&item(&path), &store).unwrap();
+            assert!(store.load_cursor(&item(&path).key).unwrap().offset < 100);
+            db.execute(
+                "UPDATE session_message SET data=?1 WHERE id='compact'",
+                [data(status)],
+            )
+            .unwrap();
+            let out = OpenCode.scan_sqlite(&item(&path), &store).unwrap();
+            assert!(
+                out.events
+                    .iter()
+                    .any(|event| event.dedup_key == "opencode:msg:compact")
+            );
+            assert_eq!(store.load_cursor(&item(&path).key).unwrap().offset, 10000);
+            let next = OpenCode.scan_sqlite(&item(&path), &store).unwrap();
+            assert!(
+                next.events
+                    .iter()
+                    .all(|event| event.dedup_key != "opencode:msg:compact")
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_filename_with_space_and_hash_is_literal() {
+        let dir = tmpdir("literal");
+        let path = dir.join("source # one.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE marker(value INTEGER);INSERT INTO marker VALUES(42);")
+            .unwrap();
+        drop(db);
+        let db = open_ro(&path).unwrap();
+        assert_eq!(
+            db.query_row("SELECT value FROM marker", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+        assert!(db.execute("INSERT INTO marker VALUES(7)", []).is_err());
     }
 }

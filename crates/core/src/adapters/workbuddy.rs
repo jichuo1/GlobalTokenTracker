@@ -195,3 +195,30 @@ impl SourceAdapter for WorkBuddy {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_prompt_cache_receipt_is_not_double_counted() {
+        let item = SourceItem {
+            key: "workbuddy".into(),
+            path: PathBuf::from("session.jsonl"),
+            kind: SourceKind::Jsonl,
+        };
+        let row = serde_json::json!({"timestamp":"2026-10-26T00:00:00Z","type":"message","providerData":{"messageId":"request","model":"deepseek-v4-pro","rawUsage":{"prompt_tokens":63890,"completion_tokens":105,"prompt_cache_hit_tokens":63744,"prompt_cache_miss_tokens":146,"credit":0.5}}});
+        let data = format!("{row}\n");
+        let out = WorkBuddy
+            .parse_jsonl(&item, 0, data.as_bytes(), None)
+            .unwrap();
+        assert_eq!(out.events.len(), 1);
+        assert_eq!(out.events[0].input_tokens, 146);
+        assert_eq!(out.events[0].cache_read_tokens, 63744);
+        assert_eq!(out.events[0].output_tokens, 105);
+        let again = WorkBuddy
+            .parse_jsonl(&item, 0, data.as_bytes(), None)
+            .unwrap();
+        assert_eq!(out.events[0].dedup_key, again.events[0].dedup_key);
+    }
+}

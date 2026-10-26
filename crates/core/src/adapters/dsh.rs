@@ -198,6 +198,18 @@ impl SourceAdapter for Dsh {
         let mut step_start: HashMap<(u64, u64), i64> = HashMap::new();
         let mut max_seq = state.last_seq;
 
+        // The last tagged boundary is the current child's inherited-prefix cut;
+        // untagged restore markers do not change ownership of live work.
+        let inherited_until = text_bytes
+            .split(|&b| b == b'\n')
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let value: Value = serde_json::from_slice(line).ok()?;
+                (value["type"].as_str() == Some("session/end-seed")
+                    && value["data"]["inherited"].as_bool() == Some(true))
+                .then_some(idx)
+            })
+            .last();
         for (idx, raw) in text_bytes.split(|&b| b == b'\n').enumerate() {
             let line = raw.strip_suffix(b"\r").unwrap_or(raw);
             if line.is_empty() {
@@ -232,6 +244,10 @@ impl SourceAdapter for Dsh {
                     }
                 }
                 Some("assistant/message") => {
+                    if inherited_until.is_some_and(|cut| idx <= cut) {
+                        out.skipped += 1;
+                        continue;
+                    }
                     if seq != u64::MAX && seq <= state.last_seq {
                         continue;
                     }
@@ -509,5 +525,33 @@ mod tests {
         let out = Dsh.parse_jsonl(&item(&file), 0, &data, None).unwrap();
         assert!(out.events.is_empty());
         assert_eq!(out.skipped, 1);
+    }
+    #[test]
+    fn fork_inherited_history_is_not_billed_again() {
+        let (_root, dir) = session_dir("seeded", "child");
+        let file = dir.join("session.jsonl");
+        let assistant = |seq| {
+            serde_json::json!({"type":"assistant/message","seq":seq,"time":1792900000000i64,"data":{"message":{"id":format!("m{seq}")},"usage":{"inputTokens":10,"outputTokens":2}}}).to_string()
+        };
+        let data = format!(
+            "{}\n{}\n{{\"type\":\"session/end-seed\",\"seq\":3,\"data\":{{\"inherited\":true}}}}\n{}\n{{\"type\":\"session/end-seed\",\"seq\":5,\"data\":{{}}}}\n{}\n",
+            header("child"),
+            assistant(2),
+            assistant(4),
+            assistant(6)
+        );
+        std::fs::write(&file, &data).unwrap();
+        let item = SourceItem {
+            key: file.to_string_lossy().into_owned(),
+            path: file,
+            kind: SourceKind::Jsonl,
+        };
+        let out = Dsh.parse_jsonl(&item, 0, data.as_bytes(), None).unwrap();
+        assert_eq!(out.events.len(), 2);
+        assert!(
+            out.events
+                .iter()
+                .all(|event| event.dedup_key != "dsh:child:2")
+        );
     }
 }

@@ -35,3 +35,11 @@ fn collect(dir: &Path, ext: &str, depth: usize, out: &mut Vec<PathBuf>) {
 pub fn home(sub: &str) -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(sub)
 }
+
+/// Resolve a documented tool data-directory override.
+pub fn env_home(name: &str, default_sub: &str) -> PathBuf {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home(default_sub))
+}

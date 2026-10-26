@@ -13,8 +13,8 @@ use anyhow::Result;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// costUsdTicks are fixed-point nano-dollars (1e9 ticks = $1).
-const TICKS_PER_USD: f64 = 1e9;
+/// costUsdTicks are fixed-point billing units (1e10 ticks = $1).
+const TICKS_PER_USD: f64 = 1e10;
 
 pub struct Grok;
 
@@ -30,11 +30,11 @@ impl SourceAdapter for Grok {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![crate::sync::home(".grok/sessions")]
+        vec![crate::sync::env_home("GROK_HOME", ".grok").join("sessions")]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        let root = crate::sync::home(".grok/sessions");
+        let root = crate::sync::env_home("GROK_HOME", ".grok").join("sessions");
         Ok(crate::sync::collect_files(&root, "jsonl", 3)
             .into_iter()
             .filter(|p| p.file_name().is_some_and(|n| n == "updates.jsonl"))
@@ -58,7 +58,7 @@ impl SourceAdapter for Grok {
             consumed,
             ..Default::default()
         };
-        let project = pct_decode(
+        let decoded_project = pct_decode(
             &item
                 .path
                 .parent()
@@ -67,6 +67,14 @@ impl SourceAdapter for Grok {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default(),
         );
+        let project = item
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(|dir| std::fs::read_to_string(dir.join(".cwd")).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(decoded_project);
         let dir_session = item
             .path
             .parent()
@@ -171,4 +179,28 @@ fn pct_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vendor_cost_ticks_and_cache_are_normalized_once() {
+        let item = SourceItem {
+            key: "grok".into(),
+            path: PathBuf::from("/tmp/sessions/encoded/sid/updates.jsonl"),
+            kind: SourceKind::Jsonl,
+        };
+        let row = serde_json::json!({"timestamp":"2026-10-26T00:00:00Z","method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":"turn_completed","prompt_id":"p","usage":{"modelUsage":{"grok-model":{"inputTokens":100,"outputTokens":20,"cachedReadTokens":60,"cacheCreationTokens":10,"reasoningTokens":5,"costUsdTicks":10000000000u64}}}}}});
+        let data = format!("{row}\n");
+        let out = Grok.parse_jsonl(&item, 0, data.as_bytes(), None).unwrap();
+        let event = &out.events[0];
+        assert_eq!(event.input_tokens, 30);
+        assert_eq!(event.output_tokens, 20);
+        assert_eq!(event.reasoning_tokens, 5);
+        assert_eq!(event.cost_usd, Some(1.0));
+        let again = Grok.parse_jsonl(&item, 0, data.as_bytes(), None).unwrap();
+        assert_eq!(event.dedup_key, again.events[0].dedup_key);
+    }
 }

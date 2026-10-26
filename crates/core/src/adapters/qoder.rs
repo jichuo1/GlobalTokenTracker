@@ -18,7 +18,9 @@ use std::path::PathBuf;
 
 pub struct Qoder;
 
-const ROOT: &str = ".qoder/projects";
+fn projects_root() -> PathBuf {
+    crate::sync::env_home("QODER_CONFIG_DIR", ".qoder").join("projects")
+}
 
 impl SourceAdapter for Qoder {
     fn id(&self) -> &'static str {
@@ -32,22 +34,20 @@ impl SourceAdapter for Qoder {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![crate::sync::home(ROOT)]
+        vec![projects_root()]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
         // <project>/<session-uuid>.jsonl (depth 2)
         // <project>/<session-uuid>/subagents/<agent>.jsonl (depth 4)
-        Ok(
-            crate::sync::collect_files(&crate::sync::home(ROOT), "jsonl", 5)
-                .into_iter()
-                .map(|p| SourceItem {
-                    key: p.to_string_lossy().to_string(),
-                    path: p,
-                    kind: SourceKind::Jsonl,
-                })
-                .collect(),
-        )
+        Ok(crate::sync::collect_files(&projects_root(), "jsonl", 5)
+            .into_iter()
+            .map(|p| SourceItem {
+                key: p.to_string_lossy().to_string(),
+                path: p,
+                kind: SourceKind::Jsonl,
+            })
+            .collect())
     }
 
     fn parse_jsonl(
@@ -63,7 +63,9 @@ impl SourceAdapter for Qoder {
             ..Default::default()
         };
 
-        let mut current_project: Option<String> = None;
+        let mut current_project: Option<String> = prior_state
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| text(&v["project"]));
         // Live scans only receive the new byte segment, so the last user
         // timestamp must survive across scans via the cursor's adapter_state.
         let mut last_user_ts: Option<i64> = prior_state
@@ -116,7 +118,12 @@ impl SourceAdapter for Qoder {
                         .or_else(|| fnum(&usage["original_credits"]))
                         .filter(|&c| c > 0.0);
 
-                    if credits.is_none() && input_tokens == 0 && output_tokens == 0 {
+                    if credits.is_none()
+                        && input_tokens == 0
+                        && output_tokens == 0
+                        && cache_read == 0
+                        && cache_write == 0
+                    {
                         continue;
                     }
 
@@ -178,9 +185,10 @@ impl SourceAdapter for Qoder {
             }
         }
 
-        if let Some(ts) = last_user_ts {
-            out.new_state = Some(serde_json::json!({ "last_user_ts": ts }).to_string());
-        }
+        out.new_state = Some(
+            serde_json::json!({ "last_user_ts": last_user_ts, "project": current_project })
+                .to_string(),
+        );
         Ok(out)
     }
 }
@@ -301,5 +309,18 @@ mod tests {
         let ev = &out.events[0];
         assert_eq!(ev.model.as_deref(), Some("brand_new_key"));
         assert_eq!(ev.request_model.as_deref(), Some("brand_new_key"));
+    }
+    #[test]
+    fn workspace_header_survives_append_and_cache_only_receipt_counts() {
+        let source = item("/tmp/qoder/s.jsonl");
+        let head = b"{\"type\":\"workspace-directories\",\"directories\":[\"/project\"]}\n";
+        let first = Qoder.parse_jsonl(&source, 0, head, None).unwrap();
+        let next=b"{\"type\":\"assistant\",\"message\":{\"id\":\"cache-only\",\"usage\":{\"cache_read_input_tokens\":100,\"billable\":true}}}\n";
+        let second = Qoder
+            .parse_jsonl(&source, head.len() as u64, next, first.new_state.as_deref())
+            .unwrap();
+        assert_eq!(second.events.len(), 1);
+        assert_eq!(second.events[0].project.as_deref(), Some("/project"));
+        assert_eq!(second.events[0].cache_read_tokens, 100);
     }
 }

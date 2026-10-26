@@ -68,6 +68,7 @@ use crate::model::{CostSource, Provenance, UsageEvent, apps};
 use crate::normalize::{epoch_ms, fnum, num};
 use crate::store::Store;
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -518,7 +519,7 @@ fn scan_sdk_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
             ts_start: ts,
             input_tokens: input,
             output_tokens: num(&usage["outputTokens"]),
-            reasoning_tokens: num(&usage["reasoningTokens"]) + num(&usage["thoughtsTokenCount"]),
+            reasoning_tokens: num(&usage["reasoningTokens"]).max(num(&usage["thoughtsTokenCount"])),
             cache_read_tokens: cache_read,
             cache_write_5m_tokens: cache_write,
             cost_usd: cost,
@@ -529,7 +530,9 @@ fn scan_sdk_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
         }
     };
     for (i, m) in messages.iter().enumerate() {
-        if m["role"].as_str() != Some("assistant") {
+        if m["role"].as_str() != Some("assistant")
+            || m["metadata"]["displayOnly"].as_bool() == Some(true)
+        {
             continue;
         }
         let metrics = &m["metrics"];
@@ -556,6 +559,34 @@ fn scan_sdk_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
             m["modelInfo"]["provider"].as_str().map(String::from),
             format!("{}#{id}", file.display()),
         ));
+    }
+    if !out.events.is_empty() {
+        // This exact session now has request receipts; remove only its old fallback.
+        let fallback_key = format!("cline-sdk:{session_id}:session");
+        let previous_ts: Option<i64> = store
+            .conn()
+            .query_row(
+                "SELECT ts_start FROM usage_events WHERE app=?1 AND dedup_key=?2",
+                rusqlite::params![apps::CLINE, fallback_key],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        store.conn().execute(
+            "DELETE FROM usage_events WHERE app=?1 AND dedup_key=?2",
+            rusqlite::params![apps::CLINE, fallback_key],
+        )?;
+        // Request timestamps can be on different days from the old session total.
+        // Rebuild only its active day, preserving unrelated archived rollups.
+        if let Some(ts) = previous_ts {
+            let offset = crate::viewmodel::local_utc_offset();
+            let offset_ms = crate::viewmodel::utc_offset_ms(&offset)
+                .ok_or_else(|| anyhow::anyhow!("invalid utc_offset: {offset}"))?;
+            store.rebuild_rollup_days(
+                &std::collections::BTreeSet::from([(ts + offset_ms).div_euclid(86_400_000)]),
+                &offset,
+            )?;
+        }
     }
     // No per-turn metrics (an older SDK build, a cloud session): the
     // manifest's session totals, at the session's end.
@@ -839,5 +870,100 @@ mod tests {
         };
         let out = Cline.scan_sqlite(&item, &store).unwrap();
         assert!(out.events.is_empty());
+    }
+    #[test]
+    fn sdk_request_receipts_replace_only_the_matching_session_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("gtt-cline-transition-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("late.messages.json");
+        std::fs::write(&file, "[]").unwrap();
+        std::fs::write(
+            root.join("late.json"),
+            r#"{"metadata":{"usage":{"inputTokens":10,"outputTokens":5}}}"#,
+        )
+        .unwrap();
+        let item = SourceItem {
+            key: file.to_string_lossy().into_owned(),
+            path: file.clone(),
+            kind: SourceKind::Sqlite,
+        };
+        let store = Store::open_memory().unwrap();
+        let first = scan_sdk_session(&item, &store).unwrap();
+        assert_eq!(first.events.len(), 1);
+        store.upsert_event(&first.events[0]).unwrap();
+        std::fs::write(&file,r#"{"messages":[{"id":"request","role":"assistant","ts":1792900000000,"modelInfo":{"id":"m","provider":"p"},"metrics":{"inputTokens":12,"outputTokens":10,"reasoningTokens":3,"thoughtsTokenCount":3}}]}"#).unwrap();
+        let second = scan_sdk_session(&item, &store).unwrap();
+        assert_eq!(second.events.len(), 1);
+        assert_eq!(second.events[0].reasoning_tokens, 3);
+        let count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE dedup_key='cline-sdk:late:session'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn sdk_fallback_removal_refreshes_its_day_and_preserves_archived_days() {
+        const DAY: i64 = 86_400_000;
+        const OLD_TS: i64 = 1_792_796_400_000;
+        let (_root, file) = sdk_fixture(
+            "fallback-rollups",
+            "late",
+            "[]",
+            Some(
+                r#"{"ended_at":1792796400000,"metadata":{"usage":{"inputTokens":10,"outputTokens":5}}}"#,
+            ),
+        );
+        let store = Store::open_memory().unwrap();
+        for event in scan_file(&file, &store).events {
+            store.upsert_event(&event).unwrap();
+        }
+        for (key, app, ts, input) in [
+            ("archived", apps::CLINE, OLD_TS - DAY, 100),
+            ("other-source", apps::CLAUDE, OLD_TS, 7),
+        ] {
+            store
+                .upsert_event(&UsageEvent {
+                    dedup_key: key.into(),
+                    app: app.into(),
+                    ts_start: Some(ts),
+                    input_tokens: input,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let offset = crate::viewmodel::local_utc_offset();
+        store.rebuild_rollups(&offset).unwrap();
+        assert_eq!(store.prune_events(OLD_TS).unwrap(), 1);
+        let next = serde_json::json!({"sessionId":"late","messages":[{
+            "id":"request","role":"assistant","ts":OLD_TS+DAY,
+            "metrics":{"inputTokens":12,"outputTokens":5}}]});
+        std::fs::write(&file, next.to_string()).unwrap();
+        let out = scan_file(&file, &store);
+        assert_eq!(out.events.len(), 1);
+        let cline_totals: (i64, i64) = store
+            .conn()
+            .query_row(
+                "SELECT SUM(events), SUM(input_tokens) FROM daily_rollups WHERE app=?1",
+                [apps::CLINE],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cline_totals, (1, 100), "only the archived day remains");
+        let other_input: i64 = store
+            .conn()
+            .query_row(
+                "SELECT input_tokens FROM daily_rollups WHERE app=?1",
+                [apps::CLAUDE],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(other_input, 7);
+        assert!(scan_file(&file, &store).events.is_empty());
     }
 }

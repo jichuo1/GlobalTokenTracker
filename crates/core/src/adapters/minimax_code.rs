@@ -31,6 +31,12 @@ pub struct MiniMaxCode;
 /// `~/.mavis*` dirs only when no `.minimax*` exists (post-migration `.mavis`
 /// is a junction into `.minimax` → same file, would double-count).
 fn data_roots() -> Vec<PathBuf> {
+    if let Some(value) = std::env::var_os("MINIMAX_DATA_DIR")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("MAVIS_DATA_DIR").filter(|v| !v.is_empty()))
+    {
+        return vec![PathBuf::from(value)];
+    }
     let Some(home) = dirs::home_dir() else {
         return vec![];
     };
@@ -43,7 +49,7 @@ fn data_roots() -> Vec<PathBuf> {
                         p.file_name()
                             .map(|n| n.to_string_lossy().starts_with(prefix))
                             .unwrap_or(false)
-                            && p.is_dir()
+                            && p.join("v2/sqlite/runtime-state.sqlite").is_file()
                     })
                     .collect()
             })
@@ -138,13 +144,19 @@ impl SourceAdapter for MiniMaxCode {
 
         // Tag the dedup key with the data-root basename so `.minimax` and
         // `.minimax-work` (separate profiles, separate DBs) can't collide.
-        let tag = item
-            .path
-            .ancestors()
-            .nth(3)
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let data_root = item.path.ancestors().nth(3).unwrap_or(&item.path);
+        let tag = if dirs::home_dir().as_deref() == data_root.parent() {
+            data_root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            data_root
+                .canonicalize()
+                .unwrap_or_else(|_| data_root.to_path_buf())
+                .to_string_lossy()
+                .into_owned()
+        };
 
         let mut out = ScanOutcome::default();
         let mut max_id = cur.offset as i64;

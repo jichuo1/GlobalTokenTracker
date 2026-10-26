@@ -60,6 +60,10 @@ impl PrevLine {
 
 pub struct Codex;
 
+fn codex_root() -> PathBuf {
+    crate::sync::env_home("CODEX_HOME", ".codex")
+}
+
 impl SourceAdapter for Codex {
     fn id(&self) -> &'static str {
         apps::CODEX
@@ -72,16 +76,16 @@ impl SourceAdapter for Codex {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        [".codex/sessions", ".codex/archived_sessions"]
+        ["sessions", "archived_sessions"]
             .iter()
-            .map(|s| crate::sync::home(s))
+            .map(|s| codex_root().join(s))
             .collect()
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
         let mut out = Vec::new();
-        for sub in [".codex/sessions", ".codex/archived_sessions"] {
-            let root = crate::sync::home(sub);
+        for sub in ["sessions", "archived_sessions"] {
+            let root = codex_root().join(sub);
             out.extend(
                 crate::sync::collect_files(&root, "jsonl", 6)
                     .into_iter()
@@ -135,7 +139,7 @@ impl SourceAdapter for Codex {
         let mut staged_start: Option<i64> = None;
         let mut cur_model: Option<String> = prev.model.clone();
         let mut cur_cwd: Option<String> = prev.cwd.clone();
-        let mut last_quota: Option<(f64, i64)> = None; // (used_percent, resets_at) change-detect
+        let mut last_quota: Option<String> = None; // full window/credit signature
 
         let mut pos = 0u64;
         for line in seg.split(|&b| b == b'\n') {
@@ -254,11 +258,8 @@ impl SourceAdapter for Codex {
 
             // Free official quota signal riding on the same line.
             let qs = quotas_from(&p["rate_limits"]);
-            if let Some(first) = qs.first() {
-                let sig = (
-                    first.used_percent.unwrap_or(-1.0),
-                    first.resets_at.unwrap_or(0),
-                );
+            if !qs.is_empty() {
+                let sig = p["rate_limits"].to_string();
                 if last_quota.as_ref() != Some(&sig) {
                     out.quotas.extend(qs);
                     last_quota = Some(sig);
@@ -278,31 +279,34 @@ fn quotas_from(rl: &Value) -> Vec<QuotaSnapshot> {
     if rl.is_null() {
         return vec![];
     }
-    let primary = &rl["primary"];
-    let used_pct = fnum(&primary["used_percent"]);
-    let window_min = primary["window_minutes"].as_i64();
-    let resets_at = primary["resets_at"].as_i64().map(|s| s * 1000);
     let plan = text(&rl["plan_type"]);
-    let kind = match window_min {
-        Some(m) if m <= 360 => "5h_block",
-        Some(m) if m <= 1500 => "daily",
-        Some(m) if m <= 11000 => "weekly",
-        Some(_) => "monthly",
-        None => "window",
-    };
     let mut out = vec![];
-    if used_pct.is_some() || resets_at.is_some() {
-        out.push(QuotaSnapshot {
-            app: apps::CODEX.into(),
-            account: plan.clone(),
-            captured_at: crate::store::now_ms(),
-            window_kind: kind.into(),
-            used: None,
-            limit_value: None,
-            used_percent: used_pct,
-            resets_at,
-            raw_json: Some(rl.to_string()),
-        });
+    for window in ["primary", "secondary"] {
+        let value = &rl[window];
+        let used_percent = fnum(&value["used_percent"]);
+        let resets_at = value["resets_at"]
+            .as_i64()
+            .and_then(|s| s.checked_mul(1000));
+        let kind = match value["window_minutes"].as_i64() {
+            Some(m) if m <= 360 => "5h_block",
+            Some(m) if m <= 1500 => "daily",
+            Some(m) if m <= 11000 => "weekly",
+            Some(_) => "monthly",
+            None => "window",
+        };
+        if used_percent.is_some() || resets_at.is_some() {
+            out.push(QuotaSnapshot {
+                app: apps::CODEX.into(),
+                account: plan.clone(),
+                captured_at: crate::store::now_ms(),
+                window_kind: kind.into(),
+                used: None,
+                limit_value: None,
+                used_percent,
+                resets_at,
+                raw_json: Some(rl.to_string()),
+            });
+        }
     }
     let creds = &rl["credits"];
     if creds["has_credits"].as_bool() == Some(true) {
@@ -569,5 +573,19 @@ mod tests {
             None,
         );
         assert_eq!(durs(&o), [None]);
+    }
+    #[test]
+    fn secondary_quota_changes_survive_unchanged_primary() {
+        let rate = |secondary| {
+            serde_json::json!({"timestamp":"2026-10-26T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":10,"window_minutes":300},"secondary":{"used_percent":secondary,"window_minutes":10080}}}}).to_string()
+        };
+        let out = parse(&[rate(20), rate(30)], None);
+        let weekly: Vec<_> = out
+            .quotas
+            .iter()
+            .filter(|q| q.window_kind == "weekly")
+            .collect();
+        assert_eq!(weekly.len(), 2);
+        assert_eq!(weekly[1].used_percent, Some(30.0));
     }
 }

@@ -1989,7 +1989,7 @@
 - **修复**：新增 `crates/ui/app.manifest`（与实验所用内容一致：supportedOS Windows 10/11、maxversiontested、PerMonitorV2 与 true/PM、Common-Controls v6 依赖），`build.rs` 经 winresource `set_manifest_file` 嵌入。DPI 声明与框架运行时 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 一致。
 - **踩坑**：清单注释里写了 windows-reactor 自包含部署的标记字符串，框架对整个清单资源做子串匹配，判定为自包含部署后报 "self-contained Windows App Runtime files are missing" 拒绝启动。改写注释并新增两项单元测试（清单含 Windows 10 声明与 PerMonitorV2；清单不含该标记）。
 - **验证**：嵌入后 debug 实例正常启动并加载 comctl32 6.0（清单生效）；`cargo fmt --all -- --check` 通过；`cargo clippy --workspace --all-targets --locked -- -D warnings` 无告警；`cargo test --workspace --locked` 368 项通过、4 项既有 ignored（UI 43 项）。嵌入版尚未由用户以微信输入法复测；未打包安装。
-- **提交与安装**：提交 2a15b9f 推送至 ui/scheduling-layout。installer/package.ps1 产出 dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.79 MB，sha256 71740b24…c533d4；未签名——本机无 GTT_SIGN_* 配置，脚本按设计跳过）；release UI 内含清单（supportedOS、PerMonitorV2 各 1 处）。安装前旧 UI/CLI 与 installed-build.json 备份至 target\diagnostics\preinstall-s160-20261024；正式实例 WM_CLOSE 后转入托盘，强制结束后 --quiet 安装首次即成功（退出码 0，无 .gtt-new 残留），安装后 UI d9cf2bf0…、CLI 637ac727… 与 targetelease 产物逐字节一致。安装器未自动拉起界面，手动启动后正式进程加载 comctl32 6.0（清单生效），gtt_panic.log 未新增。installed-build.json 仍是上次 CI 构建的出处记录，未改写。
+- **提交与安装**：提交 2a15b9f 推送至 ui/scheduling-layout。installer/package.ps1 产出 dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.79 MB，sha256 71740b24…c533d4；未签名——本机无 GTT_SIGN_* 配置，脚本按设计跳过）；release UI 内含清单（supportedOS、PerMonitorV2 各 1 处）。安装前旧 UI/CLI 与 installed-build.json 备份至 target\diagnostics\preinstall-s160-20261024；正式实例 WM_CLOSE 后转入托盘，强制结束后 --quiet 安装首次即成功（退出码 0，无 .gtt-new 残留），安装后 UI d9cf2bf0…、CLI 637ac727… 与 target\release 产物逐字节一致。安装器未自动拉起界面，手动启动后正式进程加载 comctl32 6.0（清单生效），gtt_panic.log 未新增。installed-build.json 仍是上次 CI 构建的出处记录，未改写。
 - **遗留**：右屏未复测（用户右屏被占用）。已排除本应用一侧的几何原因：隔离实例放到右屏时，主窗口、DesktopChildSiteBridge 与 0×0 隐藏的 InputSiteWindowClass 经 MonitorFromWindow/MonitorFromRect（NULL/NEAREST）全部解析到 DISPLAY2（物理 3840–7680），不存在"光标与窗口不在同一显示器"的条件；左屏候选框位置正确也排除了全局 DIP/物理像素混用。待右屏可用时，用 `ime-test.ps1 -Variant original -Monitor 2`（该 debug 产物已内嵌清单）单独复测，并以系统记事本在右屏作对照：都正常则清单已覆盖双屏；记事本也失败则属微信输入法自身问题。
 
 ## S161 下拉菜单改为向下展开（2026-10-24）
@@ -2196,3 +2196,35 @@
 - **构建与安装**：`package.ps1` → dist\GlobalTokenTracker-Setup-0.8.6-win-x64.exe（12.92 MB，sha256 02d7ecc1…477550b4，未签名）。旧 UI 与 installed-build.json 备份于 target\diagnostics\preinstall-s182-20261025。结束 GUI（PID 43088）后 --quiet 安装，退出码 0、无 .gtt-new 残留；安装后 UI a1f9376e… 与 target\release 产物逐字节一致，CLI 5cf70265… 未变。GUI 以 --minimized 重新拉起（PID 36936），gtt_panic.log 未新增。
 - **守护进程**：本轮零 Python 改动，无需重启。
 - **待用户确认**：限时模型池「永久」开关打开后保存，该模型是否长期显示「永久」、不再到期。
+
+
+## S186 全部扫描来源的当前格式核查与适配（2026-10-26）
+
+- 范围：基于 main 8daf747 干净工作区逐项核查 registry 的19来源，修改11个适配器及sync目录辅助；无新生产依赖，未提交/推送，未替换正式GUI/CLI或改正式账本。完整矩阵与官方固定SHA见 docs/SOURCE_COMPATIBILITY_20261026.md。
+- 关键变更：Kimi双官方客户端Wire格式；OpenCode新旧双schema、冷扫多库不删已有message、迟到完成水位及字面只读路径；Claude/Codex/Qoder/Grok/MiniMax目录覆盖；Codex secondary quota；Qoder append项目与纯缓存记录；Cline聚合fallback切换；Grok官方1e10 ticks/USD；DSH fork tagged cut；Devin当前官方v1文件后端及DEVIN_SESSIONS_DIR/cli。Cursor继续Metadata，来源未知数据不估算为精确tokens。
+- 独立依据：Exa MCP + 10个开源仓库快照和官方文档；Devin官方npm原生3000.11.205验证registry SHA512后仅在临时目录离线初始化/导入合成SQLite，实际产出meta v1及log.jsonl，无模型请求；原SQL与新文件同request_id去重及缺RID旧fallback回归。
+- 工作流：使用用户保存图，按用户许可仅本轮GLM high操作员、Step-5 xhigh审阅；母节点预验证精确候选，GTT登记命令实际检验SHA/路径/链接后落盘并留收据。早期纯思考截断、来源链接失败、零attempt时长/预算拒绝均保留；原完整图终审未伪装成功，另由原节点精简补审与Devin补齐子流程实际accepted。全部外部生成含失败195962 tokens，不含Codex/Exa，未声称整体提速。
+- 验证：核心328 passed/4 ignored，CLI 3 unit+15 integration passed，FFI1 passed，共347通过/4忽略；适配器109项（新增19）。三个包all-targets严格Clippy -D warnings、fmt/diff检查通过。7组目录端到端黄金值及重复扫描守恒通过；Devin官方导出两次扫描均1请求、50/20/100/5/1200，无SQL/文件双计。
+- 真实负载：副本账本19来源328输入、327扫描、63916次写入/升级、47942去重事件、0来源错误、48.1秒；14来源有本地输入，5来源仅源码/fixture覆盖。正式配置/工作流/账本保留；安装及受控历史回填是独立交付步骤。
+
+
+## S187 Devin官方原生文件后端的独立格式证明与补齐（2026-10-26）
+
+- 官方npm devin@3000.11.205-win32-x64归档通过registry SHA512完整性核对；二进制b086a1c7…af1d8，仅用于临时目录的help/list及SQLite导入，不登录、不发起模型请求、不替换用户的Devin。导入实际产生meta v1和kind=node的log.jsonl；DEVIN_SESSIONS_DIR实际布局为<override>/cli。
+- 原SQL和文件并存时共用devin:request_id；缺RID旧节点经session_id+node_id映射row_id保留SQL fallback；纯文件用稳定消息/节点身份。只读原生数据、未知meta版本显式拒绝、半行续读、忽略导入标记和prompt_history。新增6测试，Devin12项全过；官方导出的两个同请求assistant节点加旧SQL，连续两轮端到端均只1条记录，50/20/100/5/1200。
+- 候选通过隔离回归后，GLM high选择固定SHA登记命令由GTT真实落盘；Step-5 xhigh仅审计执行回执，accepted。完整语义与主线测试由Codex核对，未冒称外部模型逐行审阅了全部源码。
+
+## S188 扫描器增量Release构建与交付边界（2026-10-26）
+
+- cargo build --release -p globaltokentracker-cli -p globaltokentracker-ui --locked通过（1m22s）。增量zip仅含GUI、CLI及manifest；源码未提交且基于8daf747+task-only.diff的SHA记录，不能用提交SHA替代未提交树身份。
+- zip sha256 568f72ba9024fe5e51cdb0b705fe93c004bba0749011ba9aeb2550320337c751；CLI104dd8d9…e66f504、GUIf96b7733…dcc3f81。包在target/diagnostics/source-compat-20261026/。
+- 未执行正式安装/GUI重启或历史回填；已安装Rust内核、router、认证与用户配置保留。本任务的原生生成用量仍由常驻GTT正常入账，未作正式账本字节冻结的声明。最终保存配置revision35与原工作流逐字段一致，所有本任务作业终止/完成，无残留付费请求。
+
+
+## S189 未提交来源兼容改动的提交前复核（2026-10-26）
+
+- **范围**：复核 S186–S188 的 11 个来源适配器、sync 目录辅助及来源矩阵。逐文件限定提交，不包含 target、原始日志、凭据、安装产物或其他工作树；无新增生产依赖。保留正式运行时、工作流和账本。
+- **修复**：OpenCode 的 compaction 终态没有 time.completed，现按 status 区分 running/未知与 completed/failed，避免已结束压缩永久压住扫描水位；assistant 仍按其原完成时间判断。Cline 从 session fallback 切换到请求明细时，定向重建被删 fallback 所在日期，避免跨日旧汇总残留；不进行全账本重建。另修正文档历史段落中 target\release 的意外换行。
+- **实测**：修复前独立 CLI 样本确认 OpenCode 两轮 cursor 都为 99、Cline 原始行删除后旧日汇总仍保留。新增回归验证压缩运行态到两种终态、水位推进及不重复重扫；旧 Cline 汇总移除、其他归档日期及同日其他来源保留。复现材料保存在 target/diagnostics/push-review-adapter-fc05b99b79c844888be6b48dd0c8d8fe。
+- **验证**：使用 CARGO_INCREMENTAL=0 排除本机旧增量测试程序复用；cargo fmt --all -- --check、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo test --workspace --locked 全通过。共 425 passed / 4 ignored（core 330，CLI 18，FFI 1，setup 15，UI 61）；两项新增回归均出现在实际运行日志。日志及提交范围快照在 target/diagnostics/review-push-20261026。
+- **边界**：本次是源码审查和 Git 交付，不执行正式安装、服务重启、付费生成或历史回填。先前真实负载与部署记录属于各自历史步骤，不替代本轮验证。
