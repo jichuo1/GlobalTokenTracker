@@ -2165,3 +2165,55 @@
 - **macOS 与文档（子代理 B）**：SchedulingView.swift `applyTemplate` 同步整体替换（`.object` 时整体赋值）；`addCodex()` 优先取 codex 模板 task；ScheduleNode 无 effort 字段（S176 未达 macOS），该分支仅清 routeId/fallbackRoutes，未做结构变更（旧草稿兼容）。SKILL.md 与 visual-workflows.md 补模板行为一句。本机无 Swift 工具链未编译，做了括号配对与既有模式一致性静态核查（S172 先例，待 CI/Mac 验证）。
 - **测试与验证**：Rust 新增 3 项（整体替换语义〔含自定义键消失与 route 保留〕、本地模板清 route+effort、新建母节点继承 codex 模板 task〔include_str! 编译期已带上新 JSON〕）；修掉 clippy 三处（冗余闭包、两处 assert_is_empty）。`cargo fmt --check` / `clippy -D warnings` / `cargo test --workspace --locked` 全绿（core 309 项）。Python `Ran 73 tests, FAILED (failures=5, errors=25)` 与基线逐项一致。双子代理按文件分块（A：JSON+tests 模板区；B：Swift+docs；主会话：crates/），无重叠，diff 逐块复核归属。
 - **未安装**：本轮改动在工作区验证完毕后提交；如需更新设备上的 GUI（整体替换语义在 UI 侧）与重启守护进程（模板数据经 scheduling get 下发，mtime 戳缓存自动失效），按 S177 流程另行交付。
+
+## S180 Rust 调度决策内核与事件驱动工作流，隔离迁移第一阶段（2026-10-25）
+
+- **基准与隔离**：用户明确批准按主仓库当前版本迁移，正式服务切换前另行确认。基于 b75d9a1 创建 codex/rust-scheduling-core，工作树 D:/GlobalTokenTracker-rust-scheduling；独立协调器旧源码不作为产品基准。主检出后来出现的 UI/vendor 并发改动均未触碰，未合并、安装、启停正式服务或修改正式配置。
+- **实现**：core 新增 scheduling_kernel 和 gtt-scheduler-kernel 常驻 stdio 程序，复用既有依赖；Rust 接管选路评分/拒绝原因/输出余量、预算与容量预约决策、工作流依赖/终态/unknown 分类和回报目标计算。Python 仍为唯一持久状态写入方，在原容量锁内应用 Rust 预约增量；模型适配器、文件 broker、审批/验收不迁动。显式 scheduler_kernel 配置选后端，默认 Python；Rust 故障拒绝执行，不自动换后端或重放。
+- **事件与通信**：Rust 模式以 job 持久化、控制决策和 Future 完成唤醒工作流，替代 200/500ms 轮询；revision+Condition 防止通知丢失，30s 仅作保守复查。健康/质量批量快照；私有帧 16MiB，串行请求归属、写入/读取超时、子进程 EOF 生命周期、64KiB stdout 缓冲。/health 追加后端、内核协议和存活状态。
+- **回归**：9 项迁移专项通过，含 160 个选路和 40 个预约差异案例、中文/Emoji/CRLF 行切片真实文件、审阅/验收、内核故障零调用和隔离 HTTP 守护进程。主仓库原样 Python 基准 110 项为 6 failures/27 errors；加入专项后 119 项仍相同失败集合。旧 421 项兼容语料补必需 effort 夹具后，两后端均通过 417 项，1 failure/3 errors 名称一致（旧手动探针预算、节点 effort 执行身份预期）；保留失败，不称全绿。Rust workspace 407 passed/4 ignored，fmt、workspace clippy -D warnings、release 内核构建通过；证据在 target/diagnostics/rust-scheduler。
+- **性能与局限**：成对采样同时比较原 Python、快照 Python、含编解码/IPC 的 Rust；四节点任务链使用真实临时数据库和合成适配器，零原生模型生成。保留首轮和最终样本，最终数值与源码/产物指纹见 benchmark-final.json、delivery-verification.json。事件驱动收益与语言收益分别呈现，不以合成链路倍数承诺真实模型加速。本阶段尚非完整 Rust 守护进程，持久化和研究组上层循环保留 Python；正式切换未执行。
+- **最终采样**：32/147/512 路线 mean 2.926→2.227 / 13.038→8.549 / 59.284→35.048ms，下降 23.9%/34.4%/40.9%；147 路线 P95 15.439→9.731ms。四节点链 mean 2054.213→99.339ms（8 次/后端），下降 95.2%，耗时比 20.68。快照 Python 的 147 路线为 5.908ms，比当前 Rust 桥接快；保留此结果，未把访问模式/事件驱动收益冒充纯语言收益。
+
+## S182 Rust 状态所有权、增量运行记录与本机 0.7.0 激活（2026-10-25）
+
+- **实现**：Rust 独占协调器 SQLite，跨后端所有者锁防止双写；运行记录用持久 revision/CAS 和增量更新，Python 仅缓存已确认的只读副本，SQL 写、回滚和冲突使缓存失效。选路+预约合为单次请求并缓存目录；作业/计量/进度及容量缺口原子提交，健康和回报日志原生批处理。内部消息分块保持完整，22 MB 历史真实往返通过。适配器、可信文件执行及 Codex 审批保留 Python。
+- **修复与回归**：修复取消期间旧快照覆盖、无效/NaN 原生计量导致无法持久化；旧非有限计量按未知读取，报告文本不改。将已有完整回归纳入主仓库，更新监工/步骤数/截止模式/思考等级/手动探针夹具；并发预算测试改为事件同步，断言保持。Python/Rust 后端各 441 项通过；新增安装成败/保留关闭状态/忙碌拒绝的 4 项测试通过。Rust workspace 407 passed、4 ignored；fmt、clippy -D warnings、release 通过。正式历史只读副本的 154 作业、516 用量、6 受理、2 操作收据哈希一致。
+- **性能**：最终同机合成样本中，147 路线的选路+预约从第一阶段 10.430ms 降至 7.111ms，IPC 从 2 次/306754 字节降至 1 次/3187 字节；1 MiB 状态更新 5.927→3.420ms。四节点链 112.383→111.031ms，基本持平；因状态改为跨进程持久化，全链传输量仍高于第一阶段，未宣称所有路径都减少通信。样本每次显式唯一 request_id，并断言 4 次合成适配器调用，排除幂等缓存；真实模型调用为零。
+- **授权与部署**：用户追加“完成后更新本地调度器还有配套设置”，随后在要求收尾时明确确认“确认现在更新”。安装 44 个候选文件至本机 Programs/GlobalTokenTracker 的 Rust 程序与 model-router 目录；配置 schema_version=2，旧服务拒绝加载该配置；MCP 入口改为安装目录并同步 Skill。临时停止新受理、空闲时仅终止核对过身份的旧 daemon；恢复原受理开关后只读刷新出 147 路线。未替换现有 GUI/CLI 客户端，原生 CLI scheduling list 与新 MCP 初始化/工具发现现场通过。
+- **最终读回**：正式 daemon PID 26620，version=0.7.0、scheduler_backend=rust、state_owner=rust、内核存活。调度 enabled=true、revision=22、pool=11；配置其余字段、scheduling.json 字节和全部历史数量保持。MCP 单客户端退出后共享 daemon 存活；44 个安装文件哈希与候选一致。
+- **恢复证据**：备份位于 C:/Users/Administrator/.globaltokentracker/router/backups/rust-0.7.0-8f1d471f0b12。激活、读回、性能、回归与只读迁移报告保存在 target/diagnostics/rust-stage2；没有新增生产依赖、真实模型生成、Git 提交或推送。
+
+
+## S183 动态输出额度与正式自动分步，0.7.1更新（2026-10-25）
+
+- 在用户确认等待另一会话完成后开始，基于已安装0.7.0精确移植本轮增量；Python/Rust首次及后续预约按模型容量、上下文、运行策略和累计剩余预算收紧，保留fixed与历史用量门槛。预算提示计入输入估算，自动报告分段共享总预算、尝试次数和硬截止，完整段逐一校验，未知付费不重放。
+- 两后端各459项通过，Rust调度专项5项与core/all-targets Clippy通过。输出字段、分段及恢复的兼容性与真实硬截止约束均覆盖。
+- 正式0.7.1自动两段调用成功，15,857→11,121 tokens，总用量8,647；固定65,536/总预算22,000在发出前拒绝，计量为零。安装前后配置字节及五类历史表数量/内容哈希相同。备份和精确安装清单见target/diagnostics/output-limits-live/activation.json。
+
+## S184 工作流效率对照、失败成本统计与0.7.2更新（2026-10-25）
+
+- 同原始文件、同验收标准比较Codex单干、DeepSeek操作员、新提示GLM及max/high运行副本。小任务单干12.69s、工作流执行31.86s，换源组合44.88s；双模块单干50.89s通过，工作流max两组均截断，high组仅完成一模块，拒绝整体验收。失败与部分落盘证据保留；没有宣称正提速或把异步等待计成模型性能。
+- 成本学习补入真实已计量的失败尝试，保留质量、认证、历史预算与未知计量边界；操作员提示改成结构化上下文并去重无关身份/指令，保留源文件SHA/内容/行范围/验收/上游证据。Skill同步小任务直做、函数级规划及按实测判断分工的指导；不改保存的工作流模型和思考档位。
+- 两后端各464项通过。正式0.7.2复验自动两页成功，15,857→10,102 tokens，总用量9,564。第二次安装前后配置和五类历史表哈希一致；基准中的文件操作只发生在诊断白名单，无命令授权。
+- 用户单独批准原两条路线临时续期90分钟；结束恢复原有效期，最终revision24，其余设置与实验前一致、保存工作流不变，所有测试运行终态且监工清空。源码/安装程序/匹配Rust程序保留现有后端；没有新增生产依赖、提交或推送。详细方法、原始数据与限制见docs/OUTPUT_LIMITS_AND_EFFICIENCY.md。
+
+
+## S185 母节点并行工作、原子编辑与配置草稿合并（0.7.4）
+
+- 实现controller_work_v1/operator_recovery_v1/atomic_edit_bundle_v1/settings_rebase_v1，保持原授权、累计预算、截止、未知结果与SHA保护。真实批量配对27.927→21.886s，原生重叠4.693s，85项同验收；样本和限制见docs/CONTROLLER_PARALLEL_RESULTS.md。
+- 首轮四组计划冲突失败保留，修正后小负载4/4、批量2/2。小负载时间差不归因于调度。恢复临时两路线有效期，未重写保存工作流，所有测试运行终态、监工清空。
+- 两后端全量最终各490/491，唯一并发负载下3秒清理阈值失败，活动单项16通过；没有放宽阈值。配置/历史安装前后哈希一致，未新增依赖、提交或推送。
+
+
+## S186 Rust 运行时未提交改动的提交前复核（2026-10-26）
+
+- **范围**：在现有 codex/rust-scheduling-core 工作树复核 Rust 调度/状态所有权迁移、Python 桥接、母节点并行工作、原子编辑、截断恢复、配置三方合并及对应回归和诊断脚本。保留分支独立性，不混入主工作区来源适配与后续 UI 改动；target、Python 缓存及私有运行产物不纳入提交。
+- **审查**：核对单 owner 锁、串行 IPC 与分片限制、超时后不自动重启/重放、SQLite revision/CAS、作业/用量/事件原子提交与缓存失效；文件授权、报告边、恢复提案、累计预算、截止和未知结果拒绝规则保持。Rust workflow 的 has_decisions 投影仍将控制器记录计入，Python 执行层另用 has_dispatch_decisions 拒绝仅控制器记录释放依赖，现有专项覆盖没有实际生成。
+- **修复**：与独立协调器同步修复缺 operations 的完整报告恢复死路，生成绑定原报告摘要/作业/节点的修正提案，仅由 Codex 显式 revise 触发新生成。新增回归覆盖无自动调用、无文件变更、错误摘要与无操作重放拒绝、明确批准后落盘/验收及累计计量；操作员工作流专项 15/15 通过。
+- **Rust 验证**：cargo fmt --all -- --check、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo test --workspace --locked 通过，407 passed / 4 ignored。cargo build --release --locked -p globaltokentracker-core --bin gtt-scheduler-kernel 通过；双后端验证使用本轮构建的绝对路径内核。
+- **Python 后端验证**：scripts/run_scheduler_regressions.py --backend python 对同一维护语料 492/492 通过，包含新恢复回归。
+- **边界**：本次仅审查、离线验证和 Git 交付；没有调用正式模型、调整模型池租期、安装或重启正式服务。S180–S185 中的部署与真实负载结果属于历史运行证据。日志及提交清单位于 D:/GlobalTokenTracker/target/diagnostics/review-push-20261026。
+- **Rust 后端最终验证**：同一 run_scheduler_regressions.py --backend rust --kernel <本轮内核绝对路径>：492/492 通过，157.749s；Python 后端 492/492。首轮 Rust 后端在主工作区并发编译期间为 1 failure / 1 error，均在活动超时套件；原结果保留，低负载重跑完整语料通过，未放宽断言或超时阈值。源码编译、JSON 解析及 git diff --check 通过；backend-rust.json / backend-rust-final.json 与相应日志保留全部结果。
+- **提交冻结**：提交前发现并行新增 tiered 输出及 generation_budget.py/workflow_materials.py；本次不纳入后续工作。slicing.py 的提交内容经 SHA-256 证明与最初已审查快照一致；operator_workflow.py 从 SHA-256 完全匹配的初始原件仅加入本轮缺 operations 的修复。两文件均只更新索引，工作区并行内容原位保留。另清理新文件 controller_work.py 末尾多余空行；隔离验证直接导出暂存树运行。
+- **最终暂存树专项**：直接导出冻结暂存树至隔离目录，不含 generation_budget.py/workflow_materials.py；输出预算/分步、动态切片、截断恢复、母节点工作、操作员工作流及配置合并七套测试，Python/Rust 后端各 93/93 通过。已验证索引与导出源码逐字节一致（仅换行标准化），记录见 staged-validation-confirmed.json/log。

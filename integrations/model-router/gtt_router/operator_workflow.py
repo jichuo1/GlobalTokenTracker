@@ -16,6 +16,8 @@ import time
 import uuid
 
 from .models import Task, now_ms
+from .operator import WorkspaceBusy
+from .controller_work import ControllerWork, has_dispatch_decisions
 from .scheduling import INFORMATION_PROMPT, MODEL_TYPES, TERMINAL, integer, reconcile_information, report_dependencies, text
 
 
@@ -27,6 +29,7 @@ class OperatorWorkflow:
     def __init__(self, scheduling):
         self.owner = scheduling
         self.service = scheduling.service
+        self.controller = ControllerWork(self)
         self.completion_lock = threading.Lock()
         self.completion_order = 0
         with self.service.store.lock, self.service.store.conn:
@@ -52,6 +55,21 @@ class OperatorWorkflow:
     def _event(self, run, source, kind, payload, event_id):
         # Progress can traverse reviewer relays without paying for a model call.
         # A final review itself remains a separately attributed native report.
+        kernel = self.service.scheduler_kernel
+        if kernel is not None and kernel.persistent:
+            kernel.call("db_report_event", {"run_id": run["id"], "source": source, "kind": kind, "event_id": event_id,
+                "work_revision": run["nodes"][source].get("work_revision", 1), "now_ms": now_ms(), "payload": payload})
+            return
+        if kernel is not None:
+            targets = (kernel.call("db_reports", {"run_id": run["id"], "source": source, "kind": kind}) if kernel.persistent else
+                kernel.call("reports", {"definition": kernel.definition(run["definition"]), "source": source, "kind": kind}))["targets"]
+            for target in targets:
+                value = {"event_id": event_id, "source_node": source, "target_node": target, "kind": kind,
+                    "work_revision": run["nodes"][source].get("work_revision", 1), "at": now_ms(), "payload": payload}
+                with self.service.store.lock, self.service.store.conn:
+                    self.service.store.conn.execute("INSERT OR IGNORE INTO workflow_reports(run_id,event_id,payload) VALUES(?,?,?)",
+                        (run["id"], event_id + ":revision:" + str(value["work_revision"]) + ":" + target, json.dumps(value, ensure_ascii=False)))
+            return
         node_types = {n["id"]: n["node_type"] for n in run["definition"]["nodes"]}
         destinations, seen = [source], set()
         while destinations:
@@ -95,15 +113,19 @@ class OperatorWorkflow:
                     "health": {k: health.get(k) for k in ("verification_required", "last_verified_at", "last_error", "cooldown_until", "latency_ms")},
                     "source_inflight": inflight.get(route.source, 0),
                     "provider_inflight": inflight.get("provider:" + route.failure_domain, 0)})
+        board = self.controller.view(run)
         return {"run_id": run_id, "state": run["state"], "control_revision": run.get("control_revision", 0),
                 "caller_role": "codex", "identity_verified": False, "definition": graph, "input": run["input"],
-                "levels": levels, "nodes": run["nodes"], "model_routes": models, "assignments": run.get("assignments", {}),
+                "levels": levels, "nodes": self.controller.display_nodes(run, board), "model_routes": models, "assignments": run.get("assignments", {}),
                 "token_budget": graph["token_budget"], "tokens_used": run["tokens_used"],
                 "tokens_estimated": run["tokens_estimated"], "pending_actions": self.pending(run),
+                "controller_work": board, "evidence_digest": self._evidence_digest(run),
                 "execution_scope": {k: v for k, v in (run.get("execution") or {}).items() if k != "commands"},
                 "command_ids": list((run.get("execution") or {}).get("commands", {}))}
 
     def pending(self, run):
+        if run["state"] in TERMINAL:
+            return []
         assignments = run.get("assignments", {})
         operators = [n for n in run["definition"]["nodes"] if n["node_type"] == "operator"]
         missing = [n["id"] for n in operators if n["id"] not in assignments and run["nodes"][n["id"]]["state"] not in TERMINAL]
@@ -113,14 +135,28 @@ class OperatorWorkflow:
                       "requires": "real_caller_codex", "topology_action": "topology"}]
         if run.get("review_proposals"):
             items.append({"type": "review", "proposals": run["review_proposals"], "correction_requires_coordinate": True})
-        if run.get("execution_complete") and not run.get("accepted"):
+        board = self.controller.view(run)
+        if board["reports_ready"]:
+            items.append({"type": "inspect_reports", "reports": board["reports_ready"], "can_work_independently": bool(board["ready_items"])})
+        if board["ready_items"]:
+            items.append({"type": "continue_controller_work", "item_ids": board["ready_items"], "should_wait": False})
+        failed = [ident for ident, node in run["nodes"].items() if node["state"] in TERMINAL - {"succeeded"}]
+        if failed and not run.get("review_proposals"):
+            items.append({"type": "inspect_failures", "node_ids": failed, "unknown_results_must_not_replay": True})
+        if (run.get("execution_complete") and not run.get("accepted") and not failed
+                and not run.get("review_proposals") and not self.controller.unfinished(run)):
             items.append({"type": "accept", "requires": "real_caller_codex", "evidence_digest": self._evidence_digest(run)})
         return items
 
     @staticmethod
     def _evidence_digest(run):
-        return digest({k: {p: v.get(p) for p in ("state", "job_id", "work_revision", "operation_result", "report_digest")}
-                       for k, v in run["nodes"].items()})
+        nodes = {k: {p: v.get(p) for p in ("state", "job_id", "work_revision", "operation_result", "report_digest")}
+                 for k, v in run["nodes"].items()}
+        if run.get("controller_work", {}).get("items"):
+            return digest({"nodes": nodes, "controller_work": {ident: {k: item.get(k) for k in
+                ("status", "summary", "sources", "instruction", "kind", "access", "depends_on", "dependency_sources", "verdict")}
+                for ident, item in run["controller_work"]["items"].items()}})
+        return digest(nodes)
 
     @staticmethod
     def _unresolved_information(run):
@@ -168,14 +204,19 @@ class OperatorWorkflow:
                 raise ValueError("file_ranges requires one-based inclusive line ranges")
             integer(bounds[0], "file start line", 1, 2**31 - 1)
             integer(bounds[1], "file end line", bounds[0], 2**31 - 1)
+        try:
+            files = self._assignment_files(grant, paths, ranges, blocking=False) if paths else []
+            snapshot_pending = False
+        except WorkspaceBusy:
+            files, snapshot_pending = [], True
         return {"id": uuid.uuid4().hex, "node_id": ident, "instruction": text(value.get("instruction"), "assignment instruction", 16000),
                 "paths": paths, "file_ranges": ranges, "command_ids": list(dict.fromkeys(commands)), "input_range": [low, high], "acceptance": [text(a, "acceptance", 2000) for a in acceptance],
-                "files": self._assignment_files(grant, paths, ranges) if paths else [], "source": "caller_reported_codex"}
+                "files": files, "snapshot_pending": snapshot_pending, "source": "caller_reported_codex"}
 
-    def _assignment_files(self, grant, paths, ranges):
+    def _assignment_files(self, grant, paths, ranges, *, blocking=True):
         files, used = [], 0
         for path in paths:
-            item = self.service.operator.snapshot(grant, [path])[0]
+            item = self.service.operator.snapshot(grant, [path], blocking=blocking)[0]
             content = item["content"]
             if path in ranges:
                 start, end = ranges[path]
@@ -245,7 +286,7 @@ class OperatorWorkflow:
             remaining -= len(excerpt)
         return result
 
-    def _execute(self, run_id, node_id, assignment, grant, operations, cancel, progress, work_revision):
+    def _execute(self, run_id, node_id, assignment, grant, operations, cancel, progress, work_revision, bundles=None):
         paths = list(assignment["paths"])
         if any(op.get("op") == "run_command" for op in operations if isinstance(op, dict)):
             # A fixed caller command can legally update other files in its
@@ -271,7 +312,7 @@ class OperatorWorkflow:
         with self.completion_lock:
             self.completion_order += 1
             order = self.completion_order
-        return {**result, "before_files": before, "after_files": after, "file_diffs": diffs,
+        return {**result, **({"operation_bundles": bundles} if bundles else {}), "before_files": before, "after_files": after, "file_diffs": diffs,
                 "completed_order": order, "completed_at": now_ms(), "work_revision": work_revision,
                 "assignment_id": assignment["id"]}
 
@@ -299,9 +340,122 @@ class OperatorWorkflow:
         if any(file["sha256"] != expected[file["path"]]["sha256"] or file["exists"] != expected[file["path"]]["exists"] for file in actual):
             raise ValueError("workflow_workspace_changed: rerun review against current files before accepting")
 
+    @staticmethod
+    def _dependents(run, ident, *, reports_only=False):
+        types = {n["id"]: n["node_type"] for n in run["definition"]["nodes"]}
+        reached, pending = set(), [ident]
+        while pending:
+            source = pending.pop()
+            for edge in run["definition"]["edges"]:
+                if edge["from"] != source or reports_only and edge.get("kind", "task") != "report":
+                    continue
+                target = edge["to"]
+                if target not in reached and types[target] != "codex":
+                    reached.add(target)
+                    pending.append(target)
+        return reached
+
+    def _check_independent_revision(self, run, assignment):
+        ident = assignment["node_id"]
+        affected = self._dependents(run, ident) | {ident}
+        for other, state in run["nodes"].items():
+            if state["state"] not in {"running", "executing"}:
+                continue
+            previous = run.get("assignments", {}).get(other, {})
+            if (other in affected or assignment["command_ids"] or previous.get("command_ids")
+                    or self.controller.overlap(assignment["paths"], previous.get("paths", []))):
+                raise ValueError("Wait for conflicting in-flight work before approving a correction")
+
+    def _generation_proposal(self, run, spec, node, job):
+        error = next((r.get("error") for r in job.get("results", []) if r.get("error")), {})
+        if (spec["node_type"] != "operator" or error.get("code") != "output_truncated" or node["state"] == "unknown"
+                or any(a.get("unknown_paid_outcome") for a in job.get("attempts", [])) or not job.get("attempts")):
+            return
+        previous = job["attempts"][-1]
+        cap = node.get("generation_token_ceiling", job["task"]["token_budget"])
+        ids = {v["job_id"] for v in [*node.get("history", []), node] if v.get("job_id")}
+        spent = sum(self.service.store.job(ident)["tokens_used"] for ident in ids)
+        remaining = max(0, cap - spent)
+        failed_output = previous["effective_output_tokens"]
+        native = previous.get("decision", {}).get("native_output_limit")
+        policy = self.service.call_profile()["limits"]["max_output_tokens"]
+        output_cap = min(policy, native) if type(native) is int and native > 0 else policy
+        input_reserve = max(0, previous["decision"]["reserved_token_estimate"] - failed_output)
+        target = int(max(0, min(output_cap, 2 * failed_output, remaining - input_reserve)))
+        value = {"kind": "generation_recovery", "node_id": spec["id"], "operator_nodes": [spec["id"]],
+            "job_id": job["job_id"], "work_revision": node.get("work_revision", 1),
+            "node_token_ceiling": cap, "tokens_spent": spent, "remaining_tokens": remaining,
+            "deadline_at": node.get("generation_deadline_at", job["deadline_at"]),
+            "failed_output_tokens": failed_output, "target_output_tokens": target,
+            "reasoning_only": error.get("details", {}).get("visible_output_chars") == 0,
+            "suggested_generation": {"output_mode": "adaptive", "max_output_tokens": target} if target > failed_output else None,
+            "summary": "Known length truncation: caller may approve bounded output headroom or a revised function-sized assignment; partial operations cannot execute.",
+            "requires_caller_decision": True}
+        value["digest"] = digest(value)
+        proposals = run.setdefault("review_proposals", [])
+        if not any(p.get("digest") == value["digest"] for p in proposals):
+            proposals.append(value)
+
+    def caller_review_proposals(self, run, reports, issues):
+        if not isinstance(reports, list) or not 1 <= len(reports) <= 8 or not isinstance(issues, list) or not 1 <= len(issues) <= 8:
+            raise ValueError("Caller review needs bounded current reports and concrete issues")
+        issues = [text(issue, "caller review issue", 2000) for issue in issues]
+        operators = {spec["id"] for spec in run["definition"]["nodes"] if spec["node_type"] == "operator"}
+        prepared = []
+        for report in reports:
+            if not isinstance(report, dict) or set(report) != {"node_id", "fingerprint"} or report.get("node_id") not in operators:
+                raise ValueError("Caller review must identify an operator result")
+            ident = report["node_id"]
+            node = run["nodes"][ident]
+            if (node["state"] != "succeeded" or (node.get("operation_result") or {}).get("state") != "applied"
+                    or report["fingerprint"] != self.controller.report_identity(ident, node)):
+                raise ValueError("Caller review report is stale or has not been applied")
+            job = self.service.store.job(node["job_id"])
+            value = {"kind": "caller_review", "source": "caller_reported_codex", "identity_verified": False,
+                "node_id": ident, "operator_nodes": [ident], "job_id": node["job_id"],
+                "work_revision": node.get("work_revision", 1), "issues": issues,
+                "node_token_ceiling": node.get("generation_token_ceiling", job["task"]["token_budget"]),
+                "deadline_at": node.get("generation_deadline_at", job["deadline_at"]),
+                "failed_output_tokens": job["attempts"][-1]["effective_output_tokens"],
+                "summary": "Caller verification found concrete defects in the exact applied result; a scoped revise decision is required."}
+            value["digest"] = digest(value)
+            prepared.append(value)
+        return prepared
+
+    def _generation_override(self, run, proposal, assignment, generation):
+        if generation is not None and (not isinstance(generation, dict) or set(generation) - {"output_mode", "max_output_tokens", "route_effort"}):
+            raise ValueError("Recovery cannot change quality, routes, or total budgets")
+        ident = assignment["node_id"]
+        node = run["nodes"][ident]
+        if proposal["job_id"] != node.get("job_id") or proposal["work_revision"] != node.get("work_revision", 1):
+            raise ValueError("Generation recovery proposal is stale")
+        old = self.service.store.job(node["job_id"])
+        expected = "succeeded" if proposal.get("kind") == "caller_review" else "failed"
+        if old["state"] != expected or any(a.get("unknown_paid_outcome") for a in old["attempts"]):
+            raise ValueError("Reviewed recovery requires a known completed result")
+        ids = {v["job_id"] for v in [*node.get("history", []), node] if v.get("job_id")}
+        cap = proposal["node_token_ceiling"]
+        remaining = cap - sum(self.service.store.job(job_id)["tokens_used"] for job_id in ids)
+        if proposal["deadline_at"] <= now_ms():
+            raise ValueError("operator_recovery_deadline_exhausted")
+        if remaining < 1000:
+            raise ValueError("operator_recovery_budget_exhausted")
+        spec = next(n for n in run["definition"]["nodes"] if n["id"] == ident)
+        previous_overrides = node.get("generation_overrides", {})
+        fields = {**spec["task"], **previous_overrides, **(generation or {}), "token_budget": remaining}
+        parsed = self.service.parse_task(fields)
+        native = old["attempts"][-1].get("decision", {}).get("native_output_limit")
+        if type(native) is int and native > 0 and parsed.max_output_tokens > native:
+            raise ValueError("Recovery exceeds the selected model output range")
+        previous = run["assignments"][ident]
+        changed = any(assignment[k] != previous[k] for k in ("instruction", "paths", "file_ranges", "command_ids", "input_range"))
+        if not changed and parsed.max_output_tokens <= proposal["failed_output_tokens"]:
+            raise ValueError("Recovery must add output headroom or revise the assignment")
+        return {**previous_overrides, **(generation or {}), "token_budget": remaining}, cap
+
     def coordinate(self, run_id, expected_revision, decision, event_id):
         text(event_id, "Codex decision identity")
-        if not isinstance(decision, dict) or decision.get("type") not in {"assign", "revise", "retry_operations", "accept", "reject"}:
+        if not isinstance(decision, dict) or decision.get("type") not in {"assign", "revise", "retry_operations", "controller_work", "accept", "reject"}:
             raise ValueError("Unsupported Codex decision")
         with self.owner.lock:
             run = self.owner.status(run_id, full=True)
@@ -326,7 +480,9 @@ class OperatorWorkflow:
             gate._workflow_supervision_opt_out = not run["definition"]["luna_supervision"]
             self.service.require_dispatch(run["workflow_id"], task=gate)
             kind = decision["type"]
-            if kind == "assign":
+            if kind == "controller_work":
+                self.controller.update(run, decision)
+            elif kind == "assign":
                 if set(decision) - {"type", "assignments", "reason"}:
                     raise ValueError("Invalid assignment decision fields")
                 rows = decision.get("assignments")
@@ -346,15 +502,13 @@ class OperatorWorkflow:
                         run["nodes"][node["id"]].update(state="succeeded", source="caller_reported_codex")
                 run["state"] = "running"
             elif kind in {"revise", "retry_operations"}:
-                fields = {"type", "proposal_digest", "reason", "node_id"} if kind == "retry_operations" else {"type", "assignment", "proposal_digest", "reason"}
+                fields = {"type", "proposal_digest", "reason", "node_id"} if kind == "retry_operations" else {"type", "assignment", "proposal_digest", "reason", "generation"}
                 if set(decision) - fields:
                     raise ValueError("Invalid correction decision fields")
                 proposals = run.get("review_proposals", [])
                 proposal = next((p for p in proposals if p["digest"] == decision.get("proposal_digest")), None)
                 if proposal is None:
                     raise ValueError("Correction must confirm an exact current reviewer proposal digest")
-                if any(n["state"] in {"running", "executing"} for n in run["nodes"].values()):
-                    raise ValueError("Wait for in-flight work before approving a correction")
                 if kind == "retry_operations":
                     ident = text(decision.get("node_id"), "operation retry node")
                     prior_assignment = run.get("assignments", {}).get(ident)
@@ -364,6 +518,7 @@ class OperatorWorkflow:
                         "node_id", "instruction", "paths", "command_ids", "input_range", "acceptance", "file_ranges"}})
                 else:
                     assignment = self._assignment(run, decision.get("assignment"))
+                self._check_independent_revision(run, assignment)
                 if assignment["node_id"] not in proposal["operator_nodes"]:
                     raise ValueError("Correction assignment is outside the reviewed operator scope")
                 ident = assignment["node_id"]
@@ -372,6 +527,21 @@ class OperatorWorkflow:
                     raise ValueError("Unknown side effects require reconciliation; do not replay as a correction")
                 if node.get("work_revision", 1) >= run["definition"].get("max_rounds", 8):
                     raise ValueError("workflow_correction_round_limit")
+                generation = None
+                if proposal.get("kind") in {"generation_recovery", "caller_review"}:
+                    if kind != "revise":
+                        raise ValueError("Partial generation cannot reuse file operations")
+                    generation, ceiling = self._generation_override(run, proposal, assignment, decision.get("generation"))
+                elif kind == "revise" and node.get("generation_token_ceiling"):
+                    current_job = self.service.store.job(node["job_id"])
+                    binding = {**proposal, "kind": "caller_review", "job_id": node["job_id"],
+                        "work_revision": node.get("work_revision", 1), "node_token_ceiling": node["generation_token_ceiling"],
+                        "deadline_at": node["generation_deadline_at"],
+                        "failed_output_tokens": current_job["attempts"][-1]["effective_output_tokens"]}
+                    generation, ceiling = self._generation_override(run, binding, assignment, decision.get("generation"))
+                    proposal = {**proposal, "deadline_at": binding["deadline_at"]}
+                elif decision.get("generation") is not None:
+                    raise ValueError("Generation overrides require an exact generation-recovery proposal")
                 cached_job_id = None
                 if kind == "retry_operations":
                     cached = self.service.store.job(node["job_id"])
@@ -389,20 +559,17 @@ class OperatorWorkflow:
                 self._validate_assignments(run, prospective)
                 node.setdefault("history", []).append({k: copy.deepcopy(v) for k, v in node.items() if k != "history"})
                 node.update(state="running" if cached_job_id else "pending", job_id=cached_job_id, work_revision=node.get("work_revision", 1) + 1)
+                if generation is not None:
+                    node.update(generation_overrides=generation, generation_token_ceiling=ceiling,
+                                generation_deadline_at=proposal["deadline_at"])
                 if cached_job_id:
                     node["model_report_reused"] = cached_job_id
-                for key in ("operation_result", "report_digest", "review", "reason", "information_requests", "information_resolved_ids"):
+                for key in ("operation_result", "report_digest", "review", "reason", "error", "job_state", "activity", "reports", "report_count", "waiting_reason", "information_requests", "information_resolved_ids"):
                     node.pop(key, None)
                 run["assignments"] = prospective
                 # Reviewers are activated again only by the new revision's real
                 # receipts. Successful downstream operators never replay here.
-                frontier, reached = [ident], set()
-                while frontier:
-                    current = frontier.pop()
-                    for edge in run["definition"]["edges"]:
-                        if edge.get("kind", "task") == "report" and edge["from"] == current and edge["to"] not in reached:
-                            reached.add(edge["to"])
-                            frontier.append(edge["to"])
+                reached = self._dependents(run, ident, reports_only=True)
                 renewed = {ident}
                 for spec in run["definition"]["nodes"]:
                     if spec["id"] in reached and spec["node_type"] in {"reviewer", "model"}:
@@ -429,6 +596,8 @@ class OperatorWorkflow:
                         raise ValueError("Cannot accept a rejected or incomplete review")
                 if self._unresolved_information(run):
                     raise ValueError("Cannot accept unresolved_information_requests")
+                if self.controller.unfinished(run):
+                    raise ValueError("Cannot accept unfinished controller work")
                 # File reads may wait on another workspace command. Do not hold
                 # the controller lock; recheck identity/revision after the read.
                 evidence = self._evidence_digest(run)
@@ -492,9 +661,12 @@ class OperatorWorkflow:
     def _finish_model(self, run, spec, node, job, executor, futures):
         node.update(tokens_used=job["tokens_used"], tokens_estimated=job["tokens_estimated"], report_count=len(job["results"]))
         node["reports"] = [{"worker": r["worker"], "ok": r.get("ok", False), "summary": str((r.get("content") or {}).get("summary", ""))[:600], "excerpt_only": True} for r in job["results"][:8]]
-        if job["state"] != "succeeded" or not job["results"] or not all(r.get("ok") for r in job["results"]):
+        outcome = self.service.scheduler_kernel.job_state(job, require_nonempty=True) if self.service.scheduler_kernel else None
+        failed = outcome["state"] != "succeeded" if outcome else (job["state"] != "succeeded" or not job["results"] or not all(r.get("ok") for r in job["results"]))
+        if failed:
             unknown = job["state"] == "interrupted" or any(a.get("unknown_paid_outcome") or (a.get("error") or {}).get("code") == "timeout" for a in job["attempts"])
-            node.update(state="unknown" if unknown else "failed", error=job.get("error") or next((r.get("error") for r in job["results"] if r.get("error")), None))
+            node.update(state=outcome["state"] if outcome else "unknown" if unknown else "failed", error=job.get("error") or next((r.get("error") for r in job["results"] if r.get("error")), None))
+            self._generation_proposal(run, spec, node, job)
             self._event(run, spec["id"], "result", {"state": node["state"], "job_id": job["job_id"]}, job["job_id"] + ":failed")
             return
         content = job["results"][0]["content"]
@@ -512,9 +684,25 @@ class OperatorWorkflow:
         if spec["node_type"] == "operator":
             operations = content.get("operations")
             if not isinstance(operations, list):
-                node.update(state="blocked", reason="operator_report_requires_operations")
+                reason = "operator_report_requires_operations"
+                node.update(state="blocked", reason=reason)
+                run.setdefault("review_proposals", []).append({"node_id": spec["id"], "digest": node["report_digest"],
+                    "operator_nodes": [spec["id"]], "job_id": job["job_id"], "summary": reason})
                 return
             assignment = run["assignments"][spec["id"]]
+            if self.controller.blocks_operator(run, assignment):
+                node["waiting_reason"] = "controller_current_read"
+                return
+            grant = copy.deepcopy(run["execution"])
+            grant["commands"] = {k: v for k, v in grant.get("commands", {}).items() if k in assignment["command_ids"]}
+            try:
+                operations, bundles = self.service.operator.plan_operations(grant, assignment["paths"], operations, assignment["files"])
+            except ValueError as error:
+                reason = str(error)[:300]
+                node.update(state="blocked", reason=reason, operation_result={"state": "failed", "receipts": [], "reason": reason})
+                run.setdefault("review_proposals", []).append({"node_id": spec["id"], "digest": node["report_digest"],
+                    "operator_nodes": [spec["id"]], "job_id": job["job_id"], "summary": reason})
+                return
             sliced = {f["path"]: f for f in assignment["files"] if f.get("excerpt_only")}
             for operation in operations:
                 if not isinstance(operation, dict) or operation.get("path") not in sliced:
@@ -529,13 +717,13 @@ class OperatorWorkflow:
             node["state"] = "executing"
             # persist intent before the executor can cause any local side effect
             self.owner._save(run)
-            grant = copy.deepcopy(run["execution"])
-            grant["commands"] = {k: v for k, v in grant.get("commands", {}).items() if k in assignment["command_ids"]}
             snapshot = copy.deepcopy(run)
             def progress(value):
                 self._event(snapshot, spec["id"], "progress", value, assignment["id"] + ":operation:" + digest(value))
             futures[spec["id"]] = executor.submit(self._execute, run["id"], spec["id"], copy.deepcopy(assignment),
-                grant, operations, self.owner.cancellations[run["id"]], progress, node.get("work_revision", 1))
+                grant, operations, self.owner.cancellations[run["id"]], progress, node.get("work_revision", 1), bundles)
+            if self.service.scheduler_kernel:
+                futures[spec["id"]].add_done_callback(lambda _: self.service.store.wake())
         else:
             node.update(state="succeeded", review=content.get("review"))
             report_sources = report_dependencies(run["definition"], spec["id"])
@@ -553,6 +741,7 @@ class OperatorWorkflow:
         executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="gtt-operator")
         try:
             while not self.owner.stopping.is_set():
+                wake_revision = self.service.store.change_revision
                 with self.owner.lock:
                     run = self.owner.status(run_id, full=True)
                     if run["state"] in TERMINAL:
@@ -590,23 +779,29 @@ class OperatorWorkflow:
                                     "job_id": node["job_id"], "summary": "Operation conflict/failure requires a new exact Codex assignment"})
                             self._event(run, ident, "operation_result", {"state": node["state"], "result": result, "job_id": node["job_id"]}, node["job_id"] + ":operations")
                     used, reserved = self._usage(run)
+                    kernel = self.service.scheduler_kernel
+                    readiness = {n["node_id"]: n for n in kernel.workflow(run, cancelled)["nodes"]} if kernel else None
                     if cancelled:
                         for node in states.values():
                             if node["state"] not in TERMINAL | {"running", "executing"}:
                                 node["state"] = "cancelled"
                         if not any(n["state"] in {"running", "executing"} for n in states.values()):
                             run["state"] = "cancelled"
-                    elif run.get("decisions"):
+                    elif has_dispatch_decisions(run):
                         for ident, spec in specs.items():
                             node = states[ident]
                             if node["state"] not in {"pending", "awaiting_assignment"} or spec["node_type"] == "codex":
                                 continue
-                            deps = [states[e["from"]] for e in run["definition"]["edges"] if e.get("kind", "task") == "task" and e["to"] == ident]
-                            sources = [states[source] for source in report_dependencies(run["definition"], ident)]
-                            if any(d["state"] in TERMINAL - {"succeeded"} for d in deps + sources):
+                            decision = readiness[ident] if readiness is not None else None
+                            deps = ([states[source] for source in decision["dependencies"]] if decision else
+                                [states[e["from"]] for e in run["definition"]["edges"] if e.get("kind", "task") == "task" and e["to"] == ident])
+                            sources = [states[source] for source in (decision["reports"] if decision else report_dependencies(run["definition"], ident))]
+                            upstream_failed = decision["readiness"] == "block" if decision else any(d["state"] in TERMINAL - {"succeeded"} for d in deps + sources)
+                            if upstream_failed:
                                 node.update(state="blocked", reason="upstream_not_succeeded")
                                 continue
-                            if any(d["state"] != "succeeded" for d in deps + sources):
+                            upstream_waiting = decision["readiness"] != "ready" if decision else any(d["state"] != "succeeded" for d in deps + sources)
+                            if upstream_waiting:
                                 continue
                             inherited = {q["id"]: q for source in deps + sources for q in source.get("information_requests", [])}
                             resolved = {q for source in deps + sources for q in source.get("information_resolved_ids", [])}
@@ -627,10 +822,22 @@ class OperatorWorkflow:
                                 continue
                             if sum(n["state"] in {"running", "executing"} for n in states.values()) >= run["definition"]["max_parallel"]:
                                 continue
+                            if spec["node_type"] == "operator" and assignment and self.controller.blocks_operator(run, assignment):
+                                node["waiting_reason"] = "controller_current_read"
+                                continue
                             if assignment and assignment["paths"]:
                                 # A lower stage sees the real files produced by
                                 # its successful ancestors, never stale snapshots.
-                                assignment["files"] = self._assignment_files(run["execution"], assignment["paths"], assignment.get("file_ranges", {}))
+                                try:
+                                    assignment["files"] = self._assignment_files(run["execution"], assignment["paths"], assignment.get("file_ranges", {}), blocking=False)
+                                    assignment["snapshot_pending"] = False
+                                except WorkspaceBusy:
+                                    node["waiting_reason"] = "workspace_busy"
+                                    continue
+                                except (OSError, ValueError) as error:
+                                    node.update(state="blocked", reason=str(error)[:300])
+                                    continue
+                            node.pop("waiting_reason", None)
                             span = assignment["input_range"] if assignment else [0, len(run["input"])]
                             related = []
                             for edge in run["definition"]["edges"]:
@@ -660,10 +867,19 @@ class OperatorWorkflow:
                                 prompt += "\nCodex assignment: " + assignment["instruction"]
                             if spec["node_type"] == "reviewer" or sources:
                                 prompt += '\n审阅真实操作收据与 after_files/file_diffs，串联回报的原始执行证据在 report_evidence；不将提案当作完成证明，excerpt_only 表示片段不是全文。报告 review:{"accepted":boolean,"issues":array}；存在错误或证据不足时 accepted=false，修正必须交真实 Codex 确认，不自行执行。'
-                            task = {**spec["task"], "prompt": prompt, "context": context, "preferred_route": spec["route_id"],
+                            overrides = node.get("generation_overrides", {})
+                            task = {**spec["task"], **overrides, "prompt": prompt, "context": context, "preferred_route": spec["route_id"],
                                 "allowed_routes": [spec["route_id"], *spec["fallback_routes"]], "workflow_id": run["workflow_id"],
-                                "route_effort": spec.get("effort", ""),
+                                "route_effort": overrides.get("route_effort", spec.get("effort", "")),
                                 "work_key": "operator:" + run_id + ":" + ident + ":" + str(node.get("work_revision", 1))}
+                            if node.get("generation_deadline_at"):
+                                remaining_s = (node["generation_deadline_at"] - now_ms()) / 1000
+                                if remaining_s <= 0:
+                                    node.update(state="blocked", reason="operator_recovery_deadline_exhausted")
+                                    continue
+                                task.update(hard_deadline_s=max(5, remaining_s),
+                                    deadline_s=max(5, min(task.get("deadline_s", 180), remaining_s)),
+                                    ttft_s=max(1, min(task.get("ttft_s") or task.get("deadline_s", 180), remaining_s)))
                             if spec["node_type"] in {"operator", "reviewer"}:
                                 task.update(fanout=1, verify=False)
                             try:
@@ -681,7 +897,8 @@ class OperatorWorkflow:
                             try:
                                 try:
                                     submitted = self.service.submit(task, _supervision_required=run["definition"]["luna_supervision"],
-                                        _cancellation_event=self.owner.cancellations[run_id], _operator_assignment=assignment if spec["node_type"] == "operator" else None)
+                                        _cancellation_event=self.owner.cancellations[run_id], _operator_assignment=assignment if spec["node_type"] == "operator" else None,
+                                        **({"_deadline_at": node["generation_deadline_at"]} if node.get("generation_deadline_at") else {}))
                                 except ValueError as error:
                                     submitted = {"state": "blocked", "reason": str(error)[:300]}
                             finally:
@@ -699,16 +916,26 @@ class OperatorWorkflow:
                                 if submitted["job_id"] not in run.setdefault("job_ids", []):
                                     run["job_ids"].append(submitted["job_id"])
                                 reserved += budget
-                    if not cancelled and run.get("decisions") and all(n["state"] in TERMINAL for n in states.values()):
+                    if not cancelled and has_dispatch_decisions(run) and all(n["state"] in TERMINAL for n in states.values()):
                         run.update(state="awaiting_codex", execution_complete=True)
                     elif not cancelled and run["state"] != "succeeded" and not any(n["state"] in {"running", "executing"} for n in states.values()):
                         run["state"] = "awaiting_codex"
+                    if kernel and run["state"] not in TERMINAL:
+                        outcome = kernel.workflow(run, cancelled)
+                        run["state"] = outcome["state"]
+                        if outcome["execution_complete"]:
+                            run["execution_complete"] = True
                     run["pending_actions"] = self.pending(run)
                     if digest(run) != before:
                         self.owner._save(run)
                     if run["state"] in TERMINAL:
                         return
-                self.owner.stopping.wait(.2)
+                if kernel:
+                    active = self.controller.active(run)
+                    timeout = min(30, max(.01, (active["lease_until"] - now_ms()) / 1000)) if active else 30
+                    self.service.store.wait_for_change(wake_revision, self.owner.stopping, timeout=timeout)
+                else:
+                    self.owner.stopping.wait(.2)
         except Exception as error:
             with self.owner.lock:
                 run = self.owner.status(run_id, full=True)

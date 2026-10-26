@@ -11,9 +11,17 @@ description: Coordinate bounded tasks and visual workflows through GTT's model r
 
 0.6.0 的 Codex 母节点 / 高速操作员见 [操作员与回报拓扑](references/operator-workflows.md)。用户明确要把文件操作交给高速模型时，Codex 负责完整拓扑、分片、审批和验收；使用 operator 节点及本次 execution 工作区授权承接具体修改，不再把实现工作一律留给主线。原生模型工具仍禁用，操作由 GTT 的可信执行器完成。
 
+0.7.0 可由 Rust 接管状态数据库和调度运行记录；检查版本、处理存储故障或切换本机服务时，读取 [Rust 状态运行时](references/rust-runtime.md)。日常派发协议保持兼容，不因新后端而自动重放未知结果。
+
 所有新计划/提交使用 `router_dispatch`，`request.kind` 为 `task`、`group` 或 `workflow`；分别携带 `task`、`request` 或 `definition` / `saved_workflow_id`。`action="submit"` 必须给稳定 `request_id`，拿到 `dispatch_id` 后以它或原 request_id 查询 `status`、`collect`、`cancel`。网络返回不明确时先查原身份，不换 ID 重放。`report` 带 worker、工作流 node_id 与 offset，无损读取大报告并核对 sha256。旧 router_plan/submit、router_group_plan/submit、router_workflow_plan/submit 已从工具发现中退役，仅为缓存客户端兼容转发；下文这些旧名指对应动作，新调用全部换成统一入口。GTT CLI 的 `scheduling` 命令也复用这一协议，详见 [统一接入](references/dispatch-intake.md)。
 
 外协或调度开关关闭时停止新派发；认证的本机管理入口仍允许 status/collect/report/list/cancel，以回收已发生的用量和取消存量。统一入口不自动启用开关、更新过期池、恢复未知付费请求或增大预算。普通任务与研究组保留真实监工要求，工作流按保存的 luna_supervision 执行。
+
+支持 output_steps_v1 的服务可显式设置 max_output_steps=2..16，所有完整 JSON 段共用原总预算、尝试次数与硬截止；仅全部段校验通过且末段 final=true 才验收。后续失败保留 complete=false 的部分内容，不重放未知付费结果。adaptive/native 首次和后续预约均按剩余预算收紧；fixed 和历史用量保护保留。操作员仍由 Codex 按授权文件或行范围分片。
+
+安排操作员前先判断分工收益：少量确定性修改通常由母节点直接完成；多个独立且足够大的分片再并行。母节点提供函数级算法、边界和验收条件，避免把完整设计问题再交给高速操作员重复思考。同一路线反复把输出额度耗在思考且未完成时，先核对真实失败用量并在当前已授权模型池内选择合格替代，不要只提高上限或降低质量门槛。token_efficiency统计包含新发生且有真实计量的失败请求；未知用量仍不能当低成本。分别报告原生执行时间、主线验收等待和端到端时间，不将非任务等待计入提速结论。
+
+支持 controller_work_v1/operator_recovery_v1 时，母节点可在下发后认领独立研究、规划和检验，用就绪队列与回报收件箱决定下个动作，不默认阻塞等待全部分支。真实活动用短租约报告，当前文件检验有读写冲突与过期证据检查；确定截断可由母节点绑定提案恢复，未知结果不重放。使用时读取 [母节点并行工作与截断恢复](references/controller-work.md)。
 
 ## 分配与 token 效率
 

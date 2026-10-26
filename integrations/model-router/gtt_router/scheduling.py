@@ -118,11 +118,13 @@ def graph(value, *, allow_draft=False):
             raise ValueError("effort_not_set: " + ident)
         task = node.get("task", {})
         allowed = {"kind", "prompt", "needs_web", "min_quality", "deadline_s", "hard_deadline_s", "ttft_s", "idle_s",
-                   "stall_grace_s", "timeout_mode", "max_output_tokens", "output_mode", "token_budget", "report_max_chars", "queue_wait_s", "max_attempts", "allow_fallback", "fanout", "verify"}
+                   "stall_grace_s", "timeout_mode", "max_output_tokens", "output_mode", "max_output_steps", "token_budget", "report_max_chars", "queue_wait_s", "max_attempts", "allow_fallback", "fanout", "verify"}
         if not isinstance(task, dict) or set(task) - allowed:
             raise ValueError("Node task contains unsupported fields")
         from .profiles import ABS_LIMITS
         parsed = Task.parse({"kind": "extract", "prompt": "Complete the supplied material.", **task}, runtime_limits=ABS_LIMITS)
+        if node_type in {"operator", "reviewer"} and parsed.max_output_steps != 1:
+            raise ValueError("Split operator/reviewer assignments through the Codex controller, not report continuation")
         if node_type in {"operator", "reviewer"} and (parsed.fanout != 1 or parsed.verify):
             raise ValueError("An operator/reviewer has one attributable report; use separate nodes for parallel work and verification")
         if len(parsed.prompt) > ABS_LIMITS["max_node_prompt_chars"]:
@@ -345,18 +347,35 @@ class Scheduling:
                     self._save(run)
 
     def _save(self, run):
-        with self.service.store.lock, self.service.store.conn:
-            self.service.store.conn.execute("INSERT INTO visual_runs VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload",
-                (run["id"], now_ms(), json.dumps(run, ensure_ascii=False)))
+        if self.service.store.native:
+            self.service.scheduler_kernel.write_record("run", run["id"], run)
+        else:
+            with self.service.store.lock, self.service.store.conn:
+                self.service.store.conn.execute("INSERT INTO visual_runs VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload",
+                    (run["id"], now_ms(), json.dumps(run, ensure_ascii=False)))
+        self.service.store.wake()
 
     def status(self, run_id, *, full=False):
         text(run_id, "run id")
-        with self.service.store.lock:
-            row = self.service.store.conn.execute("SELECT payload FROM visual_runs WHERE id=?", (run_id,)).fetchone()
-        if not row:
-            raise ValueError("Unknown workflow run")
-        result = json.loads(row[0])
+        if self.service.store.native:
+            result = self.service.scheduler_kernel.read_record("run", run_id)
+            if result is None:
+                raise ValueError("Unknown workflow run")
+        else:
+            with self.service.store.lock:
+                row = self.service.store.conn.execute("SELECT payload FROM visual_runs WHERE id=?", (run_id,)).fetchone()
+            if not row:
+                raise ValueError("Unknown workflow run")
+            result = json.loads(row[0])
         if not full:
+            if result.get("mode") == "operator_v1":
+                board = self.operators.controller.view(result)
+                evidence = self.operators._evidence_digest(result)
+                result["nodes"] = self.operators.controller.display_nodes(result, board)
+                result["controller_work"] = board
+                result["evidence_digest"] = evidence
+                if board["active_item"] and result["state"] not in TERMINAL:
+                    result["state"] = "running"
             result.pop("input", None)
             result.pop("definition", None)
             result.pop("execution", None)
@@ -377,12 +396,21 @@ class Scheduling:
             candidate = validate(value)
             with self.lock:
                 prior = settings(self.service.store)
-                if integer(expected_revision, "expected revision", 0, 2**53 - 1) != prior["revision"]:
-                    raise ValueError("scheduling_revision_conflict: reload before saving")
+                expected = integer(expected_revision, "expected revision", 0, 2**53 - 1)
+                from .settings_merge import FILE_NAME as HISTORY_FILE, read_history, remember, merge_settings
+                history_path = self.service.state_dir / HISTORY_FILE
+                if expected != prior["revision"]:
+                    if candidate["revision"] != expected:
+                        raise ValueError("scheduling_revision_conflict: draft and expected base revision differ")
+                    base = read_history(history_path).get(expected)
+                    if base is None:
+                        raise ValueError("scheduling_revision_conflict: base revision is unavailable; preserve the draft before reloading")
+                    candidate = validate(merge_settings(validate(base), candidate, prior))
                 candidate["revision"] = prior["revision"] + 1
                 body = json.dumps(candidate, ensure_ascii=False).encode("utf-8")
                 if len(body) > 1048576:
                     raise ValueError("Settings exceed 1MiB")
+                remember(history_path, prior)
                 path = self.service.state_dir / FILE_NAME
                 temporary = path.with_name(FILE_NAME + "." + uuid.uuid4().hex + ".tmp")
                 try:
@@ -444,7 +472,7 @@ class Scheduling:
         nodes = list(run["nodes"].items())
         results, used, offset = [], 0, cursor
         for node_id, node in nodes[cursor:]:
-            if node["state"] not in TERMINAL:
+            if node.get("dependency_state", node["state"]) not in TERMINAL:
                 break
             item = {"node_id": node_id, "state": node["state"], "job_id": node.get("job_id"),
                     "reports": node.get("reports", []), "reason": node.get("reason"),
@@ -471,7 +499,8 @@ class Scheduling:
             "route_effort": n["effort"], "workflow_id": workflow_id})
             if n["node_type"] in MODEL_TYPES else {"local_node": n["node_type"], "generates_content": False,
                 "caller_required": n["node_type"] == "codex"}} for n in definition["nodes"]],
-            "required_features": ["operator_workflow_v1", "feedback_edges_v1"] if controlled(definition) else []}
+            "required_features": (["operator_workflow_v1", "feedback_edges_v1"] if controlled(definition) else []) +
+                (["output_steps_v1"] if any(n["task"].get("max_output_steps", 1) > 1 for n in definition["nodes"]) else [])}
 
     def submit(self, definition, input_text="", workflow_id="default", request_id="", acknowledge_unknown_risk=False, execution=None, *, _run_id=None, _cancellation_event=None):
         definition = graph(definition)
@@ -573,6 +602,7 @@ class Scheduling:
             return
         try:
             while not self.stopping.is_set():
+                wake_revision = self.service.store.change_revision
                 with self.lock:
                     run = self.status(run_id, full=True)
                     definition, states = run["definition"], run["nodes"]
@@ -592,9 +622,12 @@ class Scheduling:
                             node["tokens_estimated"] = job["tokens_estimated"]
                             used += job["tokens_used"]
                             estimated += job["tokens_estimated"]
-                            if job["state"] in {"succeeded", "partial", "failed", "cancelled", "interrupted", "needs_codex"}:
-                                node["state"] = "succeeded" if job["state"] == "succeeded" and all(r.get("ok") for r in job["results"]) else (
+                            outcome = self.service.scheduler_kernel.job_state(job) if self.service.scheduler_kernel else None
+                            job_done = outcome["terminal"] if outcome else job["state"] in {"succeeded", "partial", "failed", "cancelled", "interrupted", "needs_codex"}
+                            if job_done:
+                                node["state"] = outcome["state"] if outcome else ("succeeded" if job["state"] == "succeeded" and all(r.get("ok") for r in job["results"]) else (
                                     "unknown" if job["state"] == "interrupted" or any((a.get("error") or {}).get("code") == "timeout" or a.get("unknown_paid_outcome") for a in job["attempts"]) else "failed")
+                                )
                                 # The child job owns the full report. Keep a
                                 # bounded index here instead of rewriting large
                                 # reports on every DAG progress/cancel update.
@@ -615,6 +648,8 @@ class Scheduling:
                     run.update(tokens_used=used, tokens_estimated=estimated)
                     cancelling = run["state"] == "cancelling"
                     active = sum(n["state"] == "running" for n in states.values())
+                    kernel = self.service.scheduler_kernel
+                    readiness = {n["node_id"]: n for n in kernel.workflow(run, cancelling)["nodes"]} if kernel else None
                     for spec in definition["nodes"]:
                         node = states[spec["id"]]
                         if cancelling:
@@ -625,11 +660,14 @@ class Scheduling:
                             continue
                         if node["state"] != "pending":
                             continue
-                        deps = [states[e["from"]] for e in definition["edges"] if e["to"] == spec["id"]]
-                        if any(d["state"] in TERMINAL - {"succeeded"} for d in deps):
+                        decision = readiness[spec["id"]] if readiness is not None else None
+                        deps = ([states[ident] for ident in decision["dependencies"] + decision["reports"]] if decision else
+                            [states[e["from"]] for e in definition["edges"] if e["to"] == spec["id"]])
+                        upstream_failed = decision["readiness"] == "block" if decision else any(d["state"] in TERMINAL - {"succeeded"} for d in deps)
+                        if upstream_failed:
                             node.update(state="blocked", reason="upstream_not_succeeded")
                             continue
-                        if any(d["state"] != "succeeded" for d in deps) or active >= definition["max_parallel"]:
+                        if (decision["readiness"] != "ready" if decision else any(d["state"] != "succeeded" for d in deps)) or active >= definition["max_parallel"]:
                             continue
                         refs = list(dict.fromkeys(ref for d in deps for ref in d.get("evidence_refs", [])))
                         requests = {q["id"]: q for d in deps for q in d.get("information_requests", [])}
@@ -674,6 +712,8 @@ class Scheduling:
                                 try:self.service.require_scheduling(route);accepted=True;break
                                 except DispatchBlocked:pass
                             if not accepted:self.service.require_scheduling(routes[0])
+                            if self.service.store.native:
+                                self._save(run)
                             # Discovery/CLI startup can wait; UI cancellation
                             # and settings writes must not wait behind that IO.
                             self.lock.release()
@@ -682,6 +722,10 @@ class Scheduling:
                                     _cancellation_event=self.cancellations.get(run_id))
                             finally:
                                 self.lock.acquire()
+                                if self.service.store.native:
+                                    run = self.status(run_id, full=True)
+                                    definition, states = run["definition"], run["nodes"]
+                                    node = states[spec["id"]]
                             if self.cancellations[run_id].is_set():
                                 run["state"], cancelling = "cancelling", True
                             if "job_id" not in submitted:
@@ -695,12 +739,17 @@ class Scheduling:
                                 run["state"], cancelling = "cancelling", True
                     if all(n["state"] in TERMINAL for n in states.values()):
                         run["state"] = "cancelled" if cancelling else "succeeded" if all(n["state"] == "succeeded" for n in states.values()) else "failed"
+                    if kernel:
+                        run["state"] = kernel.workflow(run, cancelling)["state"]
                     after = (run["state"], tuple((n["state"], n["job_id"], n["tokens_used"],n.get("job_state"),str(n.get("activity"))) for n in states.values()))
                     if before != after:
                         self._save(run)
                     if run["state"] in TERMINAL:
                         return
-                self.stopping.wait(.5)
+                if kernel:
+                    self.service.store.wait_for_change(wake_revision, self.stopping)
+                else:
+                    self.stopping.wait(.5)
         except Exception:
             with self.lock:
                 run = self.status(run_id, full=True)
@@ -709,6 +758,7 @@ class Scheduling:
 
     def shutdown(self):
         self.stopping.set()
+        self.service.store.wake()
         for thread in self.threads.values():
             thread.join(timeout=2)
 

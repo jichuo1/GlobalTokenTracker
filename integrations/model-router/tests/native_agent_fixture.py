@@ -34,7 +34,7 @@ elif kind == "opencode":
             elif self.path == "/agent":
                 rules = [{"permission": k, "pattern": "*", "action": v} for k,v in overlay["permission"].items()]
                 if scenario == "permission":rules.append({"permission": "read", "pattern": "*", "action": "allow"})
-                self.send([{"name": "gtt-bounded-worker", "mode": "primary", "steps": 1, "permission": rules}])
+                self.send([{"name": "gtt-bounded-worker", "mode": "primary", "steps": overlay["agent"]["gtt-bounded-worker"]["steps"], "permission": rules}])
             elif self.path == "/config/providers":
                 self.send({"providers": [{"id": "p1", "models": {"m1": {"variants": {"low": {}, "max": {}}}, "m2": {}, "retired": {"status": "deprecated"}}},
                                           {"id": "p2", "models": {"m1": {}, "disabled": {"disabled": True}, "image": {"capabilities": {"output": {"text": False}}}}}]})

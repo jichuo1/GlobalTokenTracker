@@ -130,6 +130,7 @@ class Task:
     prefer_free: bool = True
     prefer_new_models: bool = True
     output_mode: str = "fixed"
+    max_output_steps: int = 1
     queue_wait_s: float = 120
     report_max_chars: int = DEFAULT_REPORT_CHARS
     allowed_routes: list | None = None
@@ -159,6 +160,8 @@ class Task:
             raise ValueError("output_mode must be fixed, adaptive or native")
         if "output_mode" not in data and "max_output_tokens" not in data:
             task.output_mode = "adaptive"
+        if isinstance(task.max_output_steps, bool) or not isinstance(task.max_output_steps, int) or not 1 <= task.max_output_steps <= 16:
+            raise ValueError("max_output_steps must be an integer between 1 and 16")
         if task.timeout_mode not in {"activity", "hard"}:
             raise ValueError("timeout_mode must be activity or hard")
         for key, low, high in [("hard_deadline_s", 5, limits["max_hard_deadline_s"]), ("idle_s", 1, limits["max_idle_s"]),
@@ -205,13 +208,15 @@ class Task:
                 raise ValueError(f"{key} must be a boolean")
         if task.max_attempts < task.fanout + int(task.verify):
             raise ValueError("Attempt budget cannot cover the requested workers and verifier")
+        if task.max_output_steps > task.max_attempts:
+            raise ValueError("Output steps must fit within the shared attempt budget")
         if task.timeout_mode == "activity" and task.hard_deadline_s < task.deadline_s:
             raise ValueError("hard_deadline_s cannot be shorter than the initial response window")
         if "token_budget" not in data:
             # Reserve room for input, the generated instruction wrapper and
             # verifier reports. This is a ceiling, not prepaid consumption.
             prompt_allowance = math.ceil((len(task.prompt) + len(task.context) + 4096) / 2)
-            calls = task.fanout + int(task.verify)
+            calls = min(task.max_attempts, task.fanout * task.max_output_steps + int(task.verify))
             if task.allow_fallback and task.max_attempts > calls:
                 calls += 1  # one bounded replacement, not pre-paid consumption
             from .slicing import requested_output

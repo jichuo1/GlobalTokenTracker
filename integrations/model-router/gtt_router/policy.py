@@ -10,6 +10,8 @@ from .slicing import output_budget
 
 
 def rank_routes(task, routes, ledger, store, inflight=None, excluded=None, remaining_s=None, diversity=None, preferences=None):
+    if getattr(store, "scheduler_kernel", None) is not None:
+        return store.scheduler_kernel.rank(task, routes, ledger, store, inflight, excluded, remaining_s, diversity, preferences)
     inflight, excluded, diversity = inflight or {}, excluded or set(), diversity or {}
     preferences = preferences or {}
     horizon = task.hard_deadline_s if task.timeout_mode == "activity" else task.deadline_s

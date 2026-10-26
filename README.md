@@ -209,6 +209,8 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 
 0.6.0 的[操作员与回报拓扑](integrations/model-router/docs/operator-workflows.md)增加真实 Codex 母节点、高速操作员、审阅者，以及异色任务/回报线和双向快捷连线。运行时显式授权工作区与精确文件清单，Codex 通过 `scheduling topology|coordinate|events` 提供完整拓扑分片、修正确认与验收。该能力要求协调器声明 `operator_workflow_v1`，不在旧服务上执行新图。
 
+[Rust 调度运行时](docs/RUST_SCHEDULER_MIGRATION.md)在协调器 0.7.0 中接管状态数据库、运行记录版本、选路与资源预约，并合并作业/计量/进度事务。Python 保留模型适配器、可信文件执行和审批。Rust 后端需显式配置；正式切换保留用户配置与历史。
+
 GUI 开箱即用（Windows：开始菜单 → GlobalTokenTracker；macOS：“应用程序”或菜单栏图标）。Windows 安装包同时附带 CLI（安装时勾选"加入用户 PATH"后可直接调用）；macOS 的 DMG 只含应用，CLI 需从源码构建（见[构建项目](#构建项目)）：
 
 「设置 → 外部协同 → 外部协同接口」可同时关闭协同观察与新模型调度。已经发出的请求允许完成并正常计量，排队、重试与后台恢复探测不再发出新请求。若使用配套模型调度器，请同时更新调度器与 Skill；普通任务与研究组默认要求真实 Luna 监工；可视工作流和手动生成检测可按需关闭。完整安装包包含 GUI、CLI 和安装器，模型调度器单独部署。

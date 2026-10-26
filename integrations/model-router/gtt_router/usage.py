@@ -24,6 +24,19 @@ def clean_usage(value):
     return {k: count(v) for k, v in value.items() if k in TOKEN_KEYS and count(v) is not None} if isinstance(value, dict) else {}
 
 
+def native_usage_json(value):
+    """Keep raw counter structure while invalid numbers remain unknown."""
+    if isinstance(value, dict):
+        return {key: native_usage_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [native_usage_json(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if type(value) is int and not -(2**63) <= value < 2**63:
+        return None
+    return value
+
+
 def positive_usage(value):
     """Native boot-zero placeholders do not prove zero generation usage."""
     if isinstance(value, dict):

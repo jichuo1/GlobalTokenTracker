@@ -18,6 +18,7 @@ pub mod power;
 pub mod pricing;
 pub mod quota;
 pub mod scheduler;
+pub mod scheduling_kernel;
 pub mod store;
 pub mod sync;
 pub mod trend;

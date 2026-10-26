@@ -34,6 +34,10 @@ _DEVICES = {"con", "prn", "aux", "nul", "conin$", "conout$",
 _TERMINAL = {"applied", "conflict", "unknown", "cancelled", "failed"}
 
 
+class WorkspaceBusy(ValueError):
+    pass
+
+
 def _json(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
@@ -157,7 +161,15 @@ def _path_lock(path):
 
 
 @contextmanager
-def _acquire(lock, cancel=None):
+def _acquire(lock, cancel=None, *, blocking=True):
+    if not blocking:
+        if not lock.acquire(blocking=False):
+            raise WorkspaceBusy("workspace_busy")
+        try:
+            yield
+        finally:
+            lock.release()
+        return
     while not lock.acquire(timeout=.05):
         if cancel is not None and cancel.is_set():
             raise _Stopped("cancelled")
@@ -170,7 +182,7 @@ def _acquire(lock, cancel=None):
 
 
 @contextmanager
-def _workspace_lease(root, exclusive=False, cancel=None):
+def _workspace_lease(root, exclusive=False, cancel=None, *, blocking=True):
     with _REGISTRY_LOCK:
         condition, state = _WORKSPACE_LOCKS.setdefault(os.path.normcase(str(root)),
             (threading.Condition(), {"readers": 0, "writer": False, "waiting_writers": 0}))
@@ -179,6 +191,8 @@ def _workspace_lease(root, exclusive=False, cancel=None):
             state["waiting_writers"] += 1
         try:
             while state["writer"] or (state["readers"] if exclusive else state["waiting_writers"]):
+                if not blocking:
+                    raise WorkspaceBusy("workspace_busy")
                 if cancel is not None and cancel.is_set():
                     raise _Stopped("cancelled")
                 condition.wait(.05)
@@ -236,7 +250,7 @@ class WorkspaceBroker:
 
     validate_grant = staticmethod(validate_grant)
 
-    def snapshot(self, grant, paths):
+    def snapshot(self, grant, paths, *, blocking=True):
         grant = validate_grant(grant)
         if not isinstance(paths, list) or len(paths) > 256:
             raise ValueError("snapshot paths must be bounded")
@@ -245,9 +259,9 @@ class WorkspaceBroker:
             raise ValueError("snapshot paths are outside grant")
         root = Path(grant["root"])
         with ExitStack() as stack:
-            stack.enter_context(_workspace_lease(root))
+            stack.enter_context(_workspace_lease(root, blocking=blocking))
             for name in sorted(names):
-                stack.enter_context(_acquire(_path_lock(root / name)))
+                stack.enter_context(_acquire(_path_lock(root / name), blocking=blocking))
             return [{"path": name, **_read(_target(root, name), grant["max_file_bytes"])} for name in names]
 
     def receipts(self, run_id, node_id, assignment_id):
@@ -335,6 +349,67 @@ class WorkspaceBroker:
                         raise ValueError("operation text exceeds grant byte limit")
             parsed.append(item)
         return names, parsed
+
+    def plan_operations(self, grant, allowed_paths, operations, snapshots):
+        """Bundle independent same-baseline edits into one checked atomic replacement."""
+        grant = validate_grant(grant)
+        if not isinstance(operations, list) or not 1 <= len(operations) <= grant["max_operations"]:
+            raise ValueError("operation batch exceeds grant")
+        parsed, ids, groups = [], set(), {}
+        for original in operations:
+            _, one = self._operations(grant, allowed_paths, [original])
+            operation = one[0]
+            if operation["id"] in ids:
+                raise ValueError("duplicate operation id")
+            ids.add(operation["id"])
+            parsed.append(operation)
+            if operation["op"] != "run_command":
+                groups.setdefault(os.path.normcase(operation["path"]), []).append(operation)
+        sources = {os.path.normcase(item["path"]): item for item in snapshots}
+        if any(len(edits) > 1 for edits in groups.values()) and any(op["op"] == "run_command" for op in parsed):
+            raise ValueError("Commands and bundled file edits require separate reviewed batches")
+        bundled, metadata = {}, []
+        for path, edits in groups.items():
+            if len(edits) == 1:
+                continue
+            source = sources.get(path)
+            if (not source or not source.get("exists") or any(e["op"] != "replace_text" or
+                    e["base_sha256"] != source["sha256"] for e in edits)):
+                raise ValueError("Same-file edits need one existing immutable baseline and independent replacements")
+            body = source["content"]
+            spans = []
+            for edit in edits:
+                if body.count(edit["old_text"]) != 1:
+                    raise ValueError("Bundled edits require unique matches in the authorized snapshot")
+                start = body.index(edit["old_text"])
+                spans.append((start, start + len(edit["old_text"]), edit["new_text"]))
+            spans.sort()
+            if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+                raise ValueError("Overlapping or chained edits require a new reviewed batch")
+            first, last = spans[0][0], spans[-1][1]
+            pieces, cursor = [], first
+            for start, end, replacement in spans:
+                pieces.extend((body[cursor:start], replacement))
+                cursor = end
+            pieces.append(body[cursor:last])
+            operation = {"id": "bundle-" + _digest(_json(edits).encode())[:32], "op": "replace_text",
+                "path": edits[0]["path"], "base_sha256": source["sha256"],
+                "old_text": body[first:last], "new_text": "".join(pieces)}
+            bundled[path] = operation
+            metadata.append({"id": operation["id"], "path": operation["path"], "base_sha256": source["sha256"],
+                "source_operation_ids": [e["id"] for e in edits], "snapshot_excerpt_only": bool(source.get("excerpt_only")),
+                "old_span_sha256": _digest(operation["old_text"].encode()), "new_span_sha256": _digest(operation["new_text"].encode())})
+        result, seen = [], set()
+        for operation in parsed:
+            path = os.path.normcase(operation["path"]) if operation["op"] != "run_command" else None
+            if path in bundled:
+                if path not in seen:
+                    result.append(bundled[path])
+                    seen.add(path)
+            else:
+                result.append(operation)
+        self._operations(grant, allowed_paths, result)
+        return result, metadata
 
     def execute(self, run_id, node_id, assignment_id, grant, allowed_paths, operations, cancel_event=None, on_progress=None):
         for name, value in [("run id", run_id), ("node id", node_id), ("assignment id", assignment_id)]:
