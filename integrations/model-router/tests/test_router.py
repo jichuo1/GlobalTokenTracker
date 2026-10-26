@@ -20,7 +20,7 @@ from gtt_router.daemon import load_config
 from gtt_router.hook_guard import decide, public_url, excerpt
 from gtt_router.models import Route, Task, WorkerFailure, now_ms
 from gtt_router.policy import rank_routes
-from gtt_router.service import RouterService
+from supervised_service import SupervisedService as RouterService
 from gtt_router.store import StateStore
 
 
@@ -165,7 +165,7 @@ class RouterTests(unittest.TestCase):
 
     def test_deadline_rejects_slow_high_quality_route(self):
         fast, slow = route(model="fast", latency=1), route(model="slow", quality=90, latency=200)
-        candidates, rejected = rank_routes(Task("logic_check", "bounded", deadline_s=10), [slow, fast], {"quotas": []}, self.store)
+        candidates, rejected = rank_routes(Task("logic_check", "bounded", deadline_s=10, timeout_mode="hard"), [slow, fast], {"quotas": []}, self.store)
         self.assertEqual(candidates[0]["route"].model, "fast")
         self.assertIn("unlikely_to_meet_deadline", rejected[0]["reasons"])
 
@@ -309,12 +309,27 @@ class RouterTests(unittest.TestCase):
     def test_token_reservations_prevent_parallel_budget_overcommit(self):
         r = route()
         r.max_parallel = 2
+        entered, release = threading.Event(), threading.Event()
         def adapter(*args):
-            time.sleep(.05)
+            entered.set()
+            release.wait(3)
             return response()
         service = self.service([r], adapter)
         job = service.submit({"kind": "extract", "prompt": "bounded", "fanout": 2, "verify": False,
                               "max_output_tokens": 2048, "token_budget": 4000})
+        try:
+            self.assertTrue(entered.wait(1))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                waiting = service.store.job(job["job_id"])
+                if waiting["results"]:
+                    break
+                time.sleep(.005)
+            self.assertEqual(waiting["attempt_count"], 1)
+            self.assertTrue(waiting["results"])
+            self.assertFalse(waiting["results"][0]["ok"])
+        finally:
+            release.set()
         result = self.wait(service, job["job_id"])
         self.assertEqual(result["state"], "partial")
         self.assertEqual(result["attempt_count"], 1)
@@ -468,10 +483,11 @@ class RouterTests(unittest.TestCase):
 
     def test_invalid_reported_token_types_are_not_zero(self):
         for invalid in [False, -1, float("nan"), "100"]:
-            service = self.service([route()], lambda *a, value=invalid: {"text": json.dumps(content()), "usage": {"total_tokens": value}, "observed_urls": []})
+            service = self.service([route()], lambda *a, value=invalid: {"text": json.dumps(content()), "usage": {"total_tokens": value}, "native_usage": {"total": value}, "observed_urls": []})
             job = service.submit({"kind": "extract", "prompt": "bounded"})
             result = self.wait(service, job["job_id"])
             self.assertGreater(result["tokens_estimated"], 0)
+            json.dumps(result, allow_nan=False)
 
     def test_feedback_is_idempotent_and_can_be_corrected(self):
         service = self.service([route()], lambda *a: response())

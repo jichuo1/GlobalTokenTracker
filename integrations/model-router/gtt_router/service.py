@@ -20,11 +20,30 @@ from .store import StateStore
 from .usage import clean_usage, total_tokens
 from .controls import BLOCK_CODES, DispatchBlocked, control_paths, require_interface
 from .slicing import output_budget
+from .output_steps import ReportSteps, encoded, step_prompt
 from .operator import WorkspaceBroker
 from .operator_workflow import OperatorWorkflow
 
 ADMISSION_STOP_CODES = {"token_budget_exhausted", "exploration_budget_exhausted", "attempt_budget_exhausted",
+                        "scheduler_kernel_unavailable", "scheduler_kernel_rejected", "scheduler_kernel_frame_too_large",
                         "context_exceeded", "output_recovery_unavailable", "scope_capacity_full", "queue_deadline", "work_already_covered", "cancelled"}
+
+
+def operator_context(task):
+    """Keep all execution evidence while omitting redundant controller metadata."""
+    try:
+        context = json.loads(task.context)
+    except (ValueError, TypeError):
+        return task.context
+    if not isinstance(context, dict) or not isinstance(context.get("assignment"), dict):
+        return task.context
+    assignment = context["assignment"]
+    for key in ("id", "node_id", "source"):
+        assignment.pop(key, None)
+    instruction = assignment.get("instruction")
+    if isinstance(instruction, str) and instruction and instruction in task.prompt:
+        assignment.pop("instruction")
+    return context
 
 
 def make_prompt(task, worker_index=0, verifier_context=None):
@@ -32,13 +51,17 @@ def make_prompt(task, worker_index=0, verifier_context=None):
     if assignment is not None:
         return ("You are the fast operator implementing an explicit Codex assignment. Produce concrete operations, not a new plan or delegation. "
             "Native tools remain disabled: do not execute commands or modify files yourself; the GTT workspace broker applies your operation JSON. "
-            "Use only the supplied file paths, exact base_sha256, and registered command_id values. Never enlarge scope or repair reviewer findings without a new Codex assignment. "
+            "Use only the supplied file paths, exact base_sha256, and registered command_id values. Operation IDs must be unique within a batch. Never enlarge scope or repair reviewer findings without a new Codex assignment. "
             "Return one complete JSON object: {summary:string,findings:[],sources:[],uncertainties:[],complete:true,operations:[{id:string,op:write_text|replace_text|run_command,path?:string,base_sha256?:string|null,content?:string,old_text?:string,new_text?:string,command_id?:string}]}. "
             "Create a missing file only with base_sha256=null. Existing files require the exact supplied hash. replace_text must match exactly once. "
             "A file snapshot with excerpt_only=true is a line slice, never the full file: use replace_text wholly inside its content; never write_text that file. "
             "Do not invent execution success: you are proposing the assigned concrete operations; actual results come from broker receipts. "
+            "Implement the caller's concrete algorithm directly; do not redesign the task or discuss alternative approaches. "
+            "Prefer a minimal exact replacement for an existing file; do not copy unchanged source into findings. "
+            "Independent replace_text edits may share one exact baseline and will be bundled atomically; overlapping or chained edits require another reviewed batch. "
+            "Keep summary under 400 characters. If the assignment is inconsistent, report the exact conflict instead of guessing. "
             "Keep within the explicit assignment and report capacity. The assignment and authorized snapshots follow:\n" +
-            json.dumps({"task": task.prompt, "context": task.context}, ensure_ascii=False))
+            json.dumps({"task": task.prompt, "context": operator_context(task)}, ensure_ascii=False, separators=(",", ":")))
     instructions = {
         "research": "Collect current evidence from primary sources. Do not repeat blocked calls. After read_url_content, use view_file only on the bounded gtt_excerpt.md directed by the local hook. Cite the exact full URL passed to a successful read_url_content, never just a homepage domain. Separate facts from inference and never claim a search snippet is a read page.",
         "extract": "Extract only the requested facts from supplied data; preserve provenance and mark missing data.",
@@ -74,7 +97,7 @@ def make_prompt(task, worker_index=0, verifier_context=None):
             "The payload follows as JSON:\n" + json.dumps(payload, ensure_ascii=False))
 
 
-def output_budget_note(effective_output_tokens, report_max_chars=DEFAULT_REPORT_CHARS):
+def output_budget_note(effective_output_tokens, report_max_chars=DEFAULT_REPORT_CHARS, *, paged=False):
     """Byte-stable suffix telling the model its output envelope up front.
 
     The prompt is assembled before route admission, so the effective
@@ -85,7 +108,8 @@ def output_budget_note(effective_output_tokens, report_max_chars=DEFAULT_REPORT_
     note = "\n输出预算：本次输出上限 " + str(int(effective_output_tokens)) + " tokens"
     if report_max_chars != DEFAULT_REPORT_CHARS:
         note += "、报告上限 " + str(int(report_max_chars)) + " 字符"
-    return note + "。请在预算内一次输出完整 JSON 报告，不要写超后被截断。\n"
+    subject = "当前页的完整 JSON" if paged else "完整 JSON 报告"
+    return note + "。请在预算内一次输出" + subject + "，不要写超后被截断。\n"
 
 
 def reported_tokens(usage):
@@ -98,6 +122,8 @@ def routing_warnings(task):
         warnings.append("failover_disabled_by_caller")
     if task.max_attempts <= task.fanout + int(task.verify):
         warnings.append("no_replacement_attempt_reserved")
+    if task.max_attempts < task.fanout * task.max_output_steps + int(task.verify):
+        warnings.append("output_steps_share_attempt_budget")
     if task.kind in {"code_review", "logic_check", "cross_check"} and len(task.prompt) + len(task.context) > 8000:
         warnings.append("large_excerpt_consider_split_or_research_group")
     if task.kind in LOGICAL_KINDS and task.output_mode == "fixed" and task.max_output_tokens < LOGICAL_OUTPUT_TOKENS:
@@ -125,13 +151,14 @@ class Job:
         self.tokens_used = 0
         self.tokens_reserved = 0
         self.tokens_estimated = 0
+        self.output_checkpoints = {}
 
     def detail(self):
         return {"results": self.results, "attempts": self.attempts, "progress": self.progress,
                 "attempt_count": self.attempt_count, "tokens_used": self.tokens_used, "tokens_reserved": self.tokens_reserved,
-                "tokens_estimated": self.tokens_estimated,
-                "error": self.error, "soft_deadline_at": self.created_at + int(self.task.deadline_s * 1000),
-                "deadline_at": self.created_at + int((self.task.hard_deadline_s if self.task.timeout_mode == "activity" else self.task.deadline_s) * 1000)}
+                "tokens_estimated": self.tokens_estimated, "output_checkpoints": self.output_checkpoints,
+                "error": self.error, "soft_deadline_at": min(self.created_at + int(self.task.deadline_s * 1000), getattr(self, "absolute_deadline_at", float("inf"))),
+                "deadline_at": getattr(self, "absolute_deadline_at", self.created_at + int((self.task.hard_deadline_s if self.task.timeout_mode == "activity" else self.task.deadline_s) * 1000))}
 
 
 class RouterService:
@@ -140,7 +167,15 @@ class RouterService:
         self.interface_paths = tuple(interface_paths) if interface_paths is not None else None
         self.state_dir = Path(config["state_dir"]).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.store = StateStore(self.state_dir / "router-state.sqlite")
+        from .rust_kernel import RustKernel
+        self.scheduler_kernel = RustKernel.from_config(config)
+        try:
+            self.store = StateStore(self.state_dir / "router-state.sqlite", kernel=self.scheduler_kernel)
+        except Exception:
+            if self.scheduler_kernel is not None:
+                self.scheduler_kernel.close()
+            raise
+        self.store.scheduler_kernel = self.scheduler_kernel
         from .scheduling import Scheduling
         self.scheduling = Scheduling(self)
         self.catalog = catalog or Catalog(config)
@@ -492,13 +527,18 @@ class RouterService:
 
     def _save(self, job):
         with job.changed:
-            self.store.save_job(job.id, job.state, job.task, job.detail())
-            self.coordination.on_save(job)
+            if self.store.native:
+                self.coordination.on_save(job, persist_job=lambda events: self.store.save_job(job.id, job.state, job.task, job.detail(), events))
+            else:
+                self.store.save_job(job.id, job.state, job.task, job.detail())
+                self.coordination.on_save(job)
             job.changed.notify_all()
 
-    def submit(self, data, *, _supervision_required=True, _cancellation_event=None, _job_id=None, _operator_assignment=None):
+    def submit(self, data, *, _supervision_required=True, _cancellation_event=None, _job_id=None, _operator_assignment=None, _deadline_at=None):
         task = self.parse_task(data)
         task._operator_assignment = _operator_assignment
+        if _operator_assignment is not None and task.max_output_steps != 1:
+            raise ValueError("Operator output must be split through explicit Codex assignments")
         task._cancellation_event = _cancellation_event
         task._workflow_supervision_opt_out = not _supervision_required
         self.require_dispatch(task.workflow_id, task=task)
@@ -527,6 +567,12 @@ class RouterService:
             if active >= self.limits.get("max_queued_jobs", 16):
                 raise ValueError("Job queue is full")
             job = Job(task)
+            if _deadline_at is not None:
+                if type(_deadline_at) is not int or _deadline_at < 0:
+                    raise ValueError("Invalid absolute operator deadline")
+                job.absolute_deadline_at = min(job.detail()["deadline_at"], _deadline_at)
+                job.deadline = min(job.deadline, time.monotonic() + max(0, (job.absolute_deadline_at - now_ms()) / 1000))
+                job.soft_deadline = min(job.soft_deadline, job.deadline)
             if _job_id is not None:
                 job.id = _job_id
             self.jobs[job.id] = job
@@ -564,15 +610,52 @@ class RouterService:
                         raise WorkerFailure(waiting_reason)
                     self.capacity.wait(timeout=min(.2, remaining, grace_left))
                     continue
-                candidates, rejected = rank_routes(task, self.catalog.routes, self.catalog.ledger, self.store,
-                                                   self.inflight, excluded, remaining, job.diversity, self.preference_for(task))
-                if not candidates:
+                native_decision = None
+                if self.scheduler_kernel is not None and self.scheduler_kernel.persistent:
+                    with job.changed:
+                        native_decision = self.scheduler_kernel.admit(self, job, task, excluded, remaining, prompt_chars)
+                    if native_decision.get("error"):
+                        raise WorkerFailure(native_decision["error"])
+                    candidate = native_decision.get("candidate")
+                    if candidate is not None:
+                        ident = candidate.pop("route_id")
+                        candidate["route"] = next(r for r in self.catalog.routes if r.id == ident)
+                    candidates, rejected = ([candidate] if candidate else []), []
+                else:
+                    candidates, rejected = rank_routes(task, self.catalog.routes, self.catalog.ledger, self.store,
+                                                       self.inflight, excluded, remaining, job.diversity, self.preference_for(task))
+                if not candidates and native_decision is None:
                     if getattr(task, "_output_floor", 0) > 256 and any("output_below_recovery_floor" in r.get("reasons", []) for r in rejected):
                         raise WorkerFailure("output_recovery_unavailable", scope="task")
                     context_reasons = {"context_too_large", "context_output_headroom_exhausted"}
                     if any(r.get("reasons") and set(r["reasons"]) <= context_reasons for r in rejected):
                         raise WorkerFailure("context_exceeded", scope="task")
                     raise WorkerFailure("no_eligible_route", "No route satisfies capability, quota, quality, circuit, and deadline constraints")
+                if self.scheduler_kernel is not None:
+                    with job.changed:
+                        decision = native_decision if native_decision is not None else self.scheduler_kernel.reserve(self, job, task, candidates, prompt_chars)
+                        if decision.get("error"):
+                            raise WorkerFailure(decision["error"])
+                        if "route_id" in decision:
+                            candidate = next(c for c in candidates if c["route"].id == decision["route_id"])
+                            route = candidate["route"]
+                            reserved = decision["reserved_token_estimate"]
+                            job.tokens_reserved += reserved
+                            if decision["exploration"]:
+                                job.exploration_tokens_reserved += reserved
+                            job.attempt_count += 1
+                            job.diversity[route.failure_domain] = job.diversity.get(route.failure_domain, 0) + 1
+                            self.total_inflight += 1
+                            for key in [route.source, "provider:" + route.failure_domain, *(["scope:" + task.preference_scope] if task.preference_scope else [])]:
+                                self.inflight[key] = self.inflight.get(key, 0) + 1
+                            candidate.update(decision["generation"], reserved_token_estimate=reserved, exploration=decision["exploration"])
+                            return route, candidate
+                    waiting_reason = decision["waiting_reason"]
+                    elapsed = time.monotonic() - waiting_since
+                    if elapsed >= queue_grace:
+                        raise WorkerFailure(decision["exhausted_reason"])
+                    self.capacity.wait(timeout=min(.2, remaining, max(.001, queue_grace - elapsed)))
+                    continue
                 context_fit, budget_potential, capacity_waiting = False, False, False
                 permanent_budget_reason, reservation_budget_reason = None, None
                 for candidate in candidates:
@@ -583,10 +666,15 @@ class RouterService:
                     with job.changed:
                         if job.attempt_count >= job.task.max_attempts:
                             raise WorkerFailure("attempt_budget_exhausted")
-                        generation = output_budget(task, route, prompt_chars)
+                        remaining_tokens = job.task.token_budget - job.tokens_used
+                        if getattr(task, "_exploration", False):
+                            remaining_tokens = min(remaining_tokens, int(job.task.token_budget * job.request.exploration_budget_ratio) - job.exploration_tokens_used)
+                        generation = output_budget(task, route, prompt_chars, remaining_tokens)
                         effective_output = generation["effective_output_tokens"]
                         minimum = getattr(task, "_output_floor", 256)
                         if effective_output < minimum:
+                            if generation.get("budget_output_limit") is not None and generation["budget_output_limit"] < minimum:
+                                permanent_budget_reason = "token_budget_exhausted"
                             continue
                         context_fit = True
                         if minimum > 256:
@@ -644,7 +732,7 @@ class RouterService:
                     candidate.update(generation)
                     return route, candidate
                 if not context_fit:
-                    raise WorkerFailure("context_exceeded", scope="task")
+                    raise WorkerFailure(permanent_budget_reason or "context_exceeded", scope="task")
                 if not budget_potential:
                     raise WorkerFailure(permanent_budget_reason or "token_budget_exhausted")
                 waiting_reason = "queue_deadline" if capacity_waiting else reservation_budget_reason or "queue_deadline"
@@ -667,6 +755,54 @@ class RouterService:
             self.capacity.notify_all()
 
     def _worker(self, job, task, index, deadline, verifier_context=None):
+        if task.max_output_steps == 1:
+            result = self._worker_attempts(job, task, index, deadline, verifier_context)
+            if result.get("ok") and "output_step" in result.get("content", {}):
+                failure = WorkerFailure("unexpected_output_step", scope="task")
+                self._reject_output_page(job, index, result, failure)
+                result.update(ok=False, error=failure.public())
+                result["content"]["complete"] = False
+            return result
+        pages = ReportSteps(task.max_output_steps, task.report_max_chars)
+        last = {"worker": index, "ok": False, "verifier": verifier_context is not None}
+        for step_index in range(1, task.max_output_steps + 1):
+            part_task = copy.copy(task)
+            part_task._output_step_prompt = step_prompt(step_index, task.max_output_steps, pages.checkpoints,
+                max(0, task.report_max_chars - len(encoded(pages.content))))
+            last = self._worker_attempts(job, part_task, index, deadline, verifier_context)
+            if not last.get("ok"):
+                failure = WorkerFailure(last.get("error", {}).get("code", "output_step_failed"), scope="task")
+                partial = pages.result(last, failure)
+                partial["error"] = last.get("error", failure.public())
+                return partial
+            try:
+                final = pages.accept(last)
+                checkpoint = self.state_dir / "workspaces" / job.id / f"{index}-output-step-{step_index}.json"
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                checkpoint.write_text(encoded(last), encoding="utf-8")
+                with job.changed:
+                    job.output_checkpoints[str(index)] = list(pages.parts)
+                self._save(job)
+                if final:
+                    return pages.result(last)
+            except WorkerFailure as failure:
+                self._reject_output_page(job, index, last, failure)
+                return pages.result(last, failure)
+            except OSError:
+                return pages.result(last, WorkerFailure("output_checkpoint_failed", scope="task"))
+        return pages.result(last, WorkerFailure("output_step_limit_reached", scope="task"))
+
+    def _reject_output_page(self, job, index, result, failure):
+        with job.changed:
+            attempt = next((a for a in reversed(job.attempts) if a["worker"] == index), None)
+            if attempt is not None:
+                attempt.update(state="failed", error=failure.public(), output_step_rejected=True)
+        route = next((r for r in self.catalog.routes if r.id == result.get("route", {}).get("route_id")), None)
+        if route is not None:
+            self.record_failure(route, failure)
+        self._save(job)
+
+    def _worker_attempts(self, job, task, index, deadline, verifier_context=None):
         task = copy.copy(task)
         if not hasattr(task, "_runtime_limits"):
             profile = self.call_profile()
@@ -675,7 +811,11 @@ class RouterService:
             task._source_parallel = profile["source_parallel"]
         excluded = set(getattr(job, "blocked_routes", ())) | {r for r,until in getattr(job,"avoid_until",{}).items() if until>now_ms()}
         last_error = None
-        prompt = make_prompt(task, index, verifier_context)
+        prompt = make_prompt(task, index, verifier_context) + getattr(task, "_output_step_prompt", "")
+        prompt_chars = len(prompt) + len(output_budget_note(task._runtime_limits["max_output_tokens"], task.report_max_chars, paged=task.max_output_steps > 1))
+        if task.max_output_steps > 1 and prompt_chars > task._runtime_limits["max_context_chars"]:
+            return {"worker": index, "ok": False, "error": WorkerFailure("context_exceeded", scope="task").public(),
+                    "verifier": verifier_context is not None}
         local_attempts = 0
         enlarged_routes = set()
         while True:
@@ -683,7 +823,7 @@ class RouterService:
                 return {"worker": index, "ok": False, "error": (last_error or WorkerFailure("attempt_budget_exhausted")).public(),
                         "verifier": verifier_context is not None}
             try:
-                route, decision = self._reserve(job, task, excluded, deadline, len(prompt))
+                route, decision = self._reserve(job, task, excluded, deadline, prompt_chars)
             except WorkerFailure as failure:
                 if failure.code not in BLOCK_CODES | ADMISSION_STOP_CODES:
                     failure = last_error or failure
@@ -698,6 +838,8 @@ class RouterService:
                        "requested_output_tokens": decision["requested_output_tokens"], "effective_output_tokens": decision["effective_output_tokens"],
                        "decision": {k: v for k, v in decision.items() if k != "route"}, "state": "running"}
             attempt["exploration"] = decision.get("exploration", False)
+            if getattr(task, "_output_step_prompt", None):
+                attempt["output_step"] = len(getattr(job, "output_checkpoints", {}).get(str(index), [])) + 1
             if getattr(task, "_slice", None):
                 record = task._slice
                 attempt["slice_provenance"] = {k: record[k] for k in ("id", "start", "end", "source_hash", "content_hash", "parent", "support_id") if k in record}
@@ -780,7 +922,7 @@ class RouterService:
                 attempt["call_policy"] = {"limits": task._runtime_limits, "source_options": options}
                 # Disclose this attempt's real output envelope as a suffix; the
                 # number only exists after admission, never in the cached prefix.
-                raw = adapter(execution_route, prompt + output_budget_note(decision["effective_output_tokens"], task.report_max_chars),
+                raw = adapter(execution_route, prompt + output_budget_note(decision["effective_output_tokens"], task.report_max_chars, paged=task.max_output_steps > 1),
                               execution_task, context)
                 attempt.update({k: raw[k] for k in ("native_dedup_key", "native_backed") if k in raw})
                 if isinstance(raw.get("actual_selection"), dict):
@@ -795,11 +937,13 @@ class RouterService:
                 if activity["activity_count"]:
                     progress({"activity": activity})
                 duration = int((time.monotonic() - started) * 1000)
-                self.store.success("route:" + route.id, duration)
-                self.store.success("route:" + route.id + ":kind:" + task.kind, duration, attempt["tokens_charged"], len(task.prompt) + len(task.context),
-                                   measured_tokens=attempt["tokens_charged"] if attempt["token_measurement"] == "reported" else None)
-                self.store.success("provider:" + route.failure_domain, duration)
-                self.store.success("source:" + route.source, duration)
+                self.store.successes([
+                    {"key": "route:" + route.id, "duration_ms": duration},
+                    {"key": "route:" + route.id + ":kind:" + task.kind, "duration_ms": duration,
+                        "tokens": attempt["tokens_charged"], "input_chars": len(task.prompt) + len(task.context),
+                        "measured_tokens": attempt["tokens_charged"] if attempt["token_measurement"] == "reported" else None},
+                    {"key": "provider:" + route.failure_domain, "duration_ms": duration},
+                    {"key": "source:" + route.source, "duration_ms": duration}])
                 attempt.update({"state": "succeeded", "duration_ms": duration})
                 self._save(job)
                 return {"worker": index, "ok": True, "route": route.public(), "duration_ms": duration,
@@ -835,12 +979,15 @@ class RouterService:
                         attempt["private_report_diagnostic"] = False
                 if failure.code not in {"cancelled", "timeout"} or not job.cancel.is_set():
                     self.record_failure(route, failure)
+                if request_started and attempt.get("token_measurement") == "reported":
+                    self.store.failed_cost("route:" + route.id + ":kind:" + task.kind,
+                                           attempt["tokens_charged"], len(task.prompt) + len(task.context))
                 self._save(job)
-                if failure.metering.get("unknown_paid_outcome") is True and (getattr(task,"_cancellation_event",None) is not None or getattr(task,"_slice",None)):
+                if failure.metering.get("unknown_paid_outcome") is True and (task.max_output_steps > 1 or getattr(task,"_cancellation_event",None) is not None or getattr(task,"_slice",None)):
                     return {"worker":index,"ok":False,"error":failure.public(),"unknown_paid_outcome":True,"verifier":verifier_context is not None}
                 if failure.code == "cancelled" or not task.allow_fallback:
                     return {"worker": index, "ok": False, "error": failure.public(), "verifier": verifier_context is not None}
-                if failure.code == "timeout" and getattr(task,"_cancellation_event",None) is not None:
+                if failure.code == "timeout" and (task.max_output_steps > 1 or getattr(task,"_cancellation_event",None) is not None):
                     return {"worker":index,"ok":False,"error":failure.public(),"verifier":verifier_context is not None}
                 record = getattr(task, "_slice", None)
                 if (record and failure.code == "incomplete_output" and failure.details.get("contract_reason") == "incomplete_json"
@@ -1075,3 +1222,5 @@ class RouterService:
             self.pending_jobs.put((float("inf"), index, None))
         self.coordinators.shutdown(wait=True, cancel_futures=False)
         self.store.close()
+        if self.scheduler_kernel is not None:
+            self.scheduler_kernel.close()

@@ -69,7 +69,7 @@ def validate(value):
     if len(result["source_parallel"]) > 64 or any(not isinstance(k, str) or not k or len(k) > 200 or isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 32 for k,v in result["source_parallel"].items()):
         raise ValueError("Invalid source parallel limits")
     default_fields = {"deadline_s", "hard_deadline_s", "ttft_s", "idle_s", "stall_grace_s", "queue_wait_s", "max_attempts", "fanout", "verify",
-        "max_output_tokens", "output_mode", "report_max_chars", "token_budget", "min_quality", "timeout_mode", "routing_strategy", "prefer_free", "price_weight", "allow_fallback"}
+        "max_output_tokens", "output_mode", "max_output_steps", "report_max_chars", "token_budget", "min_quality", "timeout_mode", "routing_strategy", "prefer_free", "price_weight", "allow_fallback"}
     from .models import TASK_KINDS, Task, reject_secrets
     for source in result["source_parallel"]:
         reject_secrets(source)

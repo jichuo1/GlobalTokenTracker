@@ -216,7 +216,7 @@ class Coordination:
                  "topic_excerpt": row.get("research_request", {}).get("topic", "")[:120]}
                 for row in self.store.workflow_jobs(job.task.workflow_id) if "group" in row and row["job_id"] != job.id and row["state"] != "merged"][:16]
 
-    def on_save(self, job):
+    def on_save(self, job, persist_job=None):
         # Only known numeric counters, route IDs and enum-like phases. Never
         # persist worker text, arbitrary errors or provider payloads here.
         progress = {}
@@ -259,17 +259,33 @@ class Coordination:
         with self.lock:
             previous = self.samples.get(job.id)
             if previous and (previous[0] == digest or previous[1] == structural_digest and now_ms() - previous[2] < 30000):
+                if persist_job is not None:
+                    persist_job([])
                 return
+            gap_recorded = False
             try:
-                self.store.append_event(job.task.workflow_id, "state:" + job.id + ":" + digest, payload)
-                for request_id in resolved:
-                    self.store.append_event(job.task.workflow_id, "information-response:" + job.id + ":" + request_id,
-                        {"type": "information_response", "from_group": job.id, "request_id": request_id,
-                         "status": "resolved", "authority": "evidence_delivery_requires_review"})
+                events = [("state:" + job.id + ":" + digest, payload)]
+                events.extend(("information-response:" + job.id + ":" + request_id,
+                    {"type": "information_response", "from_group": job.id, "request_id": request_id,
+                     "status": "resolved", "authority": "evidence_delivery_requires_review"}) for request_id in resolved)
+                if persist_job is not None:
+                    now = now_ms()
+                    result = persist_job([{"workflow_id": job.task.workflow_id, "event_id": ident,
+                        "payload": json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        "now_ms": now, "ttl_s": 21600} for ident, value in events])
+                    gap_recorded = result.get("event_gap_recorded", False)
+                    if result.get("event_error") == "runtime_event_capacity":
+                        raise ValueError("Workflow coordination event capacity reached")
+                    if result.get("event_error"):
+                        raise ValueError("event_id already identifies different immutable content")
+                else:
+                    for ident, value in events:
+                        self.store.append_event(job.task.workflow_id, ident, value)
             except ValueError as error:
                 if "capacity" not in str(error):
                     raise
-                self.store.event_gap(job.task.workflow_id, True)
+                if not gap_recorded:
+                    self.store.event_gap(job.task.workflow_id, True)
                 return  # journal saturation never stops paid model cleanup
             self.samples[job.id] = (digest, structural_digest, now_ms())
             if len(self.samples) > 4096:

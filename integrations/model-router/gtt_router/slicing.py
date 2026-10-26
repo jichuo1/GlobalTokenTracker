@@ -19,7 +19,7 @@ def requested_output(task, prompt_chars=None):
     return min(cap, max(getattr(task, "_output_target", 0), math.ceil(base * scale / 8192) * 8192))
 
 
-def output_budget(task, route, prompt_chars=None):
+def output_budget(task, route, prompt_chars=None, remaining_tokens=None):
     requested = requested_output(task, prompt_chars)
     effective = route.output_ceiling(None if task.output_mode == "native" else requested)
     if effective is None:
@@ -28,8 +28,15 @@ def output_budget(task, route, prompt_chars=None):
     if route.context_window:
         size = len(task.prompt) + len(task.context) if prompt_chars is None else prompt_chars
         effective = min(effective, route.context_window - math.ceil(size / 2))
+    budget_limit = None
+    if task.output_mode != "fixed":
+        size = len(task.prompt) + len(task.context) if prompt_chars is None else prompt_chars
+        remaining = task.token_budget if remaining_tokens is None else remaining_tokens
+        budget_limit = max(0, math.floor(remaining) - math.ceil(size / 2))
+        effective = min(effective, budget_limit)
     return {"requested_output_tokens": requested, "effective_output_tokens": effective,
             "output_mode": task.output_mode, "native_output_limit": route.output_limit,
+            "budget_output_limit": budget_limit,
             "minimum_output_tokens": getattr(task, "_output_floor", 256)}
 
 

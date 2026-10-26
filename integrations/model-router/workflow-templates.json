@@ -34,6 +34,7 @@
     "task": {
       "kind": "extract",
       "prompt": "按 Codex assignment 与文件快照生成具体 write_text、replace_text 或已注册 run_command 操作；使用准确基线哈希，返回完整 JSON operations。",
+      "output_mode": "adaptive",
       "max_output_tokens": 16384,
       "token_budget": 48000,
       "deadline_s": 300,
@@ -59,6 +60,7 @@
     "task": {
       "kind": "code_review",
       "prompt": "审阅真实操作结果，返回 review:{accepted:boolean,issues:array}。错误或证据不足时 accepted=false，将修正建议经回报线交母节点。",
+      "output_mode": "adaptive",
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 480,
@@ -93,6 +95,8 @@
     "task": {
       "kind": "research",
       "prompt": "围绕输入问题研究并给出有来源的结论和不确定性。",
+      "output_mode": "adaptive",
+      "max_output_steps": 4,
       "max_output_tokens": 65536,
       "token_budget": 160000,
       "deadline_s": 900,
@@ -114,6 +118,8 @@
     "task": {
       "kind": "extract",
       "prompt": "从输入材料提取关键事实与证据，保留缺失和不确定项。",
+      "output_mode": "adaptive",
+      "max_output_steps": 4,
       "max_output_tokens": 8192,
       "token_budget": 24000,
       "deadline_s": 120,
@@ -135,6 +141,8 @@
     "task": {
       "kind": "code_review",
       "prompt": "评审给定代码，指出具体问题、触发条件与验证方法。",
+      "output_mode": "adaptive",
+      "max_output_steps": 4,
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 600,
@@ -156,6 +164,8 @@
     "task": {
       "kind": "logic_check",
       "prompt": "核查输入方案的逻辑，列出反例与关键验证边界。",
+      "output_mode": "adaptive",
+      "max_output_steps": 4,
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 600,
@@ -177,6 +187,8 @@
     "task": {
       "kind": "cross_check",
       "prompt": "交叉核验上游报告与原材料，给出一致点、冲突及待验证项。",
+      "output_mode": "adaptive",
+      "max_output_steps": 4,
       "max_output_tokens": 32768,
       "token_budget": 96000,
       "deadline_s": 600,
@@ -198,6 +210,8 @@
     "task": {
       "kind": "extract",
       "prompt": "读取 unresolved_information_requests，按准确 ID 返回 information_support:[{request_id,summary,evidence}]；证据不足则报告 information_requests，不能猜测。",
+      "output_mode": "adaptive",
+      "max_output_steps": 4,
       "max_output_tokens": 16384,
       "token_budget": 48000,
       "deadline_s": 300,
@@ -218,6 +232,8 @@
     "task": {
       "kind": "summarize",
       "prompt": "汇总上游证据，保留来源、冲突及验收边界。",
+      "output_mode": "adaptive",
+      "max_output_steps": 4,
       "max_output_tokens": 16384,
       "token_budget": 48000,
       "deadline_s": 240,

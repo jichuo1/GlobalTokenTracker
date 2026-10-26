@@ -24,12 +24,25 @@ def default_health(key):
 
 
 class StateStore:
-    def __init__(self, path):
+    def __init__(self, path, kernel=None):
         path = Path(path)
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.changes = threading.Condition()
+        self.change_revision = 0
+        self.scheduler_kernel = kernel
+        self.native = kernel is not None
+        self._owner = None
+        if self.native:
+            from .native_store import Connection
+            if not {"state_v1", "runtime_v1", "admit_v1"} <= kernel.features:
+                raise ValueError("scheduler_kernel_state_protocol_missing")
+            self.conn = Connection(kernel, path, self.lock)
+        else:
+            from .native_store import StoreOwner
+            self._owner = StoreOwner(path)
+            self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript("""
             PRAGMA journal_mode=WAL;
@@ -108,7 +121,12 @@ class StateStore:
             cursor = self.conn.execute("DELETE FROM preference_scopes WHERE id=?", (scope_id,))
             return {"scope_id": scope_id, "cleared": bool(cursor.rowcount)}
 
-    def save_job(self, job_id, state, task, detail):
+    def save_job(self, job_id, state, task, detail, events=()):
+        if self.native:
+            with self.lock:
+                result = self._put_job(job_id, state, task, detail, events)
+            self.wake()
+            return result
         with self.lock, self.conn:
             prior = self.conn.execute("SELECT state,detail FROM jobs WHERE id=?", (job_id,)).fetchone()
             if prior and prior["state"] == "merged":
@@ -116,14 +134,43 @@ class StateStore:
                     raise ValueError("Merged source groups are permanently read-only")
                 return
             self._put_job(job_id, state, task, detail)
+        self.wake()
 
-    def _put_job(self, job_id, state, task, detail):
+    def wake(self):
+        with self.changes:
+            self.change_revision += 1
+            self.changes.notify_all()
+
+    def wait_for_change(self, revision, stopping, timeout=30):
+        with self.changes:
+            self.changes.wait_for(lambda: self.change_revision != revision or stopping.is_set(), timeout=timeout)
+
+    def routing_snapshot(self, kind):
+        with self.lock:
+            health = {r["key"]: dict(r) for r in self.conn.execute("SELECT * FROM health").fetchall()}
+            feedback = {}
+            for row in self.conn.execute("SELECT route_id,accepted,rejected FROM feedback WHERE kind=?", (kind,)).fetchall():
+                count = row["accepted"] + row["rejected"]
+                feedback[row["route_id"] + ":" + kind] = {"samples": count, "acceptance": row["accepted"] / count if count else None}
+        return health, feedback
+
+    def _put_job(self, job_id, state, task, detail, events=()):
+        if self.native:
+            records = []
+            for index, attempt in enumerate(detail.get("attempts", [])):
+                record = project_attempt(job_id, index, attempt, detail.get("results", []))
+                if record:
+                    records.append({"record_key": record["record_key"], "payload": json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
+            return self.scheduler_kernel.write_record("job", job_id, {"state": state, "task": task.public(), "detail": detail}, records, events)
         self.conn.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at,detail=excluded.detail",
                           (job_id, state, now_ms(), now_ms(), json.dumps(task.public()), json.dumps(detail, ensure_ascii=False)))
         self._project_job_usage(job_id, detail)
 
     def _append_event(self, workflow_id, event_id, payload, ttl_s):
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if self.native:
+            return self.scheduler_kernel.call("db_append_event", {"workflow_id": workflow_id, "event_id": event_id,
+                "payload": encoded, "ttl_s": ttl_s, "now_ms": now_ms()})
         row = self.conn.execute("SELECT * FROM coordination_events WHERE workflow_id=? AND event_id=?", (workflow_id, event_id)).fetchone()
         if row:
             if row["payload"] != encoded:
@@ -136,6 +183,8 @@ class StateStore:
         return {"event_id": event_id, "cursor": self.conn.execute("SELECT last_insert_rowid()").fetchone()[0], "deduplicated": False}
 
     def append_event(self, workflow_id, event_id, payload, ttl_s=21600):
+        if self.native:
+            return self._append_event(workflow_id, event_id, payload, ttl_s)
         with self.lock, self.conn:
             self.conn.execute("DELETE FROM coordination_events WHERE expires_at<=?", (now_ms(),))
             return self._append_event(workflow_id, event_id, payload, ttl_s)
@@ -207,6 +256,11 @@ class StateStore:
                 self._write_usage(record)
 
     def job(self, job_id):
+        if self.native:
+            value = self.scheduler_kernel.read_record("job", job_id)
+            if value is None:
+                raise ValueError("Unknown job ID")
+            return {k: value[k] for k in ("job_id", "state", "created_at", "updated_at", "task")} | value["detail"]
         with self.lock:
             row = self.conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if row is None:
@@ -237,6 +291,8 @@ class StateStore:
                 "verification_required": bool(state["verification_required"])}
 
     def success(self, key, duration_ms, tokens=None, input_chars=None, measured_tokens=None):
+        if self.native:
+            return self.successes([{"key": key, "duration_ms": duration_ms, "tokens": tokens, "input_chars": input_chars, "measured_tokens": measured_tokens}])
         with self.lock:
             prior = self.health(key)
             latency = duration_ms if prior["latency_ms"] is None else .7 * prior["latency_ms"] + .3 * duration_ms
@@ -261,7 +317,25 @@ class StateStore:
                     self.conn.execute("UPDATE health SET measured_input_chars_ema=? WHERE key=?", (value, key))
             self.conn.commit()
 
+    def failed_cost(self, key, tokens, input_chars):
+        """Real failed-call cost is not evidence of success or acceptable quality."""
+        if type(tokens) is not int or tokens < 0 or type(input_chars) is not int or input_chars < 0:
+            raise ValueError("Observed cost must be nonnegative integers")
+        with self.lock, self.conn:
+            prior = self.health(key)
+            previous = prior.get("measured_tokens_ema")
+            cost = tokens if previous is None else .7 * previous + .3 * tokens
+            previous_chars = prior.get("measured_input_chars_ema")
+            size = input_chars if previous_chars is None else .7 * previous_chars + .3 * input_chars
+            self.conn.execute("INSERT OR IGNORE INTO health(key) VALUES(?)", (key,))
+            self.conn.execute("UPDATE health SET measured_tokens_ema=?,measured_input_chars_ema=?,measured_samples=measured_samples+1 WHERE key=?",
+                              (cost, size, key))
+
     def failure(self, key, code, cooldown_s, penalty_step=.16, recovery_delay_s=1800):
+        if self.native:
+            self.scheduler_kernel.call("db_health", {"now_ms": now_ms(), "changes": [{"type": "failure", "key": key,
+                "code": code, "cooldown_s": cooldown_s, "penalty_step": penalty_step, "recovery_delay_s": recovery_delay_s}]})
+            return
         with self.lock:
             prior_streak = self.health(key)["failure_streak"]
             penalty = min(.8, self.availability(key)["recent_penalty"] + penalty_step)
@@ -274,12 +348,18 @@ class StateStore:
             self.conn.commit()
 
     def recovered(self, keys):
+        if self.native:
+            self.scheduler_kernel.call("db_health", {"now_ms": now_ms(), "changes": [{"type": "recovered", "key": key} for key in keys]})
+            return
         with self.lock:
             for key in keys:
                 self.conn.execute("INSERT INTO health(key,last_verified_at,last_probe_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET penalty=0,penalty_updated_at=excluded.last_verified_at,failure_streak=0,cooldown_until=0,next_probe_at=0,probe_failures=0,last_probe_at=excluded.last_probe_at,last_error=NULL,verification_required=0,last_verified_at=excluded.last_verified_at", (key, now_ms(), now_ms()))
             self.conn.commit()
 
     def defer_probe(self, keys, delay_s, failed=False):
+        if self.native:
+            self.scheduler_kernel.call("db_health", {"now_ms": now_ms(), "changes": [{"type": "defer", "key": key, "delay_s": delay_s, "failed": failed} for key in keys]})
+            return
         with self.lock:
             for key in keys:
                 self.conn.execute("UPDATE health SET next_probe_at=?,last_probe_at=?,probe_failures=probe_failures+? WHERE key=?",
@@ -330,4 +410,15 @@ class StateStore:
 
     def close(self):
         with self.lock:
-            self.conn.close()
+            try:
+                self.conn.close()
+            finally:
+                if self._owner is not None:
+                    self._owner.close()
+
+    def successes(self, entries):
+        if self.native:
+            self.scheduler_kernel.call("db_health", {"now_ms": now_ms(), "changes": [{"type": "success", **entry} for entry in entries]})
+        else:
+            for entry in entries:
+                self.success(**entry)

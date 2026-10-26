@@ -29,8 +29,10 @@ CONTRACT_METHODS = {"router_plan", "router_submit", "router_group_plan", "router
 def load_config(path):
     path = Path(path).expanduser().resolve()
     config = json.loads(path.read_text(encoding="utf-8-sig"))
-    if config.get("schema_version") != 1:
+    if config.get("schema_version") not in {1, 2}:
         raise ValueError("Unsupported coordinator configuration version")
+    if config["schema_version"] == 2 and (not isinstance(config.get("scheduler_kernel"), dict) or config["scheduler_kernel"].get("backend") != "rust"):
+        raise ValueError("Configuration version 2 requires the Rust state owner")
     for key in ["state_dir", "ledger_path", "benchmark_file"]:
         if not isinstance(config.get(key), str) or not Path(config[key]).is_absolute():
             raise ValueError(key + " must be an absolute path")
@@ -195,6 +197,21 @@ class LocalClient:
 
     def call(self, method, params=None):
         try:
+            def uses_output_steps(value):
+                if not isinstance(value, dict):
+                    return False
+                task = value.get("task", {})
+                if isinstance(task, dict) and isinstance(task.get("max_output_steps"), int) and task["max_output_steps"] > 1:
+                    return True
+                return (any(uses_output_steps(value.get(key)) for key in ("request", "definition", "value"))
+                        or any(uses_output_steps(item) for key in ("nodes", "workflows") for item in value.get(key, []) if isinstance(item, dict)))
+            if uses_output_steps(params or {}) and "output_steps_v1" not in self.runtime_info().get("features", []):
+                raise ValueError("resident_feature_missing: output_steps_v1; align the runtime before report continuation; no task dispatched")
+            decision = (params or {}).get("decision", {})
+            if method == "router_dispatch" and (params or {}).get("action") == "coordinate" and isinstance(decision, dict):
+                feature = "controller_work_v1" if decision.get("type") == "controller_work" else "operator_recovery_v1" if "generation" in decision else None
+                if feature and feature not in self.runtime_info().get("features", []):
+                    raise ValueError("resident_feature_missing: " + feature + "; align the runtime before this control decision")
             if method == "router_dispatch":
                 health = self.runtime_info()
                 if health.get("runtime_contract_version") != RUNTIME_CONTRACT_VERSION or "dispatch_v1" not in health.get("features", []):
@@ -263,7 +280,12 @@ def serve(config_path):
                 self.respond(403, {"error": "Unauthorized local request"})
             elif self.path == "/health":
                 self.respond(200, {"service": "gtt-model-router", "pid": os.getpid(), "version": __version__,
-                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION, "features": ["report_capacity_v1", "scheduling_v1", "runtime_limits_v1", "dispatch_v1", "operator_workflow_v1", "feedback_edges_v1"]})
+                                   "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+                                   "scheduler_backend": "rust" if service.scheduler_kernel else "python",
+                                   "scheduler_kernel_protocol": 1 if service.scheduler_kernel else None,
+                                   "scheduler_kernel_alive": (not service.scheduler_kernel.broken and service.scheduler_kernel.process.poll() is None) if service.scheduler_kernel else None,
+                                   "state_owner": "rust" if service.store.native else "python",
+                                   "features": ["report_capacity_v1", "scheduling_v1", "runtime_limits_v1", "dispatch_v1", "operator_workflow_v1", "feedback_edges_v1", "output_steps_v1", "controller_work_v1", "operator_recovery_v1", "atomic_edit_bundle_v1", "settings_rebase_v1"]})
             else:
                 self.respond(404, {"error": "Unknown local route"})
 

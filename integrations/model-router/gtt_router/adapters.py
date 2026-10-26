@@ -17,7 +17,7 @@ from .hook_guard import public_url
 from .activity import ActivityWatch
 from .models import WEB_TOOLS, WorkerFailure, redact, number
 from .processes import background_options, hidden_console_command, owned_process_command
-from .usage import clean_usage, positive_usage
+from .usage import clean_usage, positive_usage, native_usage_json
 
 _slot_condition = threading.Condition()
 _busy_slots = set()
@@ -755,6 +755,11 @@ def validate_result(result, needs_web, max_chars=120000, *, local_files=None):
     if needs_web and verified == 0:
         raise WorkerFailure("insufficient_web_evidence", retry_after_s=0)
     result.pop("text", None)
+    # Invalid/NaN native counters are unknown, never zero and never invalid
+    # JSON in the durable report. Charging already uses this same contract.
+    result["usage"] = clean_usage(result.get("usage", {}))
+    if "native_usage" in result:
+        result["native_usage"] = native_usage_json(result["native_usage"])
     result["content"] = json.loads(redact(json.dumps(body, ensure_ascii=False)))
     result["report_envelope"] = shape
     result["evidence_note"] = "Tool observation verifies URL access, not the correctness of the model's interpretation"
