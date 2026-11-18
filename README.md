@@ -142,6 +142,7 @@ Windows 版界面采用 WinUI 3 原生实现（Rust + windows-reactor），macOS
 | Freebuff Desktop | 各项目库 `~/.config/freebuff-desktop/projects/*/desktop-v2.db`（Claude Code / Codex 引擎的线程由各自数据源计数） | ✅ 精确（免费额度记 US$0） |
 | Cline | 4.x / CLI 3.x / 桌面版：`~/.cline/data/sessions/<id>/<id>.messages.json`；旧版任务：`ui_messages.json` + 编辑器 globalStorage | ✅ 精确（含工具自报成本；自带密钥记为 $0 的按价目表计价） |
 | Command Code | 本地 JSONL | ✅ 精确（含工具自报成本） |
+| Muse（Meta） | 本地会话日志 `~/.local/share/muse/sessions/**/session.jsonl`（含子代理会话；模型目录自报价格为空，价格册无条目时标未计价） | ✅ 精确 |
 | Antigravity（应用 / IDE / `agy` CLI） | 本地会话库 `~/.gemini/antigravity*/…/*.db` | ✅ 精确（含思考 token；无缓存写数据） |
 | CodeBuddy IDE / Agent | `CodeBuddyExtension/Data/**/messages/*.json` | 🟡 请求级用量快照，支持流式补写与历史补算 |
 | CodeBuddy CLI | `~/.codebuddy/traces/**/*.json` | 🟡 Agent 工作流汇总；缺少分项时保留未分类 token |

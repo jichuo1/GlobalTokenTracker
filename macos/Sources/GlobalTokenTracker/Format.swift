@@ -168,6 +168,7 @@ enum Fmt {
         case "gemini_antigravity": "Antigravity"
         case "dsh": "DeepSeek Harness"
         case "freebuff": "Freebuff"
+        case "muse_code": "Muse"
         default: id
         }
     }

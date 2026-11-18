@@ -26,6 +26,7 @@ pub mod apps {
     pub const COMMANDCODE: &str = "commandcode";
     pub const DSH: &str = "dsh";
     pub const FREEBUFF: &str = "freebuff";
+    pub const MUSE_CODE: &str = "muse_code";
 }
 
 /// Where the raw record came from (spec §5 `provenance`).

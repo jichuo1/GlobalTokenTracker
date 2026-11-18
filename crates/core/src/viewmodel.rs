@@ -473,6 +473,7 @@ pub fn app_display(app: &str) -> &str {
         "gemini_antigravity" => "Antigravity",
         "dsh" => "DeepSeek Harness",
         "freebuff" => "Freebuff",
+        "muse_code" => "Muse",
         other => other,
     }
 }
