@@ -19,7 +19,8 @@ on:
 
 concurrency:
   group: stable-build-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel an in-progress publish_stable=true run mid-tag or mid-release.
+  cancel-in-progress: ${{ !inputs.publish_stable }}
 
 env:
   # Windows runner 的标准输出默认 cp1252，打印中文警告会 UnicodeEncodeError 并让发布步骤失败。
@@ -130,6 +131,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Set up Rust toolchain
+        id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -146,7 +148,7 @@ jobs:
 
       - name: Clippy (deny warnings)
         id: clippy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -154,7 +156,7 @@ jobs:
 
       - name: Unit tests
         id: unit_tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -162,11 +164,11 @@ jobs:
 
       - name: Release build
         id: release
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.fmt.outcome == 'success' && steps.clippy.outcome == 'success' && steps.unit_tests.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup
+          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli
 
       - name: Validate installer packaging
         id: package
@@ -188,15 +190,6 @@ jobs:
             target/release/globaltokentracker-cli.exe
           if-no-files-found: error
           retention-days: 1
-
-      - name: Upload test reports
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: verify-reports
-          path: target/debug/deps/*.d
-          if-no-files-found: ignore
-          retention-days: 7
 
   macos:
     name: macOS app and disk image
@@ -245,6 +238,7 @@ jobs:
           swift --version
 
       - name: Set up Rust toolchain
+        id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -254,16 +248,24 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Windows 的 verify 不会编译 cfg(target_os = "macos") 代码，这里补上。
-      - name: Test and lint portable crates on macOS
+      - name: Clippy (macOS portable crates)
+        id: macos_clippy
         shell: bash
         run: |
           set -euo pipefail
           cargo clippy -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi \
             --all-targets --locked -- -D warnings
+
+      - name: Unit tests (macOS portable crates)
+        id: macos_tests
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi --locked
 
       - name: Import Developer ID certificate
-        if: ${{ env.HAS_MAC_CERT == 'true' }}
+        if: ${{ !cancelled() && steps.macos_clippy.outcome == 'success' && steps.macos_tests.outcome == 'success' && env.HAS_MAC_CERT == 'true' }}
         shell: bash
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -284,6 +286,7 @@ jobs:
 
       - name: Build universal app and disk image
         id: dmg
+        if: ${{ !cancelled() && steps.macos_clippy.outcome == 'success' && steps.macos_tests.outcome == 'success' }}
         shell: bash
         env:
           GTT_RELEASE_TAG: ${{ inputs.release_tag }}
@@ -302,6 +305,7 @@ jobs:
           echo "dmg_filename=$dmg" >> "$GITHUB_OUTPUT"
 
       - name: Verify disk image contents
+        if: ${{ !cancelled() && steps.dmg.outcome == 'success' }}
         shell: bash
         env:
           DMG: target/macos/${{ steps.dmg.outputs.dmg_filename }}
@@ -336,7 +340,7 @@ jobs:
   publish:
     name: Publish Stable release
     needs: [verify, macos]
-    if: ${{ inputs.publish_stable == true }}
+    if: ${{ inputs.publish_stable == true && needs.verify.outputs.release_tag == inputs.release_tag }}
     runs-on: windows-latest
     environment:
       name: stable-release

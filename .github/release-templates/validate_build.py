@@ -33,13 +33,13 @@ def workspace_version(cargo_toml: Path) -> str:
     return match.group(1)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cargo-toml", required=True, type=Path)
     parser.add_argument("--channel", required=True, choices=("alpha", "stable"))
     parser.add_argument("--release-tag", default="")
     parser.add_argument("--github-output", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     version = workspace_version(args.cargo_toml)
     tag = args.release_tag.strip()

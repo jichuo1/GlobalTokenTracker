@@ -2,7 +2,7 @@
 # Reject AI/tool self-attribution in commit messages — hard enforcement for
 # every agent and tool committing to this repo, not just a convention doc.
 msg="$1"
-if grep -qiE '(generated[ -]with|co-?authored-?by:.*(devin|claude|cursor|copilot|codeium|windsurf|cognition|ai[-_ ]?integration|noreply.*bot)|🤖|signed-?off-?by:.*(devin|claude|cursor|copilot|bot))' "$msg"; then
+if grep -qiE '(generated[ -]with|co-?authored-?by:.*(devin|claude|cursor|copilot|codeium|windsurf|cognition|gemini|antigravity|codex|openai|anthropic|chatgpt|deepseek|ai[-_ ]?integration|noreply.*bot)|🤖|signed-?off-?by:.*(devin|claude|cursor|copilot|gemini|antigravity|codex|openai|anthropic|bot))' "$msg"; then
     echo "commit-msg hook: AI/tool attribution trailer rejected." >&2
     echo "This repo forbids Generated-with / Co-Authored-By agent signatures." >&2
     echo "Remove the trailer and commit again." >&2

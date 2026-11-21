@@ -125,6 +125,15 @@ impl DeviceKey {
         Ok(Self::from_der(cert, key))
     }
 
+    #[cfg(test)]
+    pub(crate) fn generate_ephemeral() -> Result<Self> {
+        let generated = rcgen::generate_simple_self_signed(vec![CERT_NAME.to_string()])
+            .context("peer: generate device certificate")?;
+        let key = generated.signing_key.serialize_der();
+        let cert = generated.cert.der().to_vec();
+        Ok(Self::from_der(cert, key))
+    }
+
     fn from_der(cert: Vec<u8>, key: Vec<u8>) -> Self {
         Self {
             fingerprint: fingerprint(&cert),

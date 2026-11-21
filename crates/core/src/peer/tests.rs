@@ -94,6 +94,7 @@ fn ev(
 /// ~45 local days, three tools, several models (incl. empty names falling
 /// back through MODEL_EXPR), events today and in the future, one undated row.
 fn fill(store: &Store) {
+    store.conn().execute_batch("BEGIN").unwrap();
     let mut n = 0u64;
     let tools = ["claude", "codex", "cursor"];
     let models = [Some("opus"), Some("sonnet"), Some("gpt"), None, Some("")];
@@ -128,6 +129,7 @@ fn fill(store: &Store) {
             0.2,
         ))
         .unwrap();
+    store.conn().execute_batch("COMMIT").unwrap();
 }
 
 fn full_summary(f: &Fixture) -> Summary {
@@ -612,10 +614,11 @@ fn unknown_versions_and_missing_ledgers_fail_with_fixed_codes() {
     assert!(!missing.exists(), "the read path never creates a ledger");
 }
 
-/// Start a server for `f` on an ephemeral loopback port. `tls` = with the
-/// fixture's device key (created on first use).
+/// Start a server for `f` on an ephemeral loopback port. `tls` = with a
+/// fresh in-memory device key (on-disk persistence is tested separately in
+/// `device_key_is_stable_and_owner_only` and `an_in_process_share_*`).
 fn start(f: &Fixture, tls: bool) -> (std::net::SocketAddr, Arc<ServerState>) {
-    let key = tls.then(|| DeviceKey::load_or_create(&peer_dir(&f.path)).unwrap());
+    let key = tls.then(|| DeviceKey::generate_ephemeral().unwrap());
     let state =
         Arc::new(ServerState::new(f.path.clone(), f.identity.clone(), key.as_ref()).unwrap());
     let listener = server::bind("127.0.0.1:0", tls).unwrap();
@@ -940,7 +943,7 @@ fn mutual_pairing_lets_both_sides_pull() {
         back.last_address,
         format!("127.0.0.1:{}", super::share::LAN_PORT)
     );
-    let opts = super::sync::SyncOptions::default();
+    let opts = quick();
     let due = super::sync::sync_if_due(&server_f.store, Duration::from_secs(3600), &opts).unwrap();
     assert!(
         due.is_some(),
@@ -1109,8 +1112,10 @@ fn wrong_code_fails_backs_off_and_is_never_retried() {
         pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop").unwrap(),
         Err("pairing_locked")
     );
-    // … and the right code still works once the back-off has passed.
-    std::thread::sleep(Duration::from_millis(1100));
+    // … and the right code still works once the back-off has passed
+    // (exact 1/2/4/8/16s back-off progression is covered deterministically in
+    // `codes_expire_are_single_use_and_burn_after_five_failures`).
+    state.pairing.lock().unwrap().expire_lock_for_test();
     assert!(
         pairing::pair(&viewer.store, &addr.to_string(), &code, "Laptop")
             .unwrap()
@@ -2264,6 +2269,14 @@ fn overlapping_sources_are_flagged_not_deduplicated() {
         super::merged::overlaps(&other.store).unwrap(),
         Vec::<super::merged::OverlapWarning>::new()
     );
+
+    // Zero enabled peers → short-circuits cleanly with no warnings.
+    let solo = fixture();
+    fill(&solo.store);
+    assert_eq!(
+        super::merged::overlaps(&solo.store).unwrap(),
+        Vec::<super::merged::OverlapWarning>::new()
+    );
 }
 
 #[test]
@@ -2403,7 +2416,7 @@ fn an_in_process_share_pairs_serves_revokes_and_stops() {
     assert_eq!(super::share::viewers(&server_f.path).unwrap().len(), 1);
     share.stop();
     assert!(
-        std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500))
+        std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(150))
             .is_err(),
         "the port is closed after stop"
     );

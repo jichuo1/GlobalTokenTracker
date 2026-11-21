@@ -471,30 +471,43 @@ fn acquire_refresh_lock(path: &Path) -> anyhow::Result<Result<std::fs::File, &'s
 impl RefreshLease {
     #[cfg(test)]
     fn claim(path: &Path, cooldown_secs: u32) -> anyhow::Result<Result<Self, &'static str>> {
-        Self::claim_with_interval(path, cooldown_secs, Duration::from_secs(20))
+        Self::claim_with_timing(
+            path,
+            cooldown_secs,
+            Duration::from_secs(20),
+            Duration::from_millis(750),
+        )
     }
 
     #[cfg(test)]
-    fn claim_with_interval(
+    fn claim_with_timing(
         path: &Path,
         cooldown_secs: u32,
         heartbeat_interval: Duration,
+        busy_timeout: Duration,
     ) -> anyhow::Result<Result<Self, &'static str>> {
         let file_lock = match acquire_refresh_lock(path)? {
             Ok(lock) => lock,
             Err(code) => return Ok(Err(code)),
         };
-        Self::claim_locked(path, cooldown_secs, heartbeat_interval, file_lock)
+        Self::claim_locked(
+            path,
+            cooldown_secs,
+            heartbeat_interval,
+            busy_timeout,
+            file_lock,
+        )
     }
 
     fn claim_locked(
         path: &Path,
         cooldown_secs: u32,
         heartbeat_interval: Duration,
+        busy_timeout: Duration,
         file_lock: std::fs::File,
     ) -> anyhow::Result<Result<Self, &'static str>> {
         let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        conn.busy_timeout(Duration::from_millis(750))?;
+        conn.busy_timeout(busy_timeout)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let now = now_ms();
         // The OS lock is authoritative: successfully acquiring it proves no
@@ -632,6 +645,7 @@ fn run_refresh(
         path,
         cooldown_secs,
         Duration::from_secs(20),
+        Duration::from_millis(750),
         file_lock,
     )? {
         Ok(lease) => lease,
@@ -817,9 +831,14 @@ mod tests {
     #[test]
     fn heartbeat_database_failure_retains_gate_until_operation_finishes() {
         let (path, store) = fixture();
-        let first = RefreshLease::claim_with_interval(&path, 30, Duration::from_millis(10))
-            .unwrap()
-            .unwrap();
+        let first = RefreshLease::claim_with_timing(
+            &path,
+            30,
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+        )
+        .unwrap()
+        .unwrap();
         store.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(3);
         while first.alive.load(Ordering::Acquire) && std::time::Instant::now() < until {

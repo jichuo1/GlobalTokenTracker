@@ -242,6 +242,11 @@ pub(crate) fn pull_via(
         let candidates = candidates_for(&located, &device.last_address);
         (Some(device), candidates)
     } else {
+        if endpoint != "hello" && registry.list()?.is_empty() {
+            // No paired devices exist, so resolving a bare hostname/address
+            // cannot match any paired peer; avoid blocking on OS DNS lookup.
+            return Ok(Err("not_paired"));
+        }
         let addr = match resolve(target) {
             Ok(a) => a,
             // Neither a paired device's name or id nor a reachable address

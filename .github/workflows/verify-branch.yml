@@ -8,6 +8,27 @@ on:
   push:
     branches-ignore:
       - main
+    paths-ignore:
+      - 'README.md'
+      - 'README_EN.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'docs/**'
+      - 'integrations/**/docs/**'
+      - 'integrations/**/README.md'
+      - '.github/release-templates/README.md'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'README_EN.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'docs/**'
+      - 'integrations/**/docs/**'
+      - 'integrations/**/README.md'
+      - '.github/release-templates/README.md'
   workflow_dispatch:
 
 permissions:
@@ -24,6 +45,49 @@ env:
   GTT_RELEASE_TAG: ""
 
 jobs:
+  python:
+    name: Release tooling and model-router gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        id: python_setup
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Bytecode compile check
+        id: py_compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q .github/release-templates integrations/model-router/gtt_router
+
+      - name: Release-note and workflow gate tests
+        id: release_tooling
+        if: ${{ !cancelled() && steps.python_setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover \
+            -s .github/release-templates \
+            -p 'test_*.py'
+
+      - name: Model-router regression tests
+        id: model_router
+        if: ${{ !cancelled() && steps.python_setup.outcome == 'success' }}
+        working-directory: integrations/model-router
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover \
+            -s tests \
+            -p 'test_*.py'
+
   windows:
     name: Windows build, test, clippy and package-check
     runs-on: windows-latest
@@ -57,6 +121,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Rust toolchain
+        id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -65,7 +130,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Named gates that do not short-circuit each other: one run reports
-      # every failure.
+      # every format, lint and unit test failure. Skip expensive LTO release
+      # builds if static/unit gates already failed.
       - name: Rustfmt (check formatting)
         id: fmt
         shell: bash
@@ -75,7 +141,7 @@ jobs:
 
       - name: Clippy (deny warnings)
         id: clippy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -83,7 +149,7 @@ jobs:
 
       - name: Unit tests
         id: unit_tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -91,11 +157,12 @@ jobs:
 
       - name: Release build
         id: release
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.fmt.outcome == 'success' && steps.clippy.outcome == 'success' && steps.unit_tests.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup
+          # package.ps1 builds globaltokentracker-setup once with the real payload.
+          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli
 
       - name: Validate installer packaging
         id: package
@@ -153,6 +220,7 @@ jobs:
           swift --version
 
       - name: Set up Rust toolchain
+        id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -162,17 +230,26 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # The Windows job never compiles cfg(target_os = "macos") code.
-      - name: Test and lint portable crates on macOS
+      - name: Clippy (macOS portable crates)
+        id: macos_clippy
         shell: bash
         run: |
           set -euo pipefail
           cargo clippy -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi \
             --all-targets --locked -- -D warnings
+
+      - name: Unit tests (macOS portable crates)
+        id: macos_tests
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi --locked
 
       # Ad-hoc signed: no signing identity or notarization secrets here.
       - name: Build universal app and disk image
         id: dmg
+        if: ${{ !cancelled() && steps.macos_clippy.outcome == 'success' && steps.macos_tests.outcome == 'success' }}
         shell: bash
         env:
           VERSION_NAME: ${{ steps.identity.outputs.version_name }}
@@ -186,6 +263,7 @@ jobs:
           echo "dmg_filename=$dmg" >> "$GITHUB_OUTPUT"
 
       - name: Verify disk image contents
+        if: ${{ !cancelled() && steps.dmg.outcome == 'success' }}
         shell: bash
         env:
           DMG: target/macos/${{ steps.dmg.outputs.dmg_filename }}

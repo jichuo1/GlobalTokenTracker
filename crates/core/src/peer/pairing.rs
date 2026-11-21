@@ -121,6 +121,11 @@ impl Pairing {
         self.locked_until.is_some_and(|t| now < t)
     }
 
+    #[cfg(test)]
+    pub(crate) fn expire_lock_for_test(&mut self) {
+        self.locked_until = None;
+    }
+
     /// Claim the code for one pairing run.
     pub(crate) fn begin(&mut self, now: Instant) -> Result<String, &'static str> {
         if self.busy {

@@ -23,7 +23,8 @@ class NativeAgentTests(unittest.TestCase):
         self.temp.cleanup()
     def source(self,kind="opencode",scenario="ok"):
         return {"id":"native","command":[sys.executable,str(Path(__file__).with_name("native_agent_fixture.py")),kind,scenario],
-                "discovery_dir":str(self.root/"discovery"),"mcp_names":["existing-mcp"],"max_parallel":1}
+                "discovery_dir":str(self.root/"discovery"),"mcp_names":["existing-mcp"],"max_parallel":1,
+                "gtt_call_options":{"poll_interval_s":.03}}
     def route(self,source,model="m2",provider="p1",adapter="opencode_http"):
         return Route(source="native",provider=provider,model=model,effort="max",runtime=source,adapter=adapter,max_parallel=1)
     def context(self,timeout=10):
@@ -55,7 +56,7 @@ class NativeAgentTests(unittest.TestCase):
             self.assertEqual(error.exception.code,code)
     def test_cancellation_interrupts_pending_response_and_closes_process(self):
         context=self.context()
-        timer=threading.Timer(.5,context.cancel.set);timer.start()
+        timer=threading.Timer(.15,context.cancel.set);timer.start()
         try:
             with self.assertRaises(WorkerFailure) as error:
                 opencode(self.route(self.source(scenario="pending")),"input",self.task,context)

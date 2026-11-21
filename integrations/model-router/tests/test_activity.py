@@ -125,13 +125,14 @@ class ActivityAdapterTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def context(self, soft=.8, hard=4, mode="activity", idle=.3, grace=.2):
+    def context(self, soft=.55, hard=4, mode="activity", idle=.2, grace=.1):
         return ExecutionContext(threading.Event(), time.monotonic() + soft, self.root,
             timeout_mode=mode, hard_deadline=time.monotonic() + hard, idle_s=idle, stall_grace_s=grace)
 
     def route(self, mode):
         return Route("fixture", "provider", "model", runtime={"command": [sys.executable, self.fixture, mode],
-            "builtin_config": "unused", "provider_config": "unused", "mcp_names": []}, max_parallel=1)
+            "builtin_config": "unused", "provider_config": "unused", "mcp_names": [],
+            "gtt_call_options": {"poll_interval_s": .03}}, max_parallel=1)
 
     def consume(self, mode, context):
         channel = ProcessChannel([sys.executable, self.fixture, mode], context)
@@ -156,7 +157,7 @@ class ActivityAdapterTests(unittest.TestCase):
     def test_silent_empty_repeated_phase_and_timestamp_heartbeat_timeout(self):
         for mode in ["silence", "empty", "repeat", "heartbeat"]:
             with self.subTest(mode=mode):
-                context = self.context(soft=.6, idle=.15, grace=.05)
+                context = self.context(soft=.35, idle=.12, grace=.04)
                 started = time.monotonic()
                 with self.assertRaises(WorkerFailure) as failed:
                     self.consume(mode, context)
@@ -164,12 +165,12 @@ class ActivityAdapterTests(unittest.TestCase):
                 self.assertLess(time.monotonic() - started, 3)
 
     def test_hard_mode_and_cancellation_are_not_overridden_by_streaming(self):
-        context = self.context(soft=.7, mode="hard")
+        context = self.context(soft=.45, mode="hard")
         with self.assertRaises(WorkerFailure) as failed:
             self.consume("output", context)
         self.assertEqual(failed.exception.details["timeout_reason"], "hard_deadline")
         context = self.context()
-        timer = threading.Timer(.5, context.cancel.set)
+        timer = threading.Timer(.3, context.cancel.set)
         timer.start()
         try:
             with self.assertRaises(WorkerFailure) as failed:
@@ -179,7 +180,7 @@ class ActivityAdapterTests(unittest.TestCase):
             timer.join()
 
     def test_blocked_input_still_times_out_and_writer_is_cleaned(self):
-        context = self.context(soft=.5)
+        context = self.context(soft=.35)
         channel = ProcessChannel([sys.executable, self.fixture, "heartbeat"], context)
         try:
             with self.assertRaises(WorkerFailure) as failed:
@@ -212,12 +213,12 @@ class ActivityAdapterTests(unittest.TestCase):
                 timeout_file.unlink()
 
     def test_http_message_growth_is_activity_and_poll_timestamps_are_not(self):
-        context = self.context(soft=1.2, hard=5)
+        context = self.context(soft=.85, hard=5)
         result = opencode(self.route("http_active"), "fixture", Task("extract", "fixture"), context)
         self.assertGreater(time.monotonic(), context.soft_deadline)
         self.assertIn("activity fixture", result["text"])
         self.assertGreater(context.public_activity()["output_chars"], 10)
-        context = self.context(soft=1, hard=4)
+        context = self.context(soft=.9, hard=4)
         with self.assertRaises(WorkerFailure) as failed:
             opencode(self.route("http_heartbeat"), "fixture", Task("extract", "fixture"), context)
         self.assertEqual(failed.exception.code, "timeout")
@@ -236,7 +237,7 @@ class ActivityAdapterTests(unittest.TestCase):
         self.assertEqual(result["usage"]["total_tokens"], 26)
         route = self.route("print_stall")
         route.adapter = "claude_cli"
-        context = self.context(soft=1, idle=.2, grace=.1)
+        context = self.context(soft=.5, idle=.15, grace=.05)
         with self.assertRaises(WorkerFailure) as failed:
             print_agent(route, "fixture", Task("extract", "fixture"), context)
         self.assertEqual(failed.exception.code, "timeout")

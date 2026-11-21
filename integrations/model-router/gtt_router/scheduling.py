@@ -746,10 +746,7 @@ class Scheduling:
                         self._save(run)
                     if run["state"] in TERMINAL:
                         return
-                if kernel:
-                    self.service.store.wait_for_change(wake_revision, self.stopping)
-                else:
-                    self.stopping.wait(.5)
+                self.service.store.wait_for_change(wake_revision, self.stopping, timeout=30 if kernel else .5)
         except Exception:
             with self.lock:
                 run = self.status(run_id, full=True)

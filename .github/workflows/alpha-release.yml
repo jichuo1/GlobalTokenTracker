@@ -5,10 +5,14 @@ on:
     branches:
       - main
     paths-ignore:
-      - '*.md'
-      - '**/*.md'
-      - 'README*'
+      - 'README.md'
+      - 'README_EN.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
       - 'docs/**'
+      - 'integrations/**/docs/**'
+      - 'integrations/**/README.md'
+      - '.github/release-templates/README.md'
   workflow_dispatch:
     inputs:
       publish_alpha:
@@ -133,6 +137,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Set up Rust toolchain
+        id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -140,8 +145,8 @@ jobs:
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
-      # 门禁拆成带名字的步骤：格式、clippy、单元测试、Release 构建、安装包产出互不短路，
-      # 一次拿到全部失败结果；去掉无消费方的 debug 全量二进制链接，Release 只编一次。
+      # 门禁拆成带名字的步骤：格式、clippy、单元测试互不短路，一次拿到全部静态/测试失败；
+      # 若前面任一门禁失败，跳过耗时的 Release LTO 构建；setup 仅由 package.ps1 编一次。
       - name: Rustfmt (check formatting)
         id: fmt
         shell: bash
@@ -151,7 +156,7 @@ jobs:
 
       - name: Clippy (deny warnings)
         id: clippy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -159,7 +164,7 @@ jobs:
 
       - name: Unit tests
         id: unit_tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -167,11 +172,11 @@ jobs:
 
       - name: Release build
         id: release
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.fmt.outcome == 'success' && steps.clippy.outcome == 'success' && steps.unit_tests.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli -p globaltokentracker-setup
+          cargo build --release --locked -p globaltokentracker-ui -p globaltokentracker-cli
 
       - name: Validate installer packaging
         id: package
@@ -193,15 +198,6 @@ jobs:
             target/release/globaltokentracker-cli.exe
           if-no-files-found: error
           retention-days: 1
-
-      - name: Upload test reports
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: verify-reports
-          path: target/debug/deps/*.d
-          if-no-files-found: ignore
-          retention-days: 7
 
   macos:
     name: macOS app and disk image
@@ -250,6 +246,7 @@ jobs:
           swift --version
 
       - name: Set up Rust toolchain
+        id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -259,16 +256,24 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Windows 的 verify 不会编译 cfg(target_os = "macos") 代码，这里补上。
-      - name: Test and lint portable crates on macOS
+      - name: Clippy (macOS portable crates)
+        id: macos_clippy
         shell: bash
         run: |
           set -euo pipefail
           cargo clippy -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi \
             --all-targets --locked -- -D warnings
+
+      - name: Unit tests (macOS portable crates)
+        id: macos_tests
+        if: ${{ !cancelled() && steps.rust_toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test -p globaltokentracker-core -p globaltokentracker-cli -p globaltokentracker-ffi --locked
 
       - name: Import Developer ID certificate
-        if: ${{ env.HAS_MAC_CERT == 'true' }}
+        if: ${{ !cancelled() && steps.macos_clippy.outcome == 'success' && steps.macos_tests.outcome == 'success' && env.HAS_MAC_CERT == 'true' }}
         shell: bash
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -289,6 +294,7 @@ jobs:
 
       - name: Build universal app and disk image
         id: dmg
+        if: ${{ !cancelled() && steps.macos_clippy.outcome == 'success' && steps.macos_tests.outcome == 'success' }}
         shell: bash
         env:
           GTT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
@@ -307,6 +313,7 @@ jobs:
           echo "dmg_filename=$dmg" >> "$GITHUB_OUTPUT"
 
       - name: Verify disk image contents
+        if: ${{ !cancelled() && steps.dmg.outcome == 'success' }}
         shell: bash
         env:
           DMG: target/macos/${{ steps.dmg.outputs.dmg_filename }}

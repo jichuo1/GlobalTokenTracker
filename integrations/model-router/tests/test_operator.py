@@ -303,15 +303,17 @@ class OperatorTests(unittest.TestCase):
         linked = self.workspace / "linked"
         try:
             linked.symlink_to(outside, target_is_directory=True)
-        except OSError as error:
+        except OSError:
             if os.name != "nt":
                 raise
             # Junction creation does not require the Windows symbolic-link
-            # privilege and exercises the same reparse-point rejection.
-            result = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(linked), str(outside)],
-                                    capture_output=True, timeout=5, **background_options())
-            if result.returncode:
-                self.skipTest("Host cannot create symlink or junction fixture: " + type(error).__name__)
+            # privilege and exercises the same reparse-point rejection without
+            # spawning cmd.exe (which AV filters can stall on mklink).
+            try:
+                import _winapi
+                _winapi.CreateJunction(str(outside), str(linked))
+            except OSError as junction_error:
+                self.skipTest("Host cannot create symlink or junction fixture: " + type(junction_error).__name__)
         with self.assertRaisesRegex(ValueError, "symlinks and reparse"):
             validate_grant({"root": str(self.workspace), "writable_paths": ["linked/secret.txt"]})
         self.assertEqual((outside / "secret.txt").read_text(), "outside")

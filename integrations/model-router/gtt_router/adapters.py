@@ -270,6 +270,93 @@ class ExecutionContext:
                                 details={"timeout_reason": reason})
 
 
+def _nt_job_open(pid):
+    """Attach a child process to a Windows kill-on-close Job Object.
+
+    Windows 8+ nests Job Objects, so descendants inside owned_process_worker's
+    inner job also belong to this job, letting close() terminate and wait for
+    ActiveProcesses == 0 synchronously without spawning taskkill.exe.
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, w.LPCWSTR]
+    kernel.CreateJobObjectW.restype = w.HANDLE
+    kernel.SetInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD]
+    kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    kernel.OpenProcess.restype = w.HANDLE
+    kernel.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64), ("flags", w.DWORD),
+                    ("min_working_set", ctypes.c_size_t), ("max_working_set", ctypes.c_size_t),
+                    ("active_processes", w.DWORD), ("affinity", ctypes.c_size_t),
+                    ("priority", w.DWORD), ("scheduling", w.DWORD)]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rb", "wb", "ob")]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("basic", BasicLimits), ("io", IoCounters), ("pm", ctypes.c_size_t),
+                    ("jm", ctypes.c_size_t), ("ppm", ctypes.c_size_t), ("pjm", ctypes.c_size_t)]
+
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    proc = None
+    try:
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            kernel.CloseHandle(job)
+            return None
+        proc = kernel.OpenProcess(0x0100 | 0x0001 | 0x0200, False, pid)  # SET_QUOTA | TERMINATE | SET_INFORMATION
+        if not proc or not kernel.AssignProcessToJobObject(job, proc):
+            kernel.CloseHandle(job)
+            return None
+        return job
+    finally:
+        if proc:
+            kernel.CloseHandle(proc)
+
+
+def _nt_job_terminate_and_wait(job, timeout_s=2.0):
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.TerminateJobObject.argtypes = [w.HANDLE, w.UINT]
+    kernel.QueryInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD)]
+
+    class Accounting(ctypes.Structure):
+        _fields_ = [("user_time", ctypes.c_int64), ("kernel_time", ctypes.c_int64),
+                    ("period_user", ctypes.c_int64), ("period_kernel", ctypes.c_int64),
+                    ("page_faults", w.DWORD), ("total_processes", w.DWORD),
+                    ("active_processes", w.DWORD), ("terminated_processes", w.DWORD)]
+
+    kernel.TerminateJobObject(job, 1)
+    info = Accounting()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not kernel.QueryInformationJobObject(job, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            return False
+        if info.active_processes == 0:
+            return True
+        time.sleep(.005)
+    return False
+
+
+def _nt_job_close(job):
+    if job:
+        import ctypes
+        from ctypes import wintypes as w
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CloseHandle.argtypes = [w.HANDLE]
+        kernel.CloseHandle(job)
+
+
 class ProcessChannel:
     def __init__(self, command, context, env=None):
         frame_limit = context.protocol_frame_bytes()
@@ -279,6 +366,7 @@ class ProcessChannel:
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         env=env, **background_options(),
                                         start_new_session=os.name != "nt", bufsize=0)
+        self._nt_job = _nt_job_open(self.process.pid)
         self.lines = queue.Queue(maxsize=max(1, min(256, getattr(context, "max_protocol_buffer_bytes", 67108864) // frame_limit)))
         self.stderr = bytearray()
         self.closed = threading.Event()
@@ -428,31 +516,49 @@ class ProcessChannel:
                                     details={"contract_reason": "unexpected_native_frame_root", "frame_chars": len(line)})
             return message
 
-    def close(self):
+    def close(self, *, force=False):
         self.closed.set()
-        try:
-            self.process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+        immediate = force or self.context.cancel.is_set() or self.context.activity.expiry_reason() is not None
+        need_kill = immediate and self.process.poll() is None
+        if not need_kill:
+            try:
+                self.process.wait(timeout=.25)
+            except subprocess.TimeoutExpired:
+                need_kill = True
+        if need_kill:
             if os.name == "nt":
-                # Only the process tree created for this request; never enumerate
-                # or terminate the user's other IDE/CLI sessions.
-                killer = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe")
+                # Terminate the parent-owned Job Object and wait until kernel
+                # accounting confirms ActiveProcesses == 0 (all descendants
+                # exited). Fall back to taskkill /T /F if job attachment failed.
+                terminated = False
+                if self._nt_job:
+                    terminated = _nt_job_terminate_and_wait(self._nt_job, timeout_s=2.0)
+                if not terminated:
+                    killer = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe")
+                    try:
+                        subprocess.run([killer, "/PID", str(self.process.pid), "/T", "/F"], capture_output=True, timeout=10,
+                                       **background_options())
+                    except (OSError, subprocess.TimeoutExpired):
+                        self.process.kill()
                 try:
-                    subprocess.run([killer, "/PID", str(self.process.pid), "/T", "/F"], capture_output=True, timeout=10,
-                                   **background_options())
-                except (OSError, subprocess.TimeoutExpired):
-                    self.process.kill()  # closing the bridge also closes its Job
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=5)
             else:
                 import signal
                 try:
                     os.killpg(self.process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=5)
+        if os.name == "nt" and self._nt_job:
+            _nt_job_close(self._nt_job)
+            self._nt_job = None
         if os.name != "nt":
             import signal
             try:

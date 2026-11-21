@@ -722,8 +722,7 @@ class OperatorWorkflow:
                 self._event(snapshot, spec["id"], "progress", value, assignment["id"] + ":operation:" + digest(value))
             futures[spec["id"]] = executor.submit(self._execute, run["id"], spec["id"], copy.deepcopy(assignment),
                 grant, operations, self.owner.cancellations[run["id"]], progress, node.get("work_revision", 1), bundles)
-            if self.service.scheduler_kernel:
-                futures[spec["id"]].add_done_callback(lambda _: self.service.store.wake())
+            futures[spec["id"]].add_done_callback(lambda _: self.service.store.wake())
         else:
             node.update(state="succeeded", review=content.get("review"))
             report_sources = report_dependencies(run["definition"], spec["id"])
@@ -930,12 +929,10 @@ class OperatorWorkflow:
                         self.owner._save(run)
                     if run["state"] in TERMINAL:
                         return
-                if kernel:
-                    active = self.controller.active(run)
-                    timeout = min(30, max(.01, (active["lease_until"] - now_ms()) / 1000)) if active else 30
-                    self.service.store.wait_for_change(wake_revision, self.owner.stopping, timeout=timeout)
-                else:
-                    self.owner.stopping.wait(.2)
+                active = self.controller.active(run)
+                max_wait = 30 if kernel else .2
+                timeout = min(max_wait, max(.01, (active["lease_until"] - now_ms()) / 1000)) if active else max_wait
+                self.service.store.wait_for_change(wake_revision, self.owner.stopping, timeout=timeout)
         except Exception as error:
             with self.owner.lock:
                 run = self.owner.status(run_id, full=True)

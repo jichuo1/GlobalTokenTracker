@@ -95,7 +95,7 @@ class OpenCodeServer:
             except WorkerFailure as failure:
                 if failure.code != "native_connection_failed":
                     raise
-            self.context.cancel.wait(.1)
+            self.context.cancel.wait(.03)
 
     def verify_permissions(self):
         agents = self.request("/agent", limit=1048576)
@@ -114,7 +114,7 @@ class OpenCodeServer:
                 raise WorkerFailure("native_permission_contract_failed", scope="source")
 
     def close(self):
-        self.transport.close()
+        self.transport.close(force=True)
 
 
 @contextmanager

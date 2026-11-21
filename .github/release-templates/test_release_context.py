@@ -42,26 +42,29 @@ def _commit(repo: Path, name: str, content: str, message: str) -> str:
 class OrphanBaselineTests(unittest.TestCase):
     """git checkout --orphan 重建历史，模拟 filter-branch 后 tag 悬空。"""
 
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.repo = Path(self._tmp.name)
-        _git(self.repo, "init", "-q")
-        _git(self.repo, "-c", "user.name=t", "-c", "user.email=t", "commit",
+    @classmethod
+    def setUpClass(cls) -> None:
+        # All test methods treat this orphan-history fixture as read-only.
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.repo = Path(cls._tmp.name)
+        _git(cls.repo, "init", "-q")
+        _git(cls.repo, "-c", "user.name=t", "-c", "user.email=t", "commit",
              "--allow-empty", "-m", "init", "-q")
         # 旧历史：发布基线 tag + 一些提交
-        _commit(self.repo, "a.txt", "v1", "feature A")
-        self.old_tip = _commit(self.repo, "b.txt", "v1", "feature B")
-        _git(self.repo, "tag", "v1.0.0", self.old_tip)
+        _commit(cls.repo, "a.txt", "v1", "feature A")
+        cls.old_tip = _commit(cls.repo, "b.txt", "v1", "feature B")
+        _git(cls.repo, "tag", "v1.0.0", cls.old_tip)
         # 重写历史：orphan 分支上全新提交（与旧历史不可达）
-        _git(self.repo, "checkout", "--orphan", "rewritten", "-q")
-        _git(self.repo, "rm", "-rf", ".", "-q")
-        _commit(self.repo, "a.txt", "v1-same", "feature A")
-        _commit(self.repo, "b.txt", "v1-same", "feature B")
-        _commit(self.repo, "c.txt", "v2", "feature C (new release delta)")
-        self.head = _git(self.repo, "rev-parse", "HEAD").strip()
+        _git(cls.repo, "checkout", "--orphan", "rewritten", "-q")
+        _git(cls.repo, "rm", "-rf", ".", "-q")
+        _commit(cls.repo, "a.txt", "v1-same", "feature A")
+        _commit(cls.repo, "b.txt", "v1-same", "feature B")
+        _commit(cls.repo, "c.txt", "v2", "feature C (new release delta)")
+        cls.head = _git(cls.repo, "rev-parse", "HEAD").strip()
 
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
 
     def test_merged_lookup_finds_nothing_after_rewrite(self) -> None:
         self.assertIsNone(

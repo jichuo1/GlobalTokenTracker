@@ -39,8 +39,8 @@ if mode.startswith("http_"):
                 self.send(["read", "bash"])
             elif self.path.startswith("/session/"):
                 age = time.monotonic() - (started[0] or time.monotonic())
-                done = mode == "http_active" and age >= 1.6
-                text = json.dumps(report) if done else ("x" * (int(age / .08) + 1) if mode == "http_active" else "fixed")
+                done = mode == "http_active" and age >= 1.15
+                text = json.dumps(report) if done else ("x" * (int(age / .045) + 1) if mode == "http_active" else "fixed")
                 model = selected["model"]
                 self.send([{"info": {"id": "msg_activity", "role": "assistant", **model,
                                       "time": {"updated": time.time(), **({"completed": 1} if done else {})},
@@ -67,7 +67,7 @@ elif mode == "zcode":
         emit({"method": "workspace/generateTextProgress", "params": {
             "operationId": request["params"]["operationId"], "text": "x" * (index + 1),
             "usage": {"inputTokens": 10, "outputTokens": index + 1}}})
-        time.sleep(.08)
+        time.sleep(.045)
     emit({"id": request["id"], "result": {"selection": request["params"]["selection"],
         "text": json.dumps(report), "usage": {"inputTokens": 10, "outputTokens": 16}}})
 elif mode == "agy":
@@ -78,7 +78,7 @@ elif mode == "agy":
     for index in range(16):
         emit({"event": "step_update", "step_update": {"step_id": "response", "step_type": "response",
                                                        "state": "RUNNING", "text": "x" * (index + 1)}})
-        time.sleep(.08)
+        time.sleep(.045)
     emit({"event": "result", "result": {"status": "SUCCESS", "response": json.dumps(report),
                                           "usage": {"inputTokens": 10, "outputTokens": 16}}})
 elif mode in {"print_active", "print_stall"}:
@@ -92,7 +92,7 @@ elif mode in {"print_active", "print_stall"}:
         emit({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
                                                  "delta": {"type": "thinking_delta", "thinking": "x"}}})
         emit({"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": index + 1}}})
-        time.sleep(.08)
+        time.sleep(.045)
     if mode == "print_stall":
         time.sleep(30)
     emit({"type": "result", "subtype": "success", "result": json.dumps(report), "modelUsage": {model: {}},
@@ -110,7 +110,7 @@ else:
             emit({"event": "step_update", "step_update": {"step_id": "step", "step_type": "thinking", "state": "RUNNING"}})
         elif mode == "empty":
             emit({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"text": ""}, "sequence": index}})
-        time.sleep(.08)
+        time.sleep(.045)
     if mode in {"output", "thinking"}:
         emit({"type": "final", "text": json.dumps(report)})
     else:

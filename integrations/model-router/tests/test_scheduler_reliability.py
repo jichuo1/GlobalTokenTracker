@@ -1,5 +1,4 @@
 import ctypes
-from ctypes import wintypes
 import json
 import os
 from pathlib import Path
@@ -238,6 +237,7 @@ class ProcessOwnershipTests(unittest.TestCase):
     @staticmethod
     def running(pid):
         if os.name == "nt":
+            from ctypes import wintypes
             kernel = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
             kernel.OpenProcess.restype = wintypes.HANDLE
