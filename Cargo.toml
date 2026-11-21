@@ -14,7 +14,7 @@ windows-canvas = { path = "vendor/windows-canvas" }
 windows-reactor = { path = "vendor/windows-reactor" }
 
 [workspace.package]
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.90"
