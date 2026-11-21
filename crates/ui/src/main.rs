@@ -49,7 +49,20 @@ use windows_reactor::*;
 /// skipped, and only the scan-time indicator updates.
 pub enum LoadOutcome {
     Fresh(Box<Snapshot>),
-    Unchanged { scan_ms: u128, price_due: bool },
+    Unchanged {
+        scan_ms: u128,
+        price_due: bool,
+    },
+    /// Window is hidden in the tray: the scan ingested new rows to the ledger
+    /// and updated today's tray tooltip, deferring Cube/Overview/Detail rebuild
+    /// until the window becomes visible again.
+    TrayScanned {
+        scan_ms: u128,
+        price_due: bool,
+        today_tokens: Option<u64>,
+        rollup_days: std::collections::BTreeSet<i64>,
+        rollup_full: bool,
+    },
 }
 
 /// One background refresh produces this bundle (all Send-safe plain data).
@@ -153,6 +166,18 @@ pub struct Shell {
     scanning: bool,
     /// A filesystem event arrived while a scan was running — rescan when it ends.
     pending_rescan: bool,
+    /// Subset of adapters queued for `pending_rescan` (`None` = full scan).
+    pending_sources: Option<Vec<&'static str>>,
+    /// Persistent recursive file watcher shared across `WatchFired` cycles.
+    watcher: Option<Arc<watch::SourceWatcher>>,
+    /// True while the main window is hidden in the system tray.
+    window_hidden: bool,
+    /// Local day indices touched by tray-hidden scans (applied to Cube on restore).
+    hidden_days: std::collections::BTreeSet<i64>,
+    /// True if a tray-hidden scan needs a full Cube rebuild on restore.
+    hidden_full: bool,
+    /// Whether the 2 s Settings sharing-status timer is currently armed.
+    share_tick_armed: bool,
     last_error: Option<String>,
     config: UiConfig,
     external_interface_enabled: bool,
@@ -290,8 +315,9 @@ pub enum Msg {
     Failed(String),
     Tick(u64),
     Rescan,
-    WatchFired(u64),
+    WatchFired(u64, Vec<&'static str>),
     WatchFallback(u64),
+    WindowVisible(bool),
     Tray(tray::TrayAction),
     Nav(Option<String>),
     DetailPage(i64),
@@ -433,8 +459,12 @@ pub enum Msg {
         if_due: bool,
     },
     PeersSynced(Result<Option<globaltokentracker_core::peer::sync::SyncReport>, String>),
-    /// Peer-sync timer of chain `gen` fired.
-    PeerTick(u64),
+    /// Background periodic peer sync landed a real sync or error (idle "not due"
+    /// ticks stay on the background thread without waking the UI).
+    PeerBgSynced(
+        u64,
+        Result<Option<globaltokentracker_core::peer::sync::SyncReport>, String>,
+    ),
     Discover,
     Discovered(Result<Vec<globaltokentracker_core::peer::discovery::Found>, String>),
     PairAddr(String),
@@ -588,6 +618,13 @@ struct LoadReq {
     /// Run the file scan first. Off for the startup load: the ledger already
     /// holds everything from the last session, so show it now and scan after.
     scan: bool,
+    /// Specific adapters to scan when `scan == true` (`None` = all adapters).
+    sources: Option<Vec<&'static str>>,
+    /// Window is hidden in the tray: ingest to ledger and update today's tray
+    /// tooltip, skipping Cube/Overview/Detail rebuild until restore.
+    tray_only: bool,
+    /// Extra local day indices touched while hidden in tray (merged into Cube refresh).
+    extra_days: std::collections::BTreeSet<i64>,
 }
 
 fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
@@ -601,12 +638,18 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         prev_cube,
         filter_gen,
         scan,
+        sources,
+        tray_only,
+        extra_days,
     } = req;
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let (store, report, scan_ms) = if scan {
         let engine = Engine::new(store).map_err(|e| e.to_string())?;
         let t = std::time::Instant::now();
-        let report = engine.scan_once();
+        let report = match sources.as_deref() {
+            Some(ids) if !ids.is_empty() => engine.scan_sources(ids),
+            _ => engine.scan_once(),
+        };
         (engine.store, report, t.elapsed().as_millis())
     } else {
         (store, Ok(globaltokentracker_core::ScanReport::default()), 0)
@@ -624,7 +667,31 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         force_prices || globaltokentracker_core::pricing::prices_stale(&store).unwrap_or(false);
     // A local midnight since the cube was built makes its "today" stale.
     let stale_day = prev_cube.as_ref().is_some_and(|c| c.is_day_stale());
+    if tray_only {
+        let outcome = if changed {
+            let today_tokens = store
+                .totals(Some(day_start_ms(0)), None, None, None)
+                .ok()
+                .map(|t| fmt::tokens_total(&t));
+            let (rollup_days, rollup_full) = match report {
+                Ok(r) => (r.rollup_days, r.rollup_full),
+                Err(_) => (std::collections::BTreeSet::new(), true),
+            };
+            LoadOutcome::TrayScanned {
+                scan_ms,
+                price_due,
+                today_tokens,
+                rollup_days,
+                rollup_full,
+            }
+        } else {
+            LoadOutcome::Unchanged { scan_ms, price_due }
+        };
+        store.shrink_memory();
+        return Ok(outcome);
+    }
     if !force_views && !changed && !stale_day {
+        store.shrink_memory();
         return Ok(LoadOutcome::Unchanged { scan_ms, price_due });
     }
     // Aggregates: only the local days this pass wrote are recomputed (plus
@@ -632,7 +699,15 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
     // can't vouch for → one full pass (~70ms on a 63k-event ledger).
     let t_cube = std::time::Instant::now();
     let cube = match (&prev_cube, &report) {
-        (Some(c), Ok(r)) if !r.rollup_full => c.refreshed(&store, &r.rollup_days),
+        (Some(c), Ok(r)) if !r.rollup_full => {
+            if extra_days.is_empty() {
+                c.refreshed(&store, &r.rollup_days)
+            } else {
+                let mut days = r.rollup_days.clone();
+                days.extend(extra_days);
+                c.refreshed(&store, &days)
+            }
+        }
         _ => Cube::build(&store),
     }
     .map_err(|e| e.to_string())?;
@@ -662,6 +737,7 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
         .map_err(|e| e.to_string())?;
     let total = cube.event_count(apps.as_deref(), models.as_deref());
     let fx = globaltokentracker_core::fx::status(&store);
+    store.shrink_memory();
     Ok(LoadOutcome::Fresh(Box::new(Snapshot {
         vm,
         cube,
@@ -684,7 +760,7 @@ fn load_all(req: LoadReq) -> Result<LoadOutcome, String> {
 /// landing mid-slide and dragging the animation.
 fn load_page(page: Page) -> Result<PageData, String> {
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
-    match page {
+    let res = match page {
         Page::Sources => store
             .source_health()
             .map(PageData::Sources)
@@ -697,7 +773,9 @@ fn load_page(page: Page) -> Result<PageData, String> {
             }))
         }
         _ => Err("not a table page".into()),
-    }
+    };
+    store.shrink_memory();
+    res
 }
 
 /// First line of an error, capped — fits the Prices page summary row.
@@ -723,40 +801,26 @@ fn arm_refresh(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
     });
 }
 
-/// Union of adapter watch roots that exist right now (tool absent → dir absent).
-fn source_roots() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for a in adapters::registry() {
-        for r in a.watch_roots() {
-            if r.is_dir() && !out.contains(&r) {
-                out.push(r);
-            }
-        }
-    }
-    out
-}
-
-/// Live refresh: block on notify events, debounce, then report once.
-fn arm_watcher(context: &ComponentContext<Shell>, gen_id: u64) {
-    let roots = source_roots();
-    if roots.is_empty() {
-        return;
-    }
+/// Live refresh: wait on the persistent watcher for the next debounced batch
+/// of changed paths, then report only the matched adapter id(s).
+fn arm_watcher_next(
+    context: &ComponentContext<Shell>,
+    gen_id: u64,
+    watcher: Arc<watch::SourceWatcher>,
+) {
     context.spawn_background(move |token| {
         power::worker("gtt-watch");
-        diag!(
-            "[watch] armed (gen {}) on {} roots: {:?}",
-            gen_id,
-            roots.len(),
-            roots
-        );
-        if watch::wait_for_change(&roots, &token) {
-            Msg::WatchFired(gen_id)
-        } else {
-            // Watch failed/cancelled — fall back to a slow poll so changes are
-            // still picked up eventually in file-watch mode.
-            std::thread::sleep(std::time::Duration::from_secs(120));
-            Msg::WatchFallback(gen_id)
+        match watcher.wait_next(&token) {
+            Some(sources) => Msg::WatchFired(gen_id, sources),
+            None => {
+                // Watcher failed/cancelled — fall back to a slow poll so changes
+                // are still picked up eventually in file-watch mode.
+                if token.is_cancelled() {
+                    return Msg::Noop;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(120));
+                Msg::WatchFallback(gen_id)
+            }
         }
     });
 }
@@ -770,18 +834,35 @@ fn arm_update(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
     });
 }
 
-/// First peer sync after launch, then every `PEER_SYNC_SECS` the timer asks
-/// core whether one is due (every 5 minutes, or at once after a device has
-/// paired with this PC — so its usage shows up within seconds).
+/// First peer sync after launch, then every `PEER_SYNC_SECS` the background
+/// loop asks core whether one is due (every 5 minutes, or at once after a
+/// device has paired with this PC). Idle "not due" checks stay off the UI
+/// thread so they never trigger `Shell::view()` or `overlaps()` churn.
 const PEER_FIRST_SYNC_SECS: u64 = 20;
 const PEER_SYNC_SECS: u64 = 15;
 
-/// Arms one peer-sync timer of chain `gen_id`.
-fn arm_peer_sync(context: &ComponentContext<Shell>, gen_id: u64, secs: u64) {
-    context.spawn_background(move |_| {
+/// Arms one persistent background peer-sync loop of chain `gen_id`.
+fn arm_peer_sync(context: &ComponentContext<Shell>, gen_id: u64, first_delay: u64) {
+    context.spawn_background(move |token| {
         power::worker("gtt-peer-timer");
-        std::thread::sleep(std::time::Duration::from_secs(secs));
-        Msg::PeerTick(gen_id)
+        let mut wait = first_delay;
+        loop {
+            for _ in 0..wait {
+                if token.is_cancelled() {
+                    return Msg::Noop;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            if token.is_cancelled() {
+                return Msg::Noop;
+            }
+            match devices::sync(&db_path(), true) {
+                Ok(None) => {
+                    wait = PEER_SYNC_SECS;
+                }
+                res => return Msg::PeerBgSynced(gen_id, res),
+            }
+        }
     });
 }
 
@@ -863,6 +944,9 @@ impl Component for Shell {
                 prev_cube: None,
                 filter_gen: 0,
                 scan: false,
+                sources: None,
+                tray_only: false,
+                extra_days: std::collections::BTreeSet::new(),
             }) {
                 Ok(s) => Msg::Loaded(s),
                 Err(e) => Msg::Failed(e),
@@ -872,9 +956,20 @@ impl Component for Shell {
         // timer mode per-file writes would defeat the configured cadence.
         let refresh_gen = 0u64;
         let watch_gen = 0u64;
-        if config.refresh_secs == 0 {
-            arm_watcher(context, watch_gen);
-        }
+        let watcher = if config.refresh_secs == 0 {
+            let w = watch::SourceWatcher::open(adapters::watch_roots_by_adapter());
+            if let Some(w) = &w {
+                diag!(
+                    "[watch] armed persistent watcher (gen {}) on {} roots",
+                    watch_gen,
+                    w.watched_count()
+                );
+                arm_watcher_next(context, watch_gen, Arc::clone(w));
+            }
+            w
+        } else {
+            None
+        };
         let tray = tray::install();
         if tray.is_some() {
             arm_tray(context);
@@ -886,7 +981,7 @@ impl Component for Shell {
                     power::worker("gtt-minhide");
                     for _ in 0..20 {
                         if tray::try_hide_main_window() {
-                            break;
+                            return Msg::WindowVisible(false);
                         }
                         std::thread::sleep(std::time::Duration::from_millis(400));
                     }
@@ -936,6 +1031,12 @@ impl Component for Shell {
             page,
             scanning: true,
             pending_rescan: false,
+            pending_sources: None,
+            watcher,
+            window_hidden: false,
+            hidden_days: std::collections::BTreeSet::new(),
+            hidden_full: false,
+            share_tick_armed: false,
             last_error: None,
             refresh_gen,
             watch_gen,
@@ -1004,7 +1105,7 @@ impl Component for Shell {
             Msg::Loaded(outcome) => {
                 let is_real_scan = match &outcome {
                     LoadOutcome::Fresh(s) => s.scanned,
-                    LoadOutcome::Unchanged { .. } => true,
+                    LoadOutcome::Unchanged { .. } | LoadOutcome::TrayScanned { .. } => true,
                 };
                 let mut fresh = false;
                 let mut startup_snapshot = false;
@@ -1049,7 +1150,7 @@ impl Component for Shell {
                             sn.filter_gen = gen_now;
                         }
                         self.prune_filters();
-                        if detail_stale {
+                        if detail_stale && !self.window_hidden {
                             self.load_detail_page(0, context);
                         }
                         // Test hook: GTT_NAVTEST=<nav label> fires one page
@@ -1100,17 +1201,41 @@ impl Component for Shell {
                         }
                         price_due
                     }
+                    LoadOutcome::TrayScanned {
+                        scan_ms,
+                        price_due,
+                        today_tokens,
+                        rollup_days,
+                        rollup_full,
+                    } => {
+                        if let Some(old) = &mut self.snap {
+                            old.scan_ms = scan_ms;
+                        }
+                        self.views_stale = true;
+                        self.hidden_days.extend(rollup_days);
+                        self.hidden_full |= rollup_full;
+                        if let (Some(tray), Some(total)) = (&self.tray, today_tokens) {
+                            let _ = tray.set_tooltip(Some(tf!(
+                                "GlobalTokenTracker — 今日 {}",
+                                fmt::tokens_exact(total)
+                            )));
+                        }
+                        price_due
+                    }
                 };
                 self.last_error = None;
                 self.scanning = false;
-                // Tables load off their own light queries, never the scan:
-                // prefetch both once (so the first visit is instant), then
-                // keep the open one current when new data lands.
+                // Sources is tiny (20 rows) so prefetch it once; Prices (5,000
+                // rows) loads lazily on navigation to keep idle RAM lean.
                 if self.snap.is_some() && !self.prefetched {
                     self.prefetched = true;
-                    self.load_page_data(Page::Sources, context);
-                    self.load_page_data(Page::Prices, context);
-                } else if fresh {
+                    if !self.window_hidden {
+                        self.load_page_data(Page::Sources, context);
+                        if self.page == Page::Prices {
+                            self.load_page_data(Page::Prices, context);
+                        }
+                    }
+                } else if fresh && !self.window_hidden {
                     self.load_page_data(self.page, context);
                 }
                 self.poll_quota_if_stale(context);
@@ -1125,7 +1250,8 @@ impl Component for Shell {
                     self.start_scan(context);
                 } else if self.pending_rescan {
                     self.pending_rescan = false;
-                    self.start_scan(context);
+                    let sources = self.pending_sources.take();
+                    self.start_scan_sources(sources, context);
                 } else if self.config.refresh_secs > 0 {
                     // Only re-arm timer if this load was an actual disk scan!
                     // (Fast reload_views has scanned=false; leaving views_stale or filters changed
@@ -1143,7 +1269,8 @@ impl Component for Shell {
                 self.views_stale = true;
                 if self.pending_rescan {
                     self.pending_rescan = false;
-                    self.start_scan(context);
+                    let sources = self.pending_sources.take();
+                    self.start_scan_sources(sources, context);
                 } else if self.config.refresh_secs > 0 {
                     self.refresh_gen += 1;
                     arm_refresh(context, self.refresh_gen, self.config.refresh_secs);
@@ -1159,6 +1286,7 @@ impl Component for Shell {
                     );
                 } else if self.scanning {
                     self.pending_rescan = true;
+                    self.pending_sources = None;
                 } else {
                     self.start_scan(context);
                 }
@@ -1354,13 +1482,17 @@ impl Component for Shell {
                     self.refresh_gen += 1;
                     self.watch_gen += 1;
                     if secs == 0 {
-                        // Entering 仅文件变更: the watcher (which lapses in
-                        // timer mode) becomes the refresh source again.
-                        arm_watcher(context, self.watch_gen);
-                    } else if !self.scanning {
-                        // In timer mode: kick one timer now so the new cadence
-                        // starts without waiting for the next scan to end.
-                        arm_refresh(context, self.refresh_gen, secs);
+                        // Entering 仅文件变更: open a persistent watcher again.
+                        self.open_watcher(context);
+                    } else {
+                        // Leaving file-watch mode: drop the persistent watcher
+                        // so its OS thread and directory handles close at once.
+                        self.watcher = None;
+                        if !self.scanning {
+                            // In timer mode: kick one timer now so the new cadence
+                            // starts without waiting for the next scan to end.
+                            arm_refresh(context, self.refresh_gen, secs);
+                        }
                     }
                 }
                 // Single-select semantics: a pick light-dismisses the panel.
@@ -1502,7 +1634,7 @@ impl Component for Shell {
                 "quit" => self.quit_now(context),
                 // "tray" remembered but the icon failed to install → hiding
                 // would strand the process with no way back; ask instead.
-                "tray" if self.tray.is_some() => tray::hide_main_window(),
+                "tray" if self.tray.is_some() => self.hide_to_tray(context),
                 _ => self.close_prompt = true,
             },
             Msg::CloseDialogResult(res) => {
@@ -1525,7 +1657,7 @@ impl Component for Shell {
                             self.config.save();
                         }
                         if self.tray.is_some() {
-                            tray::hide_main_window();
+                            self.hide_to_tray(context);
                         } else {
                             self.quit_now(context);
                         }
@@ -1679,23 +1811,11 @@ impl Component for Shell {
             Msg::SyncPeers { if_due } => self.sync_peers(if_due, context),
             Msg::PeersSynced(res) => {
                 self.peer_syncing = false;
-                match res {
-                    Ok(report) => {
-                        self.peer_error = None;
-                        if report.is_some_and(|r| r.changed) {
-                            // Peer rows changed: the cube must be rebuilt.
-                            self.cube_rebuild = true;
-                            self.views_stale = true;
-                            self.reload_views(context);
-                        }
-                    }
-                    Err(e) => self.peer_error = Some(e),
-                }
-                self.load_devices(context);
+                self.apply_peer_sync_result(res, context);
             }
-            Msg::PeerTick(gen_id) => {
+            Msg::PeerBgSynced(gen_id, res) => {
                 if gen_id == self.peer_gen {
-                    self.sync_peers(true, context);
+                    self.apply_peer_sync_result(res, context);
                     arm_peer_sync(context, gen_id, PEER_SYNC_SECS);
                 }
             }
@@ -1823,14 +1943,18 @@ impl Component for Shell {
                         self.share.running = Some(*running);
                         self.share.refresh_status();
                         self.load_viewers(context);
-                        self.share.tick += 1;
-                        arm_share_tick(context, self.share.tick);
+                        self.sync_share_tick(context);
                     }
                     Err(e) => self.share.error = Some(e),
                 }
             }
             Msg::ShareTick(tick) => {
-                if tick == self.share.tick && self.share.running.is_some() {
+                if tick == self.share.tick
+                    && self.share_tick_armed
+                    && self.page == Page::Settings
+                    && !self.window_hidden
+                    && self.share.running.is_some()
+                {
                     let before = self.share.status.as_ref().and_then(|s| s.code.clone());
                     self.share.refresh_status();
                     let after = self.share.status.as_ref().and_then(|s| s.code.clone());
@@ -1840,11 +1964,14 @@ impl Component for Shell {
                         self.load_devices(context);
                     }
                     arm_share_tick(context, tick);
+                } else if tick == self.share.tick {
+                    self.share_tick_armed = false;
                 }
             }
             Msg::ShareStopped => {
                 self.share.busy = false;
                 self.share.refresh_status();
+                self.sync_share_tick(context);
             }
             Msg::ShareNewCode => {
                 if let Some(running) = &self.share.running
@@ -1911,18 +2038,26 @@ impl Component for Shell {
                     self.arm_canvas_stage(context, 16);
                 }
             }
-            Msg::WatchFired(gen_id) => {
-                diag!("[watch] fired (gen {}), scanning={}", gen_id, self.scanning);
+            Msg::WatchFired(gen_id, sources) => {
+                diag!(
+                    "[watch] fired (gen {}), sources={:?}, scanning={}",
+                    gen_id,
+                    sources,
+                    self.scanning
+                );
                 // Only 仅文件变更 mode scans on file events — in timer mode
                 // the next Tick picks up everything, and any in-flight
                 // watcher lapses (not re-armed).
                 if self.config.refresh_secs == 0 && gen_id == self.watch_gen {
-                    self.watch_gen += 1;
-                    arm_watcher(context, self.watch_gen);
+                    // Reuse the existing OS watcher without recreating it.
+                    if let Some(w) = &self.watcher {
+                        arm_watcher_next(context, gen_id, Arc::clone(w));
+                    }
+                    let scope = (!sources.is_empty()).then_some(sources);
                     if self.scanning {
-                        self.pending_rescan = true;
+                        self.queue_rescan(scope);
                     } else {
-                        self.start_scan(context);
+                        self.start_scan_sources(scope, context);
                     }
                 }
             }
@@ -1934,19 +2069,21 @@ impl Component for Shell {
                 );
                 if self.config.refresh_secs == 0 && gen_id == self.watch_gen {
                     self.watch_gen += 1;
-                    arm_watcher(context, self.watch_gen);
+                    self.open_watcher(context);
                     if !self.scanning {
                         self.start_scan(context);
                     }
                 }
             }
+            Msg::WindowVisible(visible) => self.on_window_visible(visible, context),
             Msg::Tray(action) => {
                 match action {
                     tray::TrayAction::Focus => {
                         tray::focus_main_window();
+                        self.on_window_visible(true, context);
                     }
                     tray::TrayAction::Hide => {
-                        tray::hide_main_window();
+                        self.hide_to_tray(context);
                     }
                     tray::TrayAction::Quit => {
                         self.quit_now(context);
@@ -1985,12 +2122,16 @@ impl Component for Shell {
                     self.load_page_data(self.page, context);
                     match self.page {
                         Page::Devices => self.load_devices(context),
-                        Page::Settings => self.load_viewers(context),
+                        Page::Settings => {
+                            self.share.refresh_status();
+                            self.load_viewers(context);
+                        }
                         Page::Scheduling => {
                             self.scheduler.update(scheduling::Action::Load, context);
                         }
                         _ => {}
                     }
+                    self.sync_share_tick(context);
                 }
             }
             Msg::DetailPage(page) => {
@@ -2163,13 +2304,20 @@ impl Component for Shell {
                         }
                         // A successful sync rewrites the price table and its
                         // sync stamp; repriced>0 additionally changes
-                        // visible USD.
+                        // visible USD. Only load the 5k-row price table if the
+                        // user is viewing Prices or already opened it.
                         self.views_stale = true;
-                        self.load_page_data(Page::Prices, context);
+                        if !self.window_hidden
+                            && (self.page == Page::Prices || self.prices.is_some())
+                        {
+                            self.load_page_data(Page::Prices, context);
+                        }
                         if r.repriced > 0 || r.rules_repass {
                             // Costs of events on arbitrary days changed.
                             self.cube_rebuild = true;
-                            self.start_scan(context);
+                            if !self.window_hidden {
+                                self.start_scan(context);
+                            }
                         }
                     }
                     Err(e) => {
@@ -2512,8 +2660,137 @@ impl Shell {
     /// Programmatic quit — `allow_next_close` lets the close we requested
     /// pass our own WM_CLOSE swallow (without it the subclass eats it).
     fn quit_now(&mut self, context: &ComponentContext<Self>) {
+        self.watcher = None;
         close_hook::allow_next_close();
         let _ = context.window().request_close();
+    }
+
+    fn open_watcher(&mut self, context: &ComponentContext<Self>) {
+        let w = watch::SourceWatcher::open(adapters::watch_roots_by_adapter());
+        if let Some(w) = &w {
+            diag!(
+                "[watch] armed persistent watcher (gen {}) on {} roots",
+                self.watch_gen,
+                w.watched_count()
+            );
+            arm_watcher_next(context, self.watch_gen, Arc::clone(w));
+        }
+        self.watcher = w;
+    }
+
+    fn queue_rescan(&mut self, scope: Option<Vec<&'static str>>) {
+        if !self.pending_rescan {
+            self.pending_rescan = true;
+            self.pending_sources = scope;
+            return;
+        }
+        match (&mut self.pending_sources, scope) {
+            (None, _) => {}
+            (cur, None) => *cur = None,
+            (Some(existing), Some(added)) => {
+                for id in added {
+                    if !existing.contains(&id) {
+                        existing.push(id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Arm the 2 s pairing-code follow-up timer ONLY while Settings is visible
+    /// and LAN sharing is running — avoids 1,800 UI renders/hour everywhere else.
+    fn sync_share_tick(&mut self, context: &ComponentContext<Self>) {
+        let want =
+            self.page == Page::Settings && !self.window_hidden && self.share.running.is_some();
+        if want && !self.share_tick_armed {
+            self.share.tick += 1;
+            self.share_tick_armed = true;
+            arm_share_tick(context, self.share.tick);
+        } else if !want && self.share_tick_armed {
+            self.share.tick += 1;
+            self.share_tick_armed = false;
+        }
+    }
+
+    fn hide_to_tray(&mut self, context: &ComponentContext<Self>) {
+        tray::hide_main_window();
+        self.on_window_visible(false, context);
+    }
+
+    fn on_window_visible(&mut self, visible: bool, context: &ComponentContext<Self>) {
+        let hidden = !visible;
+        if self.window_hidden == hidden {
+            return;
+        }
+        self.window_hidden = hidden;
+        if hidden {
+            diag!("[window] hidden to tray — reclaiming transient UI caches");
+            self.sync_share_tick(context);
+            // Drop large UI-only caches that reload in milliseconds on restore.
+            self.prices = None;
+            self.price_shown = Arc::default();
+            self.sources = None;
+            self.nearby.clear();
+            if let Some(s) = &mut self.snap {
+                s.detail.rows = Arc::default();
+            }
+        } else {
+            diag!(
+                "[window] restored from tray (views_stale={})",
+                self.views_stale
+            );
+            // Lift process-wide efficiency mode (also covers cross-process
+            // single-instance ShowWindow restores).
+            power::efficiency_process(false);
+            if self.page == Page::Settings {
+                self.share.refresh_status();
+                self.load_viewers(context);
+            }
+            self.sync_share_tick(context);
+            if self.views_stale {
+                self.reload_views(context);
+            } else if let Some(s) = &self.snap
+                && s.detail.rows.is_empty()
+                && s.detail.total > 0
+            {
+                self.load_detail_page(s.detail.page, context);
+            }
+            if matches!(self.page, Page::Sources | Page::Prices) {
+                self.load_page_data(self.page, context);
+            }
+        }
+    }
+
+    fn apply_peer_sync_result(
+        &mut self,
+        res: Result<Option<globaltokentracker_core::peer::sync::SyncReport>, String>,
+        context: &ComponentContext<Self>,
+    ) {
+        let should_reload_devices = match res {
+            Ok(Some(report)) => {
+                self.peer_error = None;
+                if report.changed {
+                    // Peer rows changed: the cube must be rebuilt.
+                    self.cube_rebuild = true;
+                    self.views_stale = true;
+                    if !self.window_hidden {
+                        self.reload_views(context);
+                    }
+                }
+                true
+            }
+            Ok(None) => {
+                self.peer_error = None;
+                false
+            }
+            Err(e) => {
+                self.peer_error = Some(e);
+                true
+            }
+        };
+        if should_reload_devices {
+            self.load_devices(context);
+        }
     }
 
     /// Raw top-level blocks of one page, assembled by `page_view`/`frame_page`.
@@ -2877,11 +3154,38 @@ impl Shell {
     }
 
     fn start_scan(&mut self, context: &ComponentContext<Self>) {
+        self.start_scan_sources(None, context);
+    }
+
+    fn start_scan_sources(
+        &mut self,
+        sources: Option<Vec<&'static str>>,
+        context: &ComponentContext<Self>,
+    ) {
         if !self.scanning {
-            diag!("[scan] start");
+            diag!(
+                "[scan] start sources={:?} tray_only={}",
+                sources,
+                self.window_hidden
+            );
             self.scanning = true;
-            let force_views = std::mem::take(&mut self.views_stale);
-            let prev_cube = if std::mem::take(&mut self.cube_rebuild) {
+            let tray_only = self.window_hidden;
+            let force_views = if tray_only {
+                false
+            } else {
+                std::mem::take(&mut self.views_stale)
+            };
+            let full_rebuild = if tray_only {
+                false
+            } else {
+                std::mem::take(&mut self.cube_rebuild) || std::mem::take(&mut self.hidden_full)
+            };
+            let extra_days = if tray_only {
+                std::collections::BTreeSet::new()
+            } else {
+                std::mem::take(&mut self.hidden_days)
+            };
+            let prev_cube = if full_rebuild {
                 None
             } else {
                 self.snap.as_ref().map(|s| Arc::clone(&s.cube))
@@ -2896,6 +3200,9 @@ impl Shell {
                 prev_cube,
                 filter_gen: self.filter_gen,
                 scan: true,
+                sources,
+                tray_only,
+                extra_days,
             };
             context.spawn_background(move |_| {
                 power::worker("gtt-scan");
@@ -2912,7 +3219,10 @@ impl Shell {
             diag!("[reload] fast view reload without disk scan");
             self.scanning = true;
             let force_views = std::mem::take(&mut self.views_stale);
-            let prev_cube = if std::mem::take(&mut self.cube_rebuild) {
+            let full_rebuild =
+                std::mem::take(&mut self.cube_rebuild) || std::mem::take(&mut self.hidden_full);
+            let extra_days = std::mem::take(&mut self.hidden_days);
+            let prev_cube = if full_rebuild {
                 None
             } else {
                 self.snap.as_ref().map(|s| Arc::clone(&s.cube))
@@ -2927,6 +3237,9 @@ impl Shell {
                 prev_cube,
                 filter_gen: self.filter_gen,
                 scan: false,
+                sources: None,
+                tray_only: false,
+                extra_days,
             };
             context.spawn_background(move |_| {
                 power::worker("gtt-reload");
@@ -3039,6 +3352,7 @@ impl Shell {
                     Some(t) => t,
                     None => s.event_count(apps.as_deref(), models.as_deref())?,
                 };
+                s.shrink_memory();
                 Ok((rows, total))
             });
             match res {
@@ -3098,6 +3412,7 @@ impl Shell {
         } else if !on && let Some(running) = self.share.running.take() {
             self.share.busy = true;
             self.share.refresh_status();
+            self.sync_share_tick(context);
             context.spawn_background(move |_| {
                 power::worker("gtt-share-stop");
                 running.stop();

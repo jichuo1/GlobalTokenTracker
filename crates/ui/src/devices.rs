@@ -108,6 +108,7 @@ pub fn load(db: &Path) -> Result<DevicesInfo, String> {
         .and_then(|r| r.list())
         .map_err(|e| e.to_string())?;
     let warnings = overlaps(&store).map_err(|e| e.to_string())?;
+    store.shrink_memory();
     Ok(DevicesInfo {
         local_id,
         local_name,
@@ -121,12 +122,14 @@ pub fn load(db: &Path) -> Result<DevicesInfo, String> {
 pub fn sync(db: &Path, if_due: bool) -> Result<Option<SyncReport>, String> {
     let store = store(db)?;
     let options = sync::SyncOptions::default();
-    if if_due {
+    let res = if if_due {
         sync::sync_if_due(&store, sync::SYNC_INTERVAL, &options)
     } else {
         sync::sync_all(&store, &options).map(Some)
     }
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    store.shrink_memory();
+    res
 }
 
 pub fn discover(db: &Path) -> Result<Vec<Found>, String> {

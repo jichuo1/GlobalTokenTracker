@@ -20,7 +20,7 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    MINMAXINFO, WM_CLOSE, WM_GETMINMAXINFO, WM_NCDESTROY,
+    MINMAXINFO, WM_CLOSE, WM_GETMINMAXINFO, WM_NCDESTROY, WM_SHOWWINDOW,
 };
 
 const SUBCLASS_ID: usize = 0x4754_5431; // "GTT1"
@@ -36,6 +36,8 @@ thread_local! {
     static INSTALLED: Cell<bool> = const { Cell::new(false) };
     /// Consume-once pass-through: the next WM_CLOSE reaches the real close.
     static ALLOW_CLOSE: Cell<bool> = const { Cell::new(false) };
+    /// Deduplicates redundant WM_SHOWWINDOW notifications.
+    static LAST_VISIBLE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 /// Idempotent — call every view build; returns early once the subclass is on.
@@ -97,12 +99,28 @@ unsafe extern "system" fn close_proc(
                 }
                 r
             }
+            WM_SHOWWINDOW => {
+                // lparam == 0 means an explicit ShowWindow call (hide-to-tray,
+                // tray restore, or second-instance focus_existing_window).
+                if lparam == 0 {
+                    let visible = wparam != 0;
+                    if LAST_VISIBLE.with(|v| v.replace(Some(visible))) != Some(visible) {
+                        SENDER.with(|s| {
+                            if let Some(sender) = &*s.borrow() {
+                                sender.send(Msg::WindowVisible(visible));
+                            }
+                        });
+                    }
+                }
+                DefSubclassProc(hwnd, msg, wparam, lparam)
+            }
             WM_NCDESTROY => {
                 // The HWND is going away — drop the subclass and the stale
                 // sender, then let the real proc finish destroying.
                 RemoveWindowSubclass(hwnd, Some(close_proc), SUBCLASS_ID);
                 SENDER.with(|s| *s.borrow_mut() = None);
                 INSTALLED.with(|i| i.set(false));
+                LAST_VISIBLE.with(|v| v.set(None));
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }
             _ => DefSubclassProc(hwnd, msg, wparam, lparam),

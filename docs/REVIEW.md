@@ -2299,3 +2299,66 @@
 - **归一化与去重**：input_tokens 含缓存（本机 292/292 cached==read+write 且 input≥cached；审阅形 non_cached==input−cached 9/9）→ 减缓存得裸输入；reasoning 为 output 子集（292/292）→ 并列保存；cache_write 无分档 → 5m 档（同 Claude 无明细回退；本机恒 0）。只数上述两种事件：goal_usage_attribution（约 3 条/次的计费归属镜像）与 subagent.control 的整次聚合 usage 一律不计，避免与子会话逐次记录重复。dedup 依次用 source_run_record_id（镜像稳定，本机 307 个互不重复）、信封 id、文件偏移；审阅用 review_id。workspace/provider 取 runtime.session.metadata 并存 adapter state；旧版子代理日志无此记录时向上继承父会话 workspace（有界读父文件头）。
 - **验证**：新增 4 项单元测试（归一化+镜像不计、审阅对象模型、dedup 回退/状态链/半行、父 workspace 继承）。cargo fmt --all -- --check、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo test --workspace --locked 全通过：434 passed / 4 ignored（较 S190 的 430 新增 4 项）。真实负载（target/diagnostics/muse-adapter-20261118 暂存账本，未触正式账本）：CLI 扫描本机会话树与一份静态副本共 22 文件，账本 392 行与 Python 独立实现的黄金汇总逐组精确一致（10 组：裸输入 1,373,766 / 输出 211,377 / 思考 78,445 / 缓存读 45,436,416）；副本与原件同键未产生重复行；二次/三次扫描仅吃两个在跑会话的新尾行（+8/+11），其余文件字节游标跳过。对账时的两处差异经逐键定位均为扫描后实时落盘的新调用，非漏计。
 - **边界**：正式 GUI/账本未更新（GUI 进程仍跑旧构建，新来源在正式库出现需重新构建安装并重启后由常驻扫描入账）；macOS 仅改显示名映射、未本机编译（无 Swift 工具链，待 CI verify-branch）；价格待上游价格源收录 Muse 系列模型。未提交。
+
+## S192 完善 Antigravity 速度计时、token 口径修复与模型识别（2026-11-21）
+
+- **动机与本机实测核对**：用户反馈 Antigravity 统计不完整且缺失模型速度。直接核查本机 `~/.gemini/antigravity{,-cli}/conversations/*.db`（61 个真实会话库、2,091 条真实生成）并与本会话 `transcript.jsonl`、`transcript_full.jsonl` 及 `step_payload` 逐条交叉核对后，确认三处关键事实：
+  1. **缺失速度计时**：`antigravity.rs` 此前未提取 `duration_ms`/`ttft_ms`/`ts_end`。实测 `gen_metadata.#1` 直接记录了两个 `google.protobuf.Duration`（`{seconds, nanos}`）——`#11` 为 `time_to_first_token`（TTFT），`#12` 为 `streaming_duration`，在 2,068 条有匹配 step 的记录上分别与 `steps(step_type=15)` 的 `#6 - #1`（中位差 0.01 ms、P95 0.38 ms）、`#7 - #6`（中位差 0.00 ms、P95 0.16 ms）精确一致，`#11 + #12` 与 `#7 - #1`（中位差 0.01 ms、P95 0.42 ms）一致。
+  2. **输入 token 混入模型枚举值**：`usage.#1` 与 `chat.#3` 在 2,090/2,090 条上 100% 相等（如 `1318=MODEL_PLACEHOLDER_M318`、`1535=M535`、`1427=M427`、`342=MODEL_OPENAI_GPT_OSS_120B_MEDIUM`），是 protobuf `Model` 枚举整数而非固定 system-prompt token（早期社区误将 `1132=M132` 当输入）；与 `transcript.jsonl` 逐轮比对证实真实非缓存输入严格等于 `usage.#2`。该错误不仅每轮多算 1,016–1,535 输入 token，还使 4 条无真实用量的中断/空调用被误记为计费事件。
+  3. **思考与正文输出字段颠倒**：对照 `transcript_full.jsonl`（含仅思考中断轮 `u#9=1118, u#10=0`）与 `step_payload.#20`（`eb7674c0.db` 思考摘要 4,430B / 思考耗时 36.55s 对应 `u#9=5201`，正文 JSON 474B 对应 `u#10=216`），实证 `usage.#9` 为思考（reasoning）token、`usage.#10` 为可见回复/工具调用输出、`usage.#3 == #9 + #10`（2,091/2,091 零误差）。
+- **核心改动**：
+  - `crates/core/src/adapters/antigravity.rs`：
+    - 提取 `gen_metadata.#1.#11`（`ttft_ms`）与 `#12`，按纳秒相加四舍五入得实测 `duration_ms`（守卫 `secs <= 24h`、`nanos < 1e9`、防负 varint/坏块），`ttft_ms` 封顶 `duration_ms`；仅存在 `#11` 而无 `#12` 时保留 `ttft_ms` 且不误作总时长。
+    - 扩展 `read_step_times` 读取 `steps(step_type=15)` 的 `#1`（`created_at`）、`#6`（`first_token_at`）与 `#7`/`#8`/`#32`（`completed_at`）；`ts_end` 优先取 step 完成时刻，缺省回落 `ts_start + duration_ms`。若旧库缺 `#11/#12`，仅填 `ts_start`/`ts_end`（及有界 `ttft_ms`），留 `duration_ms = None`，由既有 `speed_exprs`/`EventRow::effective_ms` 自动走 30min 有界时间戳估算并诚实计入 `speed_est_ms`。
+    - 修正 `input_tokens = usage.#2`、`output_tokens = usage.#3`（缺省回落 `#9 + #10`）、`reasoning_tokens = usage.#9.min(output)`；零用量行跳过并精确清理旧版因 `usage.#1` 误入账的零输出零缓存无时长幽灵行（仅限同 `dedup_key`）。
+    - 新增 `chat.#20` key-value map 读取 `model_enum` 回落（覆盖 `#19/#21` 均缺失的行）；补充本机实测模型别名（`gemini-4-neon`/`M535`、`gemini-4-carbon`/`M427`、`gemini-4-hydrogen`/`M528`、`M319`/`M320`、`gpt-oss-120b-medium`）与 `antigravity-ide/conversations` 发现目录。
+  - `crates/core/src/model.rs`：`UsageEvent::completeness()` 计入 `ttft_ms.is_some()`，使带 TTFT 的重扫行在 completeness-UPSERT 中严格升级旧行（即使旧行因 `#9/#10` 颠倒曾有虚假 `reasoning_tokens > 0`）。
+  - `crates/core/src/store/mod.rs`：新增一次性迁移 `mig_rescan_antigravity_timing_v1`，仅清空 `gemini_antigravity` 的 `sync_cursors`（不删 `usage_events`，保留已删源库的历史记录），下次扫描即原地升级所有仍在盘会话库。
+  - `README.md` / `README_EN.md`：同步 Antigravity 能力说明（补充 TTFT 与耗时）。
+- **取舍**：① 沿用项目五档速率（总/输入/输出/预填/解码）既有架构，直接透传 Antigravity 实测 TTFT（与 ZCode/Devin 同口径：客户端首块到达时延；单块缓冲工具调用时 `#12` 极短属流式客户端共性，当 `#12 == 0` 时 `speed_exprs` 已自动排除出解码分母）；② 不把文档未公开的 `steps.status` 枚举数字（3/5/8）臆测为状态字符串；③ 未直接替换正在运行的正式 GUI/CLI 或修改正式账本。
+- **验证**：
+  - 新增 6 项单测（`antigravity.rs` 5 项：五档实测速度端到端、缺 `#11/#12` 走 step 时间戳估算回落、损坏时长降级、模型枚举幽灵行跳过与清理、`#20.model_enum` 与 Gemini 4 别名；`store/mod.rs` 1 项：`mig_rescan_antigravity_timing_v1` 仅清游标保事件且幂等），更新 `completeness_counts_dims` 与既有夹具。
+  - `cargo fmt --all -- --check` 0 差异；`cargo clippy --workspace --all-targets --locked -- -D warnings` 0 告警；`cargo test --workspace --locked` 全量通过：**440 passed / 0 failed / 4 ignored**（较 S191 的 434 新增 6 项）。
+  - **独立副本端到端实测**（在线备份本机正式账本至 `target/e2e/antigravity-speed-20261121/ledger.db`，未触碰正式账本）：
+    - 扫描前：`gemini_antigravity` 2,170 条（含 4 条幽灵行），`duration_ms > 0` 为 0、`ttft_ms > 0` 为 0、`ts_end` 为 0，输入 17,743,444 / 输出 1,373,683 / 思考 462,970 / 缓存读 283,753,466 / 成本 $51.3864。
+    - 首次扫描（自动触发 `mig_rescan_antigravity_timing_v1`，1.57s，61 文件 0 错）：2,166 条全部具备实测计时（`duration_ms/ttft_ms/ts_end` 2,166/2,166 = 100%，`est_ms = 0`，4 条幽灵行已清理）；总输出 1,373,683 与缓存读 283,753,466 逐字守恒，输入修正为 14,845,473（剔除 2,897,971 伪枚举值）、思考修正为 910,713、成本 $48.5581；`gpt-oss-120b` 由 estimated 升为 computed；Antigravity 整体加权速率：**输出 59.5 / 输入 643.0 / 总吞吐 702.4 / 预填 843.3 / 解码 250.4 tok/s**（有效计时 23,089.5 s）；`daily_rollups` 与 `usage_events` 完全一致；其余工具 378,779 行 / $20,005.7962 零变动。
+    - 二次扫描（47.6ms）：+0 新增，幂等通过。
+- **边界**：本次交付源码与验证，未替换本机已安装的 GUI/CLI 二进制，也未改写正式账本；重新构建安装并重启 GUI/CLI 后将自动触发 `mig_rescan_antigravity_timing_v1` 完成历史回填。未提交。
+
+## S193 运行时内存占用与后台性能优化（2026-11-21）
+
+- **动机与基线实测**：对本机运行中的旧版 v1.0.1 GUI（`globaltokentracker-ui` PID 5772，挂载 257.25 MB / 380,974 行正式账本，`refresh_secs=0` 文件监听模式、`share_lan=true`、1 个已启用 LAN peer）采样，定位到严重的常驻内存与后台轮询开销：
+  - **常驻内存**：`WorkingSet = 328–339.7 MB`，`PrivateBytes = 331–343.2 MB`，线程数 `109–110`，句柄 `1,505–1,516`。
+  - **后台空载消耗**：持续燃烧 **19.3%–33.0% 单核 CPU**（运行 107 分钟累计 1,642.6 s CPU），6 秒增量 `ReadOps = 8,165`、`ReadKB = 38,556 KB`（~6.4 MB/s）、`OtherOps = 46,603`。
+  - **空载全量扫描（debug CLI，20 适配器）**：`762 ms`，其中 `codebuddy_ide` 独占 `570 ms`（75%）、`gemini_antigravity` `58 ms`、`muse_code` `27 ms`、`devin` `18 ms`、`codebuddy_cli` `11 ms`、`opencode` `10 ms`；单次 `overlaps(&store)` 全表扫 30 天 `usage_events` 耗时 `380.4 ms`。
+- **根因定位与核心改动**：
+  1. **SQLite 连接内存上限、重复迁移跳过与批查游标**（`crates/core/src/store/{schema.sql,mod.rs,cursor.rs}`）：
+     - `schema.sql` 与 `Store::apply_pragmas` 将每连接 `cache_size` 由 `-64000`（64 MB）降至 `-8000`（8 MB）、`mmap_size` 由 `64 MB` 降至 `0`（实测 257 MB 账本热查询无回退：`cube_2d` 7.2→7.0 ms、`events_page(200)` 0.25→0.19 ms，每连接最高省 56 MB 堆 + 64 MB 映射页）。
+     - 新增 `Store::shrink_memory()`（`PRAGMA shrink_memory`），在扫描、页表加载、明细查询与 peer 同步结束时主动归还页缓存。
+     - 进程级已迁移路径缓存 + 单次 `is_already_migrated()` 校验（同时核对 `schema_migrations` 与 5 项一次性迁移标记及 schema 印章），重复 `Store::open` 跳过 ~35 条 DDL/`pragma_table_info` 查询，并在 `restore_backup` 时失效缓存。
+     - 新增 `idx_cursors_source` 索引、`CursorMeta`/`load_cursor_meta`/`load_source_cursor_meta`/`cursor_action_with`/`save_cursor_opaque`：`engine.rs` JSONL 扫描改为每源 1 次批查游标头（跳过空载时拉取 >1 MB `adapter_state`），同时使 `source_health()` 的 20 次子查询全部走覆盖索引。
+  2. **引擎与适配器后台扫描降耗**（`crates/core/src/engine.rs`、`pricing/{rules.rs,seed.rs}`、`otel.rs`、`adapters/*.rs`）：
+     - `Engine` 改为按需懒加载 `PriceBook`（空载零新事件不再读 11,732 行 `prices` 表），`Rules::bundled()` 进程级 `OnceLock` 缓存，`seed::ensure_seeded` 改用 `SAVEPOINT` 兼容外层事务；`eco_pool()` 线程上限由 `cpu/2`（24 核机为 12 线程）收束为 `.clamp(2, 4)`；新增 `Engine::scan_sources(&[&str])` 支持按变更来源定向扫描；`otel::spawn` 监听线程补标 `power::worker("gtt-otel")`。
+     - `codebuddy.rs`：新增零分配顺序无关目录指纹 `quick_dir_stamp`（利用 `DirEntry::metadata()` 免额外 stat 且不分配/排序 7,769 个文件名），未变化时直接命中快路径跳过反序列化 1.48 MB `ConvState` 与全量快照 SHA-256 重算；空 `messages/` 目录（本机 104 个）落盘 `"v2:empty"` 游标不再每轮 `force=true`；`session_dirs()` 改为仅在真正产出事件时懒加载；`backup_legacy` 先查 `app_state` 标记；`watch_roots()` 收紧至 `CodeBuddyExtension/Data`。
+     - `codebuddy_cli.rs`：`watch_roots()` 收紧至 `.codebuddy/traces`，增加 `(size, mtime_ns)` + 刷新代次快路径避免每轮读盘与 SHA-256。
+     - `adapters/mod.rs` + `devin.rs`/`opencode.rs`/`zcode.rs`/`cursor.rs`/`workbuddy.rs`/`coordinator.rs`：新增共享 `sqlite_change_token`（静默库仅 stat `db`/`-wal` 零 `File::open`，2 秒内活跃库及单测补读 96B SQLite `change_counter` 与 24B WAL salt），未变时跳过只读打开与 SQL 查询；有 pending/running 行或分页截断时不写指纹确保续扫。
+     - `antigravity.rs`：`watch_roots_under` 仅在 `<base>/antigravity` 直接存在旧版 `<uuid>.db` 时监听父目录，默认只监听 `conversations/` 子目录（彻底消除 `brain/`、`presence/`、`daemon/`、`persistent_terminals/`、`conversation_summaries.db-wal` 引发的监听风暴）；`read_conversation` 按 `prev_max_gen_idx`/`prev_max_step_idx` 增量只读尾部行并在遇到路由占位符时懒回落补齐 `SessionModels`。
+     - `muse_code.rs`：替换为定向目录遍历 `collect_sessions`，跳过 `tool-outputs`/`.spool`/点目录且进入会话目录后仅下探 `subagent/`；`cline.rs` 遍历配置目录前先用 `file_type().is_dir()` 过滤。
+  3. **LAN 对等重叠检测与地址缓存**（`crates/core/src/peer/{merged.rs,share.rs}`）：
+     - `overlaps(&store)` 先查 `peer_groups`：无启用 peer 组直接 `O(1)` 返回；存在 peer 组时按 `(app, 合并连续 utc_hour 区间)` 走 `idx_events_app(app, ts_start)` 索引范围扫描，实测从 `380.38 ms` 降至 `4.54 ms`（**84× 提速**）。
+     - `Sharing::status()` 对 `lan_addresses` 增加 30 秒缓存，避免高频触发 `GetAdaptersAddresses`。
+  4. **WinUI 持久化监听、空载定时器治理与托盘内存回收**（`crates/ui/src/{watch.rs,close_hook.rs,devices.rs,main.rs}`）：
+     - `watch.rs` 重构为持久化 `SourceWatcher`（单一 `notify::RecommendedWatcher` 跨事件复用，不再每次变更销毁重建监听线程与目录句柄），补齐噪声过滤（`-shm`/`-journal`/`.tmp`/`.lock`/`.part`、`conversation_summaries.db*`、`session-index.db*`、`tool-outputs`/`.spool` 及 Antigravity 非会话目录）并路由变更路径至对应适配器，触发 `Engine::scan_sources` 定向扫描。
+     - `arm_peer_sync` 将 15 秒一次的到期检查完全留在后台循环，未到期（`Ok(None)`）直接续睡不向 UI 线程发消息；`apply_peer_sync_result` 仅在真实同步或报错时刷新 `load_devices`（根除每 15 秒 2 次 UI 重绘 + 全表 `overlaps`）。
+     - `ShareTick`（2 秒轮询）仅在 `page == Page::Settings && !window_hidden && share.running.is_some()` 时启动，离页或隐藏到托盘立即停表（消除非设置页每小时 1,800 次 UI 重绘）。
+     - 取消启动时预拉 5,000 行 `Page::Prices`（改为访问价格页时懒加载）；`close_hook.rs` 转发 `WM_SHOWWINDOW` 至 `Msg::WindowVisible`，隐藏到托盘时释放 `prices`/`price_shown`/`sources`/`nearby`/`detail.rows` 瞬态缓存，且托盘期间扫描走 `LoadOutcome::TrayScanned` 仅入库并轻量更新今日托盘提示、延迟 `Cube`/`OverviewVm`/明细重建至恢复窗口时增量补齐。
+- **取舍**：① 不调用 `EmptyWorkingSet` 强行换出工作集，延续 `power.rs` 不制造恢复期缺页风暴的原则，通过真实降低 SQLite 缓存、取消预载与释放瞬态堆分配降低 `PrivateBytes`；② 手动刷新仍通过 `forget_scan_memos()` 递增全局代次强制穿透所有快路径（保障等长同时间戳改写可被检出）；③ 未替换本机已安装的正式 GUI/CLI 二进制或触碰正式账本。
+- **验证**：
+  - 新增 9 项针对性单测（`cursor.rs` 批查游标与不透明游标、`store/mod.rs` 重复打开快路径与删标记重跑迁移、`codebuddy` 空目录快路径游标、`antigravity` 增量尾扫+兄弟模型懒恢复及 `watch_roots_under` 过滤、`muse_code` 跳过 `tool-outputs`/`.spool`、`engine.rs` `scan_sources`、`peer/tests.rs` 零 peer 短路、`watch.rs` 噪声过滤与路径→适配器路由）。
+  - `cargo fmt --all -- --check` 0 差异；`cargo clippy --workspace --all-targets --locked -- -D warnings` 0 告警；`cargo test --workspace --locked` 全量通过：**449 passed / 0 failed / 4 ignored**（较 S192 的 440 新增 9 项）。
+  - **独立副本端到端实测**（257.25 MB 正式账本备份 `target/e2e/antigravity-speed-20261121/ledger.db`，未触碰正式账本与线上 GUI）：
+    - **CLI 扫描性能与峰值内存**：空载全量 20 适配器扫描由 `762 ms`（debug）降至 `149–176 ms`（debug）/ **`146.9 ms`**（release，**5.2× 提速**），其中 `codebuddy_ide` `570→59 ms`（9.7×）、`gemini_antigravity` `58→10 ms`、`muse_code` `27→3 ms`、`devin` `18→2 ms`、`codebuddy_cli` `11→1 ms`、`opencode` `10→0 ms`、`zcode`/`cursor`/`gtt_coordinator` 均 `0 ms`；定向单源扫描（监听触发路径）仅 `0–27 ms`（除 `codebuddy_ide` `60 ms`），release 峰值内存 `WorkingSet 13.4–16.4 MB`、`Commit 1.9–6.5 MB`；历史各源行数与 token 守恒零漂移。
+    - **SQLite 查询计划核验**：`EXPLAIN QUERY PLAN` 确认 `load_source_cursor_meta`、`source_health` 均命中 `idx_cursors_source`（后者为覆盖索引），`overlaps` 命中 `idx_events_app(app, ts_start)`（`380.38 ms → 4.54 ms`）。
+    - **独立 GUI 进程空载实测**（debug 构建，隔离 `GTT_DATA_DIR` + `GTT_UI_TEST_INSTANCE`，对比同账本线上 release 旧版 PID 5772）：`WorkingSet` `339.7 MB → 179.45 MB`（**-47.2%**）、`PrivateBytes` `343.2 MB → 143.93 MB`（**-58.1%，-199.3 MB**）、空载 10s CPU 占用 `19.3%–33.0% → 0.47%` 单核（**-97.6%**）、磁盘 `ReadOps` `1,361 → 66.8 ops/s`（**-95.1%**）、`ReadKB` `6,426 → 261 KB/s`（**-95.9%**）、`OtherOps` `7,767 → 43.3 ops/s`（**-99.4%**）。
+- **边界**：本次仅交付源码、测试与独立实测证据，未替换已安装的正式二进制，也未提交 git。
+
