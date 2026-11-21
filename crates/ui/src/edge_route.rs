@@ -426,7 +426,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn routes_start_and_end_head_on_and_never_cross_any_card() {
         // (cards, source index, target index)
         type Layout<'a> = (&'a [(f64, f64)], usize, usize);
@@ -471,7 +470,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn cards_closer_than_the_clearance_still_route_clear() {
         // 4 DIP apart, report from the right card back into the left one.
         let cards = [(244.0, 20.0), (20.0, 20.0)];
@@ -482,7 +480,6 @@ mod tests {
         assert!(!crosses_any(&path, &cards), "{path:?}");
     }
 
-    #[test]
     fn a_straight_shot_stays_straight() {
         let cards = [(0.0, 0.0), (400.0, 0.0)];
         let (from, to) = task(cards[0], cards[1]);
@@ -503,5 +500,12 @@ mod tests {
         let later = dots(&line, 50.0, 10.0);
         assert!(!early.is_empty() && early.len() >= later.len() - 1);
         assert!(later[0].0 > early[0].0, "phase moves dots toward the end");
+    }
+
+    #[test]
+    fn card_routing_clearance_and_straight_paths() {
+        routes_start_and_end_head_on_and_never_cross_any_card();
+        cards_closer_than_the_clearance_still_route_clear();
+        a_straight_shot_stays_straight();
     }
 }

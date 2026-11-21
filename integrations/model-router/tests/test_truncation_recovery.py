@@ -17,7 +17,35 @@ class TruncationRecoveryTests(unittest.TestCase):
     wait = fixtures.GroupTests.wait
     submit = fixtures.GroupTests.submit
 
-    def test_eof_json_with_native_stop_returns_to_slice_queue_without_paid_replay(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_adaptive_output_growth_budget_clamping_and_route_switching(self):
+        self._run_cases(
+            self._case_adaptive_retry_grows_once_on_known_capable_route_and_bills_both,
+            self._case_native_limit_switches_to_a_route_with_more_headroom,
+            self._case_growth_is_clamped_to_remaining_total_budget_above_failed_floor,
+        )
+
+    def test_fixed_ceiling_and_eof_json_slice_queue_behavior(self):
+        self._run_cases(
+            self._case_fixed_explicit_ceiling_stops_without_repeating_that_ceiling,
+            self._case_eof_json_with_native_stop_returns_to_slice_queue_without_paid_replay,
+        )
+
+    def test_reasoning_only_and_group_zero_body_recovery(self):
+        self._run_cases(
+            self._case_reasoning_only_failure_does_not_create_smaller_source_fragments,
+            self._case_group_can_recover_zero_body_without_splitting_successful_scope,
+        )
+
+    def _case_eof_json_with_native_stop_returns_to_slice_queue_without_paid_replay(self):
         calls = []
         def adapter(route, prompt, task, context):
             calls.append(route.id)
@@ -46,7 +74,7 @@ class TruncationRecoveryTests(unittest.TestCase):
         self.assertEqual(bad["state"], "failed")
         self.assertEqual(len(untouched.state["records"]), 1)
 
-    def test_adaptive_retry_grows_once_on_known_capable_route_and_bills_both(self):
+    def _case_adaptive_retry_grows_once_on_known_capable_route_and_bills_both(self):
         seen = []
         def adapter(route, prompt, task, context):
             seen.append(task.max_output_tokens)
@@ -64,7 +92,7 @@ class TruncationRecoveryTests(unittest.TestCase):
         self.assertEqual(task.max_output_tokens, 8192)
         self.assertEqual(len(job.attempts), 2)
 
-    def test_fixed_explicit_ceiling_stops_without_repeating_that_ceiling(self):
+    def _case_fixed_explicit_ceiling_stops_without_repeating_that_ceiling(self):
         seen = []
         def adapter(route, prompt, task, context):
             seen.append(task.max_output_tokens)
@@ -79,7 +107,7 @@ class TruncationRecoveryTests(unittest.TestCase):
         self.assertEqual(job.tokens_used, 8192)
         self.assertIn("logical_fixed_output_below_reasoning_default", routing_warnings(task))
 
-    def test_native_limit_switches_to_a_route_with_more_headroom(self):
+    def _case_native_limit_switches_to_a_route_with_more_headroom(self):
         candidates = fixtures.routes()[::2]
         candidates[0].output_limit = 8192
         seen = []
@@ -97,7 +125,7 @@ class TruncationRecoveryTests(unittest.TestCase):
         self.assertEqual(seen[1][0], candidates[1].id)
         self.assertGreater(seen[1][1], 8192)
 
-    def test_growth_is_clamped_to_remaining_total_budget_above_failed_floor(self):
+    def _case_growth_is_clamped_to_remaining_total_budget_above_failed_floor(self):
         seen = []
         def adapter(route, prompt, task, context):
             seen.append(task.max_output_tokens)
@@ -112,7 +140,7 @@ class TruncationRecoveryTests(unittest.TestCase):
         self.assertLess(seen[1], 16384)
         self.assertLessEqual(job.tokens_used, job.task.token_budget)
 
-    def test_reasoning_only_failure_does_not_create_smaller_source_fragments(self):
+    def _case_reasoning_only_failure_does_not_create_smaller_source_fragments(self):
         req = GroupRequest.parse({"topic": "fixture", "context": "x" * 30000, "needs_web": False})
         queue = SliceQueue(req, [{"role": "analyst", "kind": "logic_check", "prompt": "review"}])
         record = queue.take()
@@ -121,7 +149,7 @@ class TruncationRecoveryTests(unittest.TestCase):
         self.assertEqual(record["state"], "failed")
         self.assertEqual(len(queue.state["records"]), 1)
 
-    def test_group_can_recover_zero_body_without_splitting_successful_scope(self):
+    def _case_group_can_recover_zero_body_without_splitting_successful_scope(self):
         failed = []
         def adapter(route, prompt, task, context):
             if fixtures.is_leader(task):

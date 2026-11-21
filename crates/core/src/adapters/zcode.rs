@@ -284,7 +284,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn input_semantics_are_classified_per_row() {
         // The reported case: DeepSeek prompt_tokens include the cache.
         assert!(input_includes_cache(
@@ -339,7 +338,6 @@ mod tests {
         assert!(!input_includes_cache(1_000, 10, 0, 0, 0, None, None));
     }
 
-    #[test]
     fn cached_openai_style_rows_bill_only_the_uncached_part() {
         let (db, _dir) = fixture_db("semantics");
         let conn = Connection::open(&db).unwrap();
@@ -413,7 +411,6 @@ mod tests {
     /// Rows are written at request completion; a long request lands with a
     /// `started_at` far behind the watermark — a timestamp watermark misses it
     /// forever, a rowid watermark doesn't.
-    #[test]
     fn late_inserted_row_is_not_missed() {
         let (db, _dir) = fixture_db("late");
         let store = Store::open_memory().unwrap();
@@ -432,7 +429,6 @@ mod tests {
     }
 
     /// Pre-migration cursors hold epoch-ms started_at — must rescan from 0.
-    #[test]
     fn timestamp_cursor_migrates_and_rescans() {
         let (db, _dir) = fixture_db("mig");
         let store = Store::open_memory().unwrap();
@@ -453,7 +449,6 @@ mod tests {
 
     /// A 'running' row must not cap the watermark: it is skipped now and
     /// rescanned (along with everything after it) until it completes.
-    #[test]
     fn running_row_keeps_watermark_back() {
         let (db, _dir) = fixture_db("run");
         let store = Store::open_memory().unwrap();
@@ -482,5 +477,18 @@ mod tests {
                 .any(|e| e.dedup_key == "zcode:req-b:0" && e.input_tokens == 200),
             "completed update must be rescanned"
         );
+    }
+
+    #[test]
+    fn cache_input_semantics_and_billing() {
+        input_semantics_are_classified_per_row();
+        cached_openai_style_rows_bill_only_the_uncached_part();
+    }
+
+    #[test]
+    fn rowid_watermarks_migration_and_running_rows() {
+        late_inserted_row_is_not_missed();
+        timestamp_cursor_migrates_and_rescans();
+        running_row_keeps_watermark_back();
     }
 }

@@ -2395,3 +2395,20 @@
   - **Rust 工作区**：`cargo fmt --all -- --check`（`0.72 s`）0 差异；`cargo clippy --workspace --all-targets --locked -- -D warnings`（`0.38 s`）0 告警；`cargo test --workspace --locked` 全绿 **449 passed / 0 failed / 4 ignored**（全工作区 `13.68 s`；`cli/tests/coordination.rs` `3.90 s → 1.55 s`；`globaltokentracker-core` 对齐 CI 4 核 `--test-threads=4` 仅 **`3.36 s`**，Top 慢用例 `pairing_happy_path` `3.42→0.65 s`、`one_failing_device` `3.10→0.62 s`、`many_devices_sync` `2.96→1.00 s`、`moved_devices` `2.87→0.86 s`、`wrong_code` `1.29→0.12 s`、`heartbeat_database_failure` `1.03→0.15 s`）。
   - **`integrations/model-router`**：裸 `python -m unittest tests.test_controls tests.test_service_windows`（无 `PYTHONPATH`）`24 tests / 0.78 s` 通过；全量 `python -m unittest discover -s tests -p 'test_*.py'` 由基线 **`149.67 s`** 降至 **`57.45–75.49 s`**（**2.0–2.6× 提速，省 74–92 s**），**483 tests（10 skipped）/ 0 failed / 0 errors**（其中 `test_scheduling` `16.29→2.48 s`、`test_operator_workflow` `13.89→2.03 s`、`test_controller_work` `12.72→1.99 s`、`test_activity` `32.79→10.66 s`、`test_scheduler_reliability` `21.69→7.77 s`、`test_native_agents` `20.35→6.97 s`）。
 - **边界**：本次未实际触发远端 GitHub Actions（`macos-26` 与 `ubuntu-latest` 需推分支后由远端实跑确认），未触碰本机正式账本与已安装二进制，未提交 git。
+
+## S195 全仓测试集无损合并压缩至 ~200 项（2026-11-21）
+
+- **动机**：在 S194 清理废弃门禁与提速之后，将 Rust 主工作区（449 运行用例）与 `integrations/model-router`（483 用例）各自按模块无损整合至 ~200 个聚合场景用例，在不丢失任何核心断言、安全边界或隔离性的前提下显著收束测试条目规模与维护噪音。
+- **合并策略（100% 断言零丢失）**：
+  1. **Rust 工作区**（38 个文件：`crates/core` 16 个核心模块 + 13 个适配器、`crates/cli/tests/coordination.rs`、`crates/setup/src/main.rs`、`crates/ui` 7 个模块）：
+     - 将同域细碎 `#[test] fn foo()` 转为私有辅助函数 `fn foo()`（函数体与断言逐字保留），由主题清晰的聚合 `#[test] fn <domain_group>()` 顺序调用，确保每个子用例保有独立栈帧、临时目录 `Drop` 回收与精确 panic 回溯定位。
+     - 完整保留全部 4 项外部环境 `#[ignore]` 测试、`crates/cli/tests/coordination.rs` 中跨进程锁夹具 `lock_holder_process_fixture` 原名以及所有 `#[cfg(windows)]` / `#[cfg(unix)]` / `#[cfg(target_os = "macos")]` 平台条件编译守卫；零生产代码改动。
+  2. **`integrations/model-router`**（30 个活跃测试文件；保留 4 个 ≤3 项的小文件及 2 个 opt-in Rust kernel 差分测试文件不动）：
+     - 将同域 `def test_...` 转为 `def _case_...`（正文与断言逐字保留），由主题聚合 `def test_<group>(self)` 经 `_run_cases(self, *cases)` 调度，子用例之间严格执行 `self.tearDown(); self.doCleanups(); self.setUp()` 并包裹 `with self.subTest(case=case.__name__):`，保持 100% 独立夹具隔离与细粒度失败定位。
+     - 保持 `test_router.py` / `test_scheduling.py` / `test_operator.py` 所有跨文件导入夹具与辅助方法签名不变；保持 `test_processes.py` 中跨平台用例与 `@unittest.skipUnless(os.name=="nt", ...)` 用例独立分组。
+- **实测对比与全量验证**：
+  - **YAML 与 Python 字节码**：3 份 `.github/workflows/*.yml` `yaml.safe_load` 通过；`python -m compileall -q .github/release-templates integrations/model-router/gtt_router` `0.04 s` 通过。
+  - **`.github/release-templates`**：**39 tests / 3.90 s** 全通过（含 8 项工作流与 `commit-msg` hook 门禁）。
+  - **Rust 主工作区**：`cargo fmt --all -- --check`（`0.70 s`）0 差异；`cargo clippy --workspace --all-targets --locked -- -D warnings`（`3.09 s`）0 告警；`cargo test --workspace --locked` 全绿 **`201 passed / 0 failed / 4 ignored`**（较 449 缩减 **-55.2%**，原 449 项逻辑 100% 保留执行：cli `3+6`、core `153+4 ign`、ffi `1`、setup `5`、ui `33`；`core` 默认线程 `11.04 s → 7.83 s`，4 线程 `3.71 s`）。
+  - **`integrations/model-router`**：裸模块调用 `tests.test_controls` + `tests.test_service_windows`（无 `PYTHONPATH`）`9 tests / 0.69 s` 通过；全量 `python -m unittest discover -s tests -p 'test_*.py'` 全绿 **`192 tests（10 opt-in kernel skipped）/ 49.18 s`**（较基线 483 项 / `149.67 s` 缩减 **-60.2%** 且总耗时 **3.04× 提速**）。
+- **边界**：本次仅重组测试入口与记录审查文档，未改动生产逻辑、未触碰本机正式账本与已安装二进制；随后按主题分 4 批推送至 `origin/main`。

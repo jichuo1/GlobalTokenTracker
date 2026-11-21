@@ -2053,7 +2053,6 @@ mod tests {
 
     // 200×132 donut box → ring parks in the left 132×132 square:
     // r_out=62, r_in≈38.4, center (66,66); x>132 is bubble territory.
-    #[test]
     fn hit_resolves_ring_to_slice_index() {
         let vals = [50.0, 30.0, 20.0];
         // Right of center: slice 0 owns the first 50% of the circle.
@@ -2066,7 +2065,6 @@ mod tests {
         assert_eq!(donut_hit(30.0, 110.0, 200.0, 132.0, &vals), Some(1));
     }
 
-    #[test]
     fn hit_rejects_hole_outside_and_empty() {
         let vals = [50.0, 50.0];
         assert_eq!(donut_hit(66.0, 66.0, 200.0, 132.0, &vals), None); // hole
@@ -2088,7 +2086,6 @@ mod tests {
         assert!(super::heat_height(11.0, 6) > super::heat_height(11.0, 4));
     }
 
-    #[test]
     fn clock_hit_resolves_hours() {
         use super::clock_hit;
         assert_eq!(clock_hit(106.0, 14.0, 212.0), Some(0)); // 12 o'clock top
@@ -2104,5 +2101,12 @@ mod tests {
         assert_eq!(clock_hit(116.0, 208.0, 232.0), Some(12));
         assert_eq!(clock_hit(24.0, 116.0, 232.0), Some(18));
         assert_eq!(clock_hit(116.0, 116.0, 232.0), None);
+    }
+
+    #[test]
+    fn donut_and_clock_hit_testing() {
+        hit_resolves_ring_to_slice_index();
+        hit_rejects_hole_outside_and_empty();
+        clock_hit_resolves_hours();
     }
 }

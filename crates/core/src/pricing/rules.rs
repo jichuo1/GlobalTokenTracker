@@ -190,7 +190,6 @@ mod tests {
         v.to_string()
     }
 
-    #[test]
     fn bundled_reproduces_the_previous_hardcoded_config() {
         let r = Rules::bundled();
         assert_eq!(r.feeds.len(), 20);
@@ -228,7 +227,6 @@ mod tests {
         assert_eq!(r.long_context_threshold, 200_000);
     }
 
-    #[test]
     fn remote_with_higher_revision_wins_lower_is_ignored() {
         let s = Store::open_memory().unwrap();
         assert_eq!(current(&s).revision, 1);
@@ -252,7 +250,6 @@ mod tests {
         assert_eq!(current(&s).tolerance, 0.07);
     }
 
-    #[test]
     fn invalid_remote_documents_are_ignored() {
         let s = Store::open_memory().unwrap();
         let bad = [
@@ -273,7 +270,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn unknown_feed_format_is_valid() {
         let raw = json_with(|v| {
             v["feeds"].as_array_mut().unwrap().push(serde_json::json!(
@@ -283,12 +279,24 @@ mod tests {
         assert!(Rules::parse(&raw).is_ok());
     }
 
-    #[test]
     fn fingerprint_tracks_content() {
         let a = Rules::bundled();
         let mut b = a.clone();
         assert_eq!(a.fingerprint(), b.fingerprint());
         b.aliases.insert("x".into(), "y".into());
         assert_ne!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn bundled_config_and_fingerprint() {
+        bundled_reproduces_the_previous_hardcoded_config();
+        fingerprint_tracks_content();
+    }
+
+    #[test]
+    fn remote_rules_precedence_and_validation() {
+        remote_with_higher_revision_wins_lower_is_ignored();
+        invalid_remote_documents_are_ignored();
+        unknown_feed_format_is_valid();
     }
 }

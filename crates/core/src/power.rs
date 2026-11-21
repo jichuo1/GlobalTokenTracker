@@ -207,7 +207,6 @@ mod tests {
     use super::*;
     use windows_sys::Win32::System::Threading::*;
 
-    #[test]
     fn eco_set_calls_succeed() {
         // Get*Information is unsupported for the power-throttling classes on
         // Win11 (write-only) — assert the documented Set calls return true.
@@ -246,7 +245,6 @@ mod tests {
         efficiency_process(false);
     }
 
-    #[test]
     fn efficiency_mode_toggles_priority_class() {
         // SetPriorityClass/GetPriorityClass IS readable back — the one leg of
         // efficiency mode with a verifiable read path.
@@ -262,7 +260,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn thread_name_is_readable_back() {
         name_thread("gtt-probe");
         unsafe {
@@ -278,6 +275,13 @@ mod tests {
             };
             assert_eq!(s, "gtt-probe");
         }
+    }
+
+    #[test]
+    fn windows_power_controls_and_thread_naming() {
+        eco_set_calls_succeed();
+        efficiency_mode_toggles_priority_class();
+        thread_name_is_readable_back();
     }
 }
 

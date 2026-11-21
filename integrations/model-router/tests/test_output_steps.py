@@ -27,7 +27,50 @@ class OutputStepsTests(unittest.TestCase):
                 "max_output_tokens": 8192, "output_mode": "adaptive", "max_output_steps": 3,
                 "max_attempts": 4, "token_budget": 24000, "allow_fallback": False, **extra}
 
-    def test_dynamic_capacity_fits_native_context_and_remaining_budget(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_adaptive_output_budget_and_page_budgeting(self):
+        self._run_cases(
+            self._case_dynamic_capacity_fits_native_context_and_remaining_budget,
+            self._case_initial_adaptive_request_fits_small_total_budget,
+            self._case_default_total_budget_accounts_for_pages_but_explicit_budget_wins,
+        )
+
+    def test_page_loop_budget_shrinking_deadline_and_checkpoints(self):
+        self._run_cases(
+            self._case_effective_budget_includes_suffix_and_shrinks_on_later_pages,
+            self._case_page_loop_keeps_original_hard_deadline,
+            self._case_complete_pages_share_attempts_budget_and_keep_checkpoint_provenance,
+        )
+
+    def test_step_exhaustion_unknown_paid_outcome_and_cancellation(self):
+        self._run_cases(
+            self._case_exhausted_steps_preserve_partial_without_false_completion,
+            self._case_unknown_paid_second_page_never_replays_or_loses_first,
+            self._case_cancel_between_pages_never_starts_another_call,
+        )
+
+    def test_step_metadata_duplicates_and_capacity_ceilings(self):
+        self._run_cases(
+            self._case_unexpected_or_invalid_metadata_cannot_claim_success,
+            self._case_duplicate_pages_and_conflicting_decisions_are_rejected,
+            self._case_report_capacity_and_shared_attempt_ceiling_are_hard,
+        )
+
+    def test_step_validation_operator_bounds_and_old_daemon_rejection(self):
+        self._run_cases(
+            self._case_output_steps_validate_and_operator_assignments_stay_explicit,
+            self._case_old_daemon_rejects_steps_before_submission,
+        )
+
+    def _case_dynamic_capacity_fits_native_context_and_remaining_budget(self):
         r = fixtures.route()
         r.output_limit = 4096
         r.context_window = 10000
@@ -38,7 +81,7 @@ class OutputStepsTests(unittest.TestCase):
         fixed = Task.parse(self.task(output_mode="fixed"))
         self.assertEqual(output_budget(fixed, r, 2000, 3000)["effective_output_tokens"], 4096)
 
-    def test_initial_adaptive_request_fits_small_total_budget(self):
+    def _case_initial_adaptive_request_fits_small_total_budget(self):
         outputs = []
         def adapter(r, prompt, task, context):
             outputs.append(task.max_output_tokens)
@@ -49,13 +92,13 @@ class OutputStepsTests(unittest.TestCase):
         self.assertLess(outputs[0], 6000)
         self.assertEqual(result["tokens_reserved"], 0)
 
-    def test_default_total_budget_accounts_for_pages_but_explicit_budget_wins(self):
+    def _case_default_total_budget_accounts_for_pages_but_explicit_budget_wins(self):
         one = Task.parse({"kind": "extract", "prompt": "bounded"})
         pages = Task.parse({"kind": "extract", "prompt": "bounded", "max_output_steps": 4})
         self.assertGreater(pages.token_budget, one.token_budget)
         self.assertEqual(Task.parse(self.task(token_budget=6000)).token_budget, 6000)
 
-    def test_effective_budget_includes_suffix_and_shrinks_on_later_pages(self):
+    def _case_effective_budget_includes_suffix_and_shrinks_on_later_pages(self):
         outputs = []
         def adapter(route, prompt, task, context):
             remaining = 12000 - 3000 * len(outputs)
@@ -72,7 +115,7 @@ class OutputStepsTests(unittest.TestCase):
         self.assertEqual(len(outputs), 2)
         self.assertLess(outputs[1], outputs[0])
 
-    def test_page_loop_keeps_original_hard_deadline(self):
+    def _case_page_loop_keeps_original_hard_deadline(self):
         deadlines = []
         def adapter(route, prompt, task, context):
             deadlines.append(context.deadline)
@@ -82,7 +125,7 @@ class OutputStepsTests(unittest.TestCase):
         self.assertEqual(result["state"], "succeeded")
         self.assertEqual(deadlines[0], deadlines[1])
 
-    def test_complete_pages_share_attempts_budget_and_keep_checkpoint_provenance(self):
+    def _case_complete_pages_share_attempts_budget_and_keep_checkpoint_provenance(self):
         calls = []
         r = fixtures.route()
         r.output_limit = 1500
@@ -103,7 +146,7 @@ class OutputStepsTests(unittest.TestCase):
         files = list((service.state_dir / "workspaces" / result["job_id"]).glob("*-output-step-*.json"))
         self.assertEqual(len(files), 2)
 
-    def test_exhausted_steps_preserve_partial_without_false_completion(self):
+    def _case_exhausted_steps_preserve_partial_without_false_completion(self):
         calls = []
         def adapter(*args):
             calls.append(1)
@@ -117,7 +160,7 @@ class OutputStepsTests(unittest.TestCase):
         self.assertEqual(report["error"]["code"], "output_step_limit_reached")
         self.assertEqual(len(report["content"]["findings"]), 2)
 
-    def test_unknown_paid_second_page_never_replays_or_loses_first(self):
+    def _case_unknown_paid_second_page_never_replays_or_loses_first(self):
         calls = []
         def adapter(*args):
             calls.append(1)
@@ -132,7 +175,7 @@ class OutputStepsTests(unittest.TestCase):
         self.assertFalse(result["results"][0]["content"]["complete"])
         self.assertEqual(len(result["results"][0]["content"]["findings"]), 1)
 
-    def test_cancel_between_pages_never_starts_another_call(self):
+    def _case_cancel_between_pages_never_starts_another_call(self):
         calls = []
         service = None
         def adapter(r, prompt, task, context):
@@ -144,7 +187,7 @@ class OutputStepsTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(result["state"], "cancelled")
 
-    def test_unexpected_or_invalid_metadata_cannot_claim_success(self):
+    def _case_unexpected_or_invalid_metadata_cannot_claim_success(self):
         for field in (None, {"index": True, "final": True, "next": ""}, {"index": 2, "final": True, "next": ""}):
             def adapter(*args):
                 raw = self.page(1, True)
@@ -161,7 +204,7 @@ class OutputStepsTests(unittest.TestCase):
         result = self.wait(service, service.submit(self.task(max_output_steps=1))["job_id"])
         self.assertEqual(result["state"], "failed")
 
-    def test_duplicate_pages_and_conflicting_decisions_are_rejected(self):
+    def _case_duplicate_pages_and_conflicting_decisions_are_rejected(self):
         for conflict in (False, True):
             pages = ReportSteps(4, 12000)
             first = {"content": json.loads(self.page(1)["text"])}
@@ -177,7 +220,7 @@ class OutputStepsTests(unittest.TestCase):
                 pages.accept(second)
             self.assertFalse(pages.content["complete"])
 
-    def test_report_capacity_and_shared_attempt_ceiling_are_hard(self):
+    def _case_report_capacity_and_shared_attempt_ceiling_are_hard(self):
         pages = ReportSteps(2, 1000)
         raw = {"content": json.loads(self.page(1, True, "x" * 1100)["text"])}
         with self.assertRaises(WorkerFailure):
@@ -191,7 +234,7 @@ class OutputStepsTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertFalse(result["results"][0]["content"]["complete"])
 
-    def test_output_steps_validate_and_operator_assignments_stay_explicit(self):
+    def _case_output_steps_validate_and_operator_assignments_stay_explicit(self):
         for steps in (0, 17, True, 1.5):
             with self.assertRaises(ValueError):
                 Task.parse(self.task(max_output_steps=steps))
@@ -202,7 +245,7 @@ class OutputStepsTests(unittest.TestCase):
                 graph({"id": "test", "name": "test", "nodes": [{"id": "a", "title": "a", "route_id": "route",
                        "node_type": kind, "effort": "max", "task": {"kind": "extract", "prompt": "test", "max_output_steps": 2}}]})
 
-    def test_old_daemon_rejects_steps_before_submission(self):
+    def _case_old_daemon_rejects_steps_before_submission(self):
         from gtt_router.daemon import LocalClient
         client = object.__new__(LocalClient)
         with patch.object(client, "runtime_info", return_value={"features": ["dispatch_v1"], "runtime_contract_version": 2}), \

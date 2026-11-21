@@ -47,7 +47,78 @@ class CoordinationTests(unittest.TestCase):
                   "summary": "bounded source excerpt", "event_id": "caller-message"}
         return dispatch(service, "router_message", values | changes)
 
-    def test_scoped_messages_have_provenance_are_deduplicated_and_injected_once(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_message_provenance_scoping_and_ttl(self):
+        self._run_cases(
+            self._case_scoped_messages_have_provenance_are_deduplicated_and_injected_once,
+            self._case_cross_workflow_secrets_size_and_role_impersonation_are_rejected,
+            self._case_only_related_role_receives_messages_and_ttl_is_finite,
+        )
+
+    def test_message_clipping_cursor_progress_and_backlog(self):
+        self._run_cases(
+            self._case_message_summary_clipping_is_explicit_and_original_is_preserved,
+            self._case_valid_large_message_cannot_permanently_pin_recipient_cursor,
+            self._case_role_inbox_is_not_delayed_by_unrelated_progress_event_backlog,
+        )
+
+    def test_event_paging_sampling_and_cursor_safety(self):
+        self._run_cases(
+            self._case_event_cursor_pages_and_status_sampling_never_export_payloads,
+            self._case_oversized_event_cannot_pin_monitor_cursor,
+            self._case_progress_sampling_preserves_immediate_attempt_failure,
+        )
+
+    def test_supervisor_reminders_advisory_and_saturation(self):
+        self._run_cases(
+            self._case_supervisor_protects_live_thinking_and_only_reminds_with_deadline_risk,
+            self._case_monitor_proposal_is_advisory_and_saturation_gap_is_visible,
+        )
+
+    def test_activity_age_freezing_and_native_capture(self):
+        self._run_cases(
+            self._case_silent_supervisor_age_is_derived_without_events_usage_or_renewal,
+            self._case_finished_worker_freezes_while_other_group_work_continues,
+            self._case_native_step_service_update_preserves_activity_capture,
+        )
+
+    def test_leader_communications_and_information_responses(self):
+        self._run_cases(
+            self._case_native_leader_communication_and_merge_are_proposals_not_approval,
+            self._case_leader_assignment_and_member_conflict_reach_actual_next_call_context,
+            self._case_information_response_waits_for_full_coverage_and_is_idempotent,
+        )
+
+    def test_merge_state_validation_and_transactions(self):
+        self._run_cases(
+            self._case_merge_rejects_running_reserved_stale_cross_scope_and_expired_groups,
+            self._case_merge_transaction_rolls_back_and_stale_parallel_approval_only_commits_once,
+            self._case_persisted_reservation_rejects_merge_and_expired_events_do_not_block_it,
+        )
+
+    def test_merge_accumulation_readonly_sources_and_batching(self):
+        self._run_cases(
+            self._case_merge_accumulates_more_than_eight_seats_and_consumption_without_new_billing,
+            self._case_merged_sources_are_permanently_read_only_and_restart_keeps_one_bill,
+            self._case_merged_research_batches_roles_with_existing_capacity,
+        )
+
+    def test_merge_budget_overrides_and_deadlines(self):
+        self._run_cases(
+            self._case_three_default_budget_groups_merge_with_explicit_override_and_survive_restart,
+            self._case_budget_override_cannot_reduce_consumed_tokens_or_increase_source_allowance,
+            self._case_merge_and_ordinary_resume_expose_one_actual_deadline_everywhere,
+        )
+
+    def _case_scoped_messages_have_provenance_are_deduplicated_and_injected_once(self):
         service = self.service()
         source, target = self.seed(service), self.seed(service)
         sent = self.message(service, target, evidence_refs=[{"group_id": source.id, "worker": 0, "anchor": "source.kt:20"}])
@@ -63,7 +134,7 @@ class CoordinationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.message(service, target, summary="different content with same ID")
 
-    def test_cross_workflow_secrets_size_and_role_impersonation_are_rejected(self):
+    def _case_cross_workflow_secrets_size_and_role_impersonation_are_rejected(self):
         service = self.service()
         target, foreign = self.seed(service), self.seed(service, workflow="other")
         for values in [{"workflow_id": "other"}, {"summary": "x" * 1201}, {"summary": "Bearer " + "a" * 32},
@@ -75,7 +146,7 @@ class CoordinationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.coordination.message("coord", "leader", "progress", "advice", target.id, from_role="leader")
 
-    def test_only_related_role_receives_messages_and_ttl_is_finite(self):
+    def _case_only_related_role_receives_messages_and_ttl_is_finite(self):
         service = self.service()
         job = self.seed(service)
         self.message(service, job, to_role="member-1", ttl_s=60)
@@ -84,7 +155,7 @@ class CoordinationTests(unittest.TestCase):
         with patch("gtt_router.store.now_ms", return_value=now_ms() + 61000):
             self.assertEqual([e for e in service.store.events("coord") if e["type"] == "message"], [])
 
-    def test_event_cursor_pages_and_status_sampling_never_export_payloads(self):
+    def _case_event_cursor_pages_and_status_sampling_never_export_payloads(self):
         service = self.service()
         job = self.seed(service)
         job.progress = {"0": {"phase": "model_activity", "private": "sensitive prompt", "activity": {"activity_count": 2,
@@ -104,7 +175,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertNotIn("sensitive prompt", json.dumps(status))
         self.assertEqual(status["groups"][0]["progress"]["0"]["activity"]["reasoning_chars"], 20)
 
-    def test_supervisor_protects_live_thinking_and_only_reminds_with_deadline_risk(self):
+    def _case_supervisor_protects_live_thinking_and_only_reminds_with_deadline_risk(self):
         service = self.service()
         current = now_ms()
         base = {"action": "status", "workflow_id": "coord", "actor_state": {"phase": "thinking",
@@ -121,7 +192,7 @@ class CoordinationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dispatch(service, "router_supervisor", {"action": "status", "workflow_id": "coord", "group_ids": [{}]})
 
-    def test_monitor_proposal_is_advisory_and_saturation_gap_is_visible(self):
+    def _case_monitor_proposal_is_advisory_and_saturation_gap_is_visible(self):
         service = self.service()
         job = self.seed(service)
         before = job.task.token_budget
@@ -141,7 +212,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertTrue(status["events_incomplete"])
         self.assertEqual(status["dropped_state_events"], 1)
 
-    def test_merge_accumulates_more_than_eight_seats_and_consumption_without_new_billing(self):
+    def _case_merge_accumulates_more_than_eight_seats_and_consumption_without_new_billing(self):
         service = self.service()
         one, two = self.seed(service, seats=5), self.seed(service, seats=5, used=140, estimated=40)
         count = service.store.conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0]
@@ -155,7 +226,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(service.groups.status(one.id)["state"], "merged")
         self.assertEqual(len(service.groups._source_evidence(service.groups.jobs[merged["group_id"]])), 2)
 
-    def test_merge_rejects_running_reserved_stale_cross_scope_and_expired_groups(self):
+    def _case_merge_rejects_running_reserved_stale_cross_scope_and_expired_groups(self):
         for change in ["running", "reserved", "revision", "workflow", "expired", "active", "budget"]:
             with self.subTest(change=change):
                 service = self.service()
@@ -180,7 +251,7 @@ class CoordinationTests(unittest.TestCase):
                     service.groups.merge([one.id, two.id], True, "synthesis", expected)
                 self.assertNotEqual(service.groups.status(one.id)["state"], "merged")
 
-    def test_merge_transaction_rolls_back_and_stale_parallel_approval_only_commits_once(self):
+    def _case_merge_transaction_rolls_back_and_stale_parallel_approval_only_commits_once(self):
         service = self.service()
         one, two = self.seed(service), self.seed(service)
         prior = service.store.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
@@ -198,7 +269,7 @@ class CoordinationTests(unittest.TestCase):
             outcomes = list(pool.map(lambda _: attempt(), range(2)))
         self.assertEqual(sum(bool(o) for o in outcomes), 1)
 
-    def test_merged_sources_are_permanently_read_only_and_restart_keeps_one_bill(self):
+    def _case_merged_sources_are_permanently_read_only_and_restart_keeps_one_bill(self):
         directory = self.root / "merged-restart"
         service = self.service(directory=directory)
         one, two = self.seed(service), self.seed(service)
@@ -223,7 +294,7 @@ class CoordinationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             restored.groups.resume(merged["group_id"], "new window", deadline_s=100)
 
-    def test_merged_research_batches_roles_with_existing_capacity(self):
+    def _case_merged_research_batches_roles_with_existing_capacity(self):
         gate, entered = threading.Event(), threading.Event()
         count, maximum = [0], [0]
         mutex = threading.Lock()
@@ -249,7 +320,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertLessEqual(maximum[0], 2)
         self.assertEqual(service.total_inflight, 0)
 
-    def test_native_leader_communication_and_merge_are_proposals_not_approval(self):
+    def _case_native_leader_communication_and_merge_are_proposals_not_approval(self):
         decision = parse_leader_decision({"action": "propose_merge", "merge_groups": ["a", "b"],
             "communications": [{"to_role": "supervisor", "kind": "progress", "summary": "related evidence"}]})
         self.assertEqual(decision["action"], "propose_merge")
@@ -260,7 +331,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertTrue({"router_events", "router_message", "router_supervisor", "router_group_merge"} <= {t["name"] for t in TOOLS})
         self.assertIn("timeout_mode", TASK_SCHEMA["properties"])
 
-    def test_leader_assignment_and_member_conflict_reach_actual_next_call_context(self):
+    def _case_leader_assignment_and_member_conflict_reach_actual_next_call_context(self):
         observed = []
         def adapter(route, prompt, task, context):
             payload = json.loads(task.context)
@@ -283,7 +354,7 @@ class CoordinationTests(unittest.TestCase):
         messages = [e for e in service.store.events("coord") if e["type"] == "message"]
         self.assertTrue(all(e["origin"].get("worker") is not None for e in messages))
 
-    def test_persisted_reservation_rejects_merge_and_expired_events_do_not_block_it(self):
+    def _case_persisted_reservation_rejects_merge_and_expired_events_do_not_block_it(self):
         service = self.service()
         one, two = self.seed(service), self.seed(service)
         stored = service.store.job(two.id)
@@ -298,7 +369,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(merged["member_count"], 6)
         self.assertTrue(all(e["expires_at"] > now_ms() for e in service.store.events("coord")))
 
-    def test_message_summary_clipping_is_explicit_and_original_is_preserved(self):
+    def _case_message_summary_clipping_is_explicit_and_original_is_preserved(self):
         service = self.service()
         target = self.seed(service)
         service.coordination.message("coord", "leader", "evidence", "x" * 1100, to_group=target.id, event_id="long-summary")
@@ -313,7 +384,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(len(original["summary"]), 1100)
         self.assertEqual(service.coordination.context_for(target, "leader", 0), [])
 
-    def test_valid_large_message_cannot_permanently_pin_recipient_cursor(self):
+    def _case_valid_large_message_cannot_permanently_pin_recipient_cursor(self):
         service = self.service()
         source, target = self.seed(service), self.seed(service)
         source.results[0]["content"]["uncertainties"] = ["u" * 1000] * 4
@@ -327,7 +398,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertTrue(any(m["event_id"] == "later-valid" for m in first + rest))
         self.assertLessEqual(len(json.dumps(first, ensure_ascii=False)), 4100)
 
-    def test_role_inbox_is_not_delayed_by_unrelated_progress_event_backlog(self):
+    def _case_role_inbox_is_not_delayed_by_unrelated_progress_event_backlog(self):
         service = self.service()
         job = self.seed(service)
         for index in range(100):
@@ -336,7 +407,7 @@ class CoordinationTests(unittest.TestCase):
         messages = service.coordination.context_for(job, "leader", 0)
         self.assertEqual([m["event_id"] for m in messages], ["fresh-after-backlog"])
 
-    def test_silent_supervisor_age_is_derived_without_events_usage_or_renewal(self):
+    def _case_silent_supervisor_age_is_derived_without_events_usage_or_renewal(self):
         service = self.service()
         job = self.seed(service)
         captured = now_ms()
@@ -370,7 +441,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertTrue(frozen["frozen"])
         self.assertLess(frozen["elapsed_s"], 11)
 
-    def test_finished_worker_freezes_while_other_group_work_continues(self):
+    def _case_finished_worker_freezes_while_other_group_work_continues(self):
         service = self.service()
         job = self.seed(service)
         job.state = "running"
@@ -392,7 +463,7 @@ class CoordinationTests(unittest.TestCase):
         malformed = service.coordination.public_progress({"0": {"activity": "invalid"}}, attempts=job.attempts)
         self.assertEqual(malformed["0"]["activity"], {})
 
-    def test_information_response_waits_for_full_coverage_and_is_idempotent(self):
+    def _case_information_response_waits_for_full_coverage_and_is_idempotent(self):
         service = self.service()
         job = self.seed(service)
         job.request.context = "x" * 300
@@ -410,7 +481,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(len([e for e in service.store.events("coord") if e["type"] == "information_response"]), 1)
         self.assertEqual(service.groups.status(job.id)["information_status"]["resolved_request_ids"], ["0:0"])
 
-    def test_oversized_event_cannot_pin_monitor_cursor(self):
+    def _case_oversized_event_cannot_pin_monitor_cursor(self):
         service = self.service()
         service.store.append_event("coord", "oversized-state", {"type": "job_state", "progress": {"0": {"payload": "x" * 20000}}})
         service.store.append_event("coord", "after-large-state", {"type": "job_state", "state": "succeeded"})
@@ -419,7 +490,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(first["events"][1]["state"], "succeeded")
         self.assertEqual(service.coordination.events("coord", cursor=first["next_cursor"])["events"], [])
 
-    def test_progress_sampling_preserves_immediate_attempt_failure(self):
+    def _case_progress_sampling_preserves_immediate_attempt_failure(self):
         service = self.service()
         job = self.seed(service)
         job.state = "running"
@@ -436,7 +507,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(latest["attempt_states"][0]["error_code"], "incomplete_output")
         self.assertGreater(len(service.store.events("coord")), before)
 
-    def test_native_step_service_update_preserves_activity_capture(self):
+    def _case_native_step_service_update_preserves_activity_capture(self):
         def adapter(route, prompt, task, context):
             context.progress({"phase": "model_activity", "activity": {"activity_count": 2, "elapsed_s": .1,
                 "idle_s": 0, "hard_remaining_s": 100, "soft_remaining_s": 10, "expires_in_s": 10}})
@@ -460,7 +531,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(view["activity"]["elapsed_s"], later["elapsed_s"])
         self.assertEqual(view["activity"]["hard_remaining_s"], later["hard_remaining_s"])
 
-    def test_three_default_budget_groups_merge_with_explicit_override_and_survive_restart(self):
+    def _case_three_default_budget_groups_merge_with_explicit_override_and_survive_restart(self):
         directory = self.root / "budget-override-restart"
         service = self.service(directory=directory)
         groups = [self.seed(service, budget=50000000) for _ in range(3)]
@@ -483,7 +554,7 @@ class CoordinationTests(unittest.TestCase):
         self.assertEqual(len(status["merged_sources"]), 3)
         self.assertEqual(restored.store.conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0], before)
 
-    def test_budget_override_cannot_reduce_consumed_tokens_or_increase_source_allowance(self):
+    def _case_budget_override_cannot_reduce_consumed_tokens_or_increase_source_allowance(self):
         service = self.service()
         one, two = self.seed(service, budget=1000000, used=600), self.seed(service, budget=1000000, used=600)
         params = {"group_ids": [one.id, two.id], "approved": True, "reason": "explicit constrained merge ceiling",
@@ -496,7 +567,7 @@ class CoordinationTests(unittest.TestCase):
         merged = dispatch(service, "router_group_merge", params | {"token_budget": 1200})
         self.assertEqual((merged["budget_total"], merged["tokens_used"]), (1200, 1200))
 
-    def test_merge_and_ordinary_resume_expose_one_actual_deadline_everywhere(self):
+    def _case_merge_and_ordinary_resume_expose_one_actual_deadline_everywhere(self):
         service = self.service()
         one, two = self.seed(service), self.seed(service)
         one.deadline_at = now_ms() + 120123

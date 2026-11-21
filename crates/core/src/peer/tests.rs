@@ -262,7 +262,6 @@ fn fold(
     (span, apps, models)
 }
 
-#[test]
 fn rebucketed_summary_equals_cube_overview() {
     let f = fixture();
     fill(&f.store);
@@ -342,7 +341,6 @@ fn rebucketed_summary_equals_cube_overview() {
     );
 }
 
-#[test]
 fn rebucketing_for_other_offsets_matches_sql_local_days() {
     let f = fixture();
     fill(&f.store);
@@ -399,7 +397,6 @@ fn rebucketing_for_other_offsets_matches_sql_local_days() {
     assert_eq!(day.local_day(g, 0), Some(20_000));
 }
 
-#[test]
 fn fingerprints_track_updates_deletes_and_drive_incremental_pulls() {
     let f = fixture();
     let day = |d: i64, h: i64| 20_000 * DAY_MS + d * DAY_MS + h * HOUR_MS;
@@ -489,7 +486,6 @@ fn fingerprints_track_updates_deletes_and_drive_incremental_pulls() {
     assert_eq!(s.removed, Vec::<String>::new());
 }
 
-#[test]
 fn summary_query_round_trips_and_rejects_garbage() {
     let q = SummaryQuery {
         from: Some("2025-01-02".into()),
@@ -518,7 +514,6 @@ fn summary_query_round_trips_and_rejects_garbage() {
     }
 }
 
-#[test]
 fn output_never_carries_projects_sessions_or_raw_refs() {
     let f = fixture();
     fill(&f.store);
@@ -587,7 +582,6 @@ fn output_never_carries_projects_sessions_or_raw_refs() {
     );
 }
 
-#[test]
 fn identity_is_created_once_on_the_write_path() {
     let f = fixture();
     let again = ensure_identity(&f.store, None).unwrap();
@@ -602,7 +596,6 @@ fn identity_is_created_once_on_the_write_path() {
     assert_ne!(new_device_id(), new_device_id());
 }
 
-#[test]
 fn unknown_versions_and_missing_ledgers_fail_with_fixed_codes() {
     let f = fixture();
     let v = respond(&f.path, &f.identity, 2, &Request::Hello);
@@ -653,7 +646,6 @@ fn code_of(v: &Value) -> Option<&str> {
     v["error"]["code"].as_str()
 }
 
-#[test]
 fn server_serves_get_and_rejects_everything_else() {
     let f = fixture();
     fill(&f.store);
@@ -759,7 +751,6 @@ fn server_serves_get_and_rejects_everything_else() {
     assert!(r.starts_with("HTTP/1.1 431 "), "{r}");
 }
 
-#[test]
 fn plaintext_is_refused_off_loopback() {
     assert!(server::bind("0.0.0.0:0", false).is_err());
     assert!(server::bind("127.0.0.1:0", false).is_ok());
@@ -777,7 +768,6 @@ fn plaintext_is_refused_off_loopback() {
     );
 }
 
-#[test]
 fn device_key_is_stable_and_owner_only() {
     let f = fixture();
     let dir = peer_dir(&f.path);
@@ -797,7 +787,6 @@ fn device_key_is_stable_and_owner_only() {
     }
 }
 
-#[test]
 fn pairing_happy_path_pins_and_authorizes() {
     let server_f = fixture();
     fill(&server_f.store);
@@ -895,7 +884,6 @@ fn pairing_happy_path_pins_and_authorizes() {
     );
 }
 
-#[test]
 fn unknown_unresolvable_target_is_not_paired() {
     // A name that is no paired device answers "not paired" whether or not
     // the network's resolver claims it (some resolve every name, CI's
@@ -918,7 +906,6 @@ fn unknown_unresolvable_target_is_not_paired() {
     }
 }
 
-#[test]
 fn mutual_pairing_lets_both_sides_pull() {
     let server_f = fixture();
     let viewer = fixture();
@@ -981,7 +968,6 @@ fn mutual_pairing_lets_both_sides_pull() {
     assert_eq!(status, 200);
 }
 
-#[test]
 fn one_way_pairing_leaves_the_server_unpaired() {
     let server_f = fixture();
     let viewer = fixture();
@@ -1002,7 +988,6 @@ fn one_way_pairing_leaves_the_server_unpaired() {
     );
 }
 
-#[test]
 fn lan_addresses_skip_tunnels_and_rank_home_ranges_first() {
     use std::net::Ipv4Addr;
     let ips = [
@@ -1023,7 +1008,6 @@ fn lan_addresses_skip_tunnels_and_rank_home_ranges_first() {
     );
 }
 
-#[test]
 fn sweep_hosts_cover_private_slash_24_only() {
     use std::net::Ipv4Addr;
     let own = [Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(8, 8, 8, 8)];
@@ -1037,7 +1021,6 @@ fn sweep_hosts_cover_private_slash_24_only() {
     );
 }
 
-#[test]
 fn sweep_finds_a_sharing_device_by_hello() {
     let server_f = fixture();
     let (addr, _state) = start(&server_f, true);
@@ -1048,7 +1031,6 @@ fn sweep_finds_a_sharing_device_by_hello() {
     assert_eq!(txt.name, "test-mac");
 }
 
-#[test]
 fn revoked_tokens_fail_immediately() {
     let server_f = fixture();
     let viewer = fixture();
@@ -1084,7 +1066,6 @@ fn revoked_tokens_fail_immediately() {
     );
 }
 
-#[test]
 fn wrong_code_fails_backs_off_and_is_never_retried() {
     let server_f = fixture();
     let viewer = fixture();
@@ -1127,7 +1108,6 @@ fn wrong_code_fails_backs_off_and_is_never_retried() {
     );
 }
 
-#[test]
 fn codes_expire_are_single_use_and_burn_after_five_failures() {
     let t0 = Instant::now();
     let mut p = pairing::Pairing::default();
@@ -1213,7 +1193,6 @@ fn relay(attacker: &DeviceKey, real: std::net::SocketAddr) -> std::net::SocketAd
     addr
 }
 
-#[test]
 fn an_interceptor_certificate_can_neither_pair_nor_pull() {
     let server_f = fixture();
     let viewer = fixture();
@@ -1273,7 +1252,6 @@ fn an_interceptor_certificate_can_neither_pair_nor_pull() {
     }
 }
 
-#[test]
 fn allowed_hosts_are_ip_literals_or_localhost() {
     use super::server::allowed_host;
     for ok in [
@@ -1319,7 +1297,6 @@ fn decode(pairs: &[(&str, &str)]) -> Result<Txt, &'static str> {
     Txt::decode(|k| map.get(k).cloned())
 }
 
-#[test]
 fn txt_round_trips_and_rejects_untrusted_values() {
     let t = txt('a', "书房 Mac", 'b');
     let encoded = t.encode();
@@ -1388,7 +1365,6 @@ fn peer_row(id: char, fp: &str) -> super::devices::PeerDevice {
     }
 }
 
-#[test]
 fn browse_answers_merge_across_interfaces_and_flag_mismatches() {
     let a = txt('a', "Studio", 'b');
     let sightings = vec![
@@ -1449,7 +1425,6 @@ fn browse_answers_merge_across_interfaces_and_flag_mismatches() {
     assert_ne!(found[1].fingerprint_prefix, found[2].fingerprint_prefix);
 }
 
-#[test]
 fn addresses_parse_with_default_ports_ipv6_and_scopes() {
     let r = |s: &str| client::resolve(s);
     assert_eq!(r("127.0.0.1"), Ok(sock("127.0.0.1:4319")));
@@ -1477,7 +1452,6 @@ fn addresses_parse_with_default_ports_ipv6_and_scopes() {
     }
 }
 
-#[test]
 fn paired_devices_are_refound_by_device_id_before_the_saved_address() {
     let server_f = fixture();
     let viewer = fixture();
@@ -1619,7 +1593,6 @@ fn pair_only(viewer: &Fixture) -> (Fixture, std::net::SocketAddr) {
     (server_f, addr)
 }
 
-#[test]
 fn many_devices_sync_together_and_offline_ones_fail_fast() {
     let viewer = fixture();
     let (a, _) = pair_only(&viewer);
@@ -1667,7 +1640,6 @@ fn many_devices_sync_together_and_offline_ones_fail_fast() {
     );
 }
 
-#[test]
 fn moved_devices_are_found_in_one_lookup_and_saved() {
     let viewer = fixture();
     let (a, a_addr) = pair_only(&viewer);
@@ -1697,7 +1669,6 @@ fn moved_devices_are_found_in_one_lookup_and_saved() {
     assert_eq!(saved[0].last_address, a_addr.to_string());
 }
 
-#[test]
 fn sharing_issues_a_fresh_code_after_each_pairing() {
     let server_f = fixture();
     let (addr, state) = start(&server_f, true);
@@ -1765,7 +1736,6 @@ fn count(store: &Store, table: &str, device: &str) -> i64 {
         .unwrap()
 }
 
-#[test]
 fn schema_v2_migrates_existing_ledgers_and_legacy_viewer_rows() {
     let f = fixture();
     fill_viewer(&f.store);
@@ -1824,7 +1794,6 @@ fn schema_v2_migrates_existing_ledgers_and_legacy_viewer_rows() {
     );
 }
 
-#[test]
 fn sync_is_incremental_idempotent_and_replaces_or_removes_days() {
     let server_f = fixture();
     fill(&server_f.store);
@@ -1916,7 +1885,6 @@ fn sync_is_incremental_idempotent_and_replaces_or_removes_days() {
     assert_eq!(viewer_days, server_days.fingerprints);
 }
 
-#[test]
 fn peer_data_is_rebucketed_into_the_viewers_frame() {
     let server_f = fixture();
     fill(&server_f.store);
@@ -1988,7 +1956,6 @@ fn sum_totals(a: &Totals, b: &Totals) -> Totals {
     t
 }
 
-#[test]
 fn device_filter_reaches_every_overview_part() {
     let server_f = fixture();
     fill(&server_f.store);
@@ -2135,7 +2102,6 @@ fn device_filter_reaches_every_overview_part() {
     assert_totals(&vm.devices[1].span, &peer_sql, "fallback device span");
 }
 
-#[test]
 fn without_peers_the_device_dimension_changes_nothing() {
     let f = fixture();
     fill(&f.store);
@@ -2153,7 +2119,6 @@ fn without_peers_the_device_dimension_changes_nothing() {
     assert_eq!(cube.device_ids(), local);
 }
 
-#[test]
 fn forgetting_a_device_removes_all_of_its_rows_and_its_token() {
     let server_f = fixture();
     fill(&server_f.store);
@@ -2186,7 +2151,6 @@ fn forgetting_a_device_removes_all_of_its_rows_and_its_token() {
     assert_eq!(cube.device_ids().len(), 1);
 }
 
-#[test]
 fn quotas_merge_to_the_freshest_report_per_account_never_summed() {
     let server_f = fixture();
     let viewer = fixture();
@@ -2236,7 +2200,6 @@ fn quotas_merge_to_the_freshest_report_per_account_never_summed() {
     assert!(block.local && block.used_percent == Some(50.0));
 }
 
-#[test]
 fn overlapping_sources_are_flagged_not_deduplicated() {
     let server_f = fixture();
     fill(&server_f.store);
@@ -2279,7 +2242,6 @@ fn overlapping_sources_are_flagged_not_deduplicated() {
     );
 }
 
-#[test]
 fn peer_data_is_never_reshared() {
     let server_f = fixture();
     fill(&server_f.store);
@@ -2319,7 +2281,6 @@ fn peer_data_is_never_reshared() {
     );
 }
 
-#[test]
 fn one_failing_device_does_not_block_the_others() {
     let a = fixture();
     fill(&a.store);
@@ -2420,4 +2381,103 @@ fn an_in_process_share_pairs_serves_revokes_and_stops() {
             .is_err(),
         "the port is closed after stop"
     );
+}
+
+#[test]
+fn summary_rebucketing_matches_cube_and_sql() {
+    rebucketed_summary_equals_cube_overview();
+    rebucketing_for_other_offsets_matches_sql_local_days();
+}
+
+#[test]
+fn fingerprints_query_parsing_and_redaction() {
+    fingerprints_track_updates_deletes_and_drive_incremental_pulls();
+    summary_query_round_trips_and_rejects_garbage();
+    output_never_carries_projects_sessions_or_raw_refs();
+}
+
+#[test]
+fn identity_protocol_errors_and_device_keys() {
+    identity_is_created_once_on_the_write_path();
+    unknown_versions_and_missing_ledgers_fail_with_fixed_codes();
+    device_key_is_stable_and_owner_only();
+}
+
+#[test]
+fn server_http_guardrails_and_host_allowlist() {
+    server_serves_get_and_rejects_everything_else();
+    plaintext_is_refused_off_loopback();
+    allowed_hosts_are_ip_literals_or_localhost();
+}
+
+#[test]
+fn pairing_happy_path_and_unknown_targets() {
+    pairing_happy_path_pins_and_authorizes();
+    unknown_unresolvable_target_is_not_paired();
+}
+
+#[test]
+fn mutual_and_one_way_pairing() {
+    mutual_pairing_lets_both_sides_pull();
+    one_way_pairing_leaves_the_server_unpaired();
+}
+
+#[test]
+fn pairing_codes_backoff_and_revocation() {
+    revoked_tokens_fail_immediately();
+    wrong_code_fails_backs_off_and_is_never_retried();
+    codes_expire_are_single_use_and_burn_after_five_failures();
+}
+
+#[test]
+fn pairing_mitm_and_code_renewal() {
+    an_interceptor_certificate_can_neither_pair_nor_pull();
+    sharing_issues_a_fresh_code_after_each_pairing();
+}
+
+#[test]
+fn lan_ranking_and_subnet_sweep() {
+    lan_addresses_skip_tunnels_and_rank_home_ranges_first();
+    sweep_hosts_cover_private_slash_24_only();
+    sweep_finds_a_sharing_device_by_hello();
+}
+
+#[test]
+fn discovery_txt_merge_and_address_parsing() {
+    txt_round_trips_and_rejects_untrusted_values();
+    browse_answers_merge_across_interfaces_and_flag_mismatches();
+    addresses_parse_with_default_ports_ipv6_and_scopes();
+}
+
+#[test]
+fn device_rediscovery_on_address_change() {
+    paired_devices_are_refound_by_device_id_before_the_saved_address();
+    moved_devices_are_found_in_one_lookup_and_saved();
+}
+
+#[test]
+fn multi_device_sync_resilience_and_schema_migration() {
+    many_devices_sync_together_and_offline_ones_fail_fast();
+    one_failing_device_does_not_block_the_others();
+    schema_v2_migrates_existing_ledgers_and_legacy_viewer_rows();
+}
+
+#[test]
+fn incremental_sync_and_viewer_frame_rebucketing() {
+    sync_is_incremental_idempotent_and_replaces_or_removes_days();
+    peer_data_is_rebucketed_into_the_viewers_frame();
+}
+
+#[test]
+fn device_dimension_and_forgetting_peers() {
+    device_filter_reaches_every_overview_part();
+    without_peers_the_device_dimension_changes_nothing();
+    forgetting_a_device_removes_all_of_its_rows_and_its_token();
+}
+
+#[test]
+fn merged_quotas_overlap_flags_and_no_resharing() {
+    quotas_merge_to_the_freshest_report_per_account_never_summed();
+    overlapping_sources_are_flagged_not_deduplicated();
+    peer_data_is_never_reshared();
 }

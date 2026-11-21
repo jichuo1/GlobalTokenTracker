@@ -40,7 +40,6 @@ fn engine() -> Engine {
     Engine::new(Store::open_memory().unwrap()).unwrap()
 }
 
-#[test]
 fn late_snapshot_rewrites_same_message_and_replay_is_idempotent() {
     let f = Fixture::new();
     let e = engine();
@@ -78,7 +77,6 @@ fn late_snapshot_rewrites_same_message_and_replay_is_idempotent() {
     assert_eq!(f.scan(&e).events_ingested, 0);
 }
 
-#[test]
 fn different_requests_are_independent_when_counters_fall() {
     let f = Fixture::new();
     let e = engine();
@@ -97,7 +95,6 @@ fn different_requests_are_independent_when_counters_fall() {
     );
 }
 
-#[test]
 fn latest_snapshot_of_one_request_wins_and_response_id_does_not_change_identity() {
     let f = Fixture::new();
     let e = engine();
@@ -115,7 +112,6 @@ fn latest_snapshot_of_one_request_wins_and_response_id_does_not_change_identity(
     assert_eq!((t.events, t.input_tokens, t.output_tokens), (1, 600, 150));
 }
 
-#[test]
 fn torn_json_and_incomplete_snapshot_remain_retryable() {
     let f = Fixture::new();
     let e = engine();
@@ -128,7 +124,6 @@ fn torn_json_and_incomplete_snapshot_remain_retryable() {
     assert_eq!(f.scan(&e).events_ingested, 1);
 }
 
-#[test]
 fn manual_refresh_detects_equal_size_equal_timestamp_rewrite() {
     let f = Fixture::new();
     let e = engine();
@@ -153,7 +148,6 @@ fn manual_refresh_detects_equal_size_equal_timestamp_rewrite() {
     );
 }
 
-#[test]
 fn legacy_seen_cursor_is_recovered_without_touching_other_apps_or_orphans() {
     let f = Fixture::new();
     let e = engine();
@@ -198,7 +192,6 @@ fn legacy_seen_cursor_is_recovered_without_touching_other_apps_or_orphans() {
     assert_eq!(f.scan(&e).events_ingested, 0);
 }
 
-#[test]
 fn failed_ingest_rolls_back_legacy_deletion_and_cursor_then_retries() {
     let f = Fixture::new();
     let e = engine();
@@ -231,7 +224,6 @@ fn failed_ingest_rolls_back_legacy_deletion_and_cursor_then_retries() {
     );
 }
 
-#[test]
 fn authoritative_correction_can_lower_completeness_without_affecting_foreign_row() {
     let f = Fixture::new();
     let e = engine();
@@ -255,7 +247,6 @@ fn authoritative_correction_can_lower_completeness_without_affecting_foreign_row
     assert_eq!(e.store.totals(None, None, None, None).unwrap().events, 1);
 }
 
-#[test]
 fn rebuilding_codebuddy_rollups_preserves_archived_other_source_totals() {
     let f = Fixture::new();
     let e = engine();
@@ -314,7 +305,6 @@ impl SourceAdapter for OnlyConversation<'_> {
     }
 }
 
-#[test]
 fn failed_source_rollup_retries_even_after_cursor_and_events_commit() {
     let f = Fixture::new();
     let e = engine();
@@ -399,7 +389,6 @@ fn file_backed_migration_creates_verified_backup_before_replacement() {
     );
 }
 
-#[test]
 fn empty_messages_dir_persists_fast_path_cursor_and_stays_idle() {
     let f = Fixture::new();
     let e = engine();
@@ -411,4 +400,31 @@ fn empty_messages_dir_persists_fast_path_cursor_and_stays_idle() {
     // Adding a message later invalidates the empty fingerprint immediately.
     f.msg("01", "req-after-empty", 500, 100, 200);
     assert_eq!(f.scan(&e).events_ingested, 1);
+}
+
+#[test]
+fn snapshot_rewrites_and_request_identity() {
+    late_snapshot_rewrites_same_message_and_replay_is_idempotent();
+    different_requests_are_independent_when_counters_fall();
+    latest_snapshot_of_one_request_wins_and_response_id_does_not_change_identity();
+}
+
+#[test]
+fn retries_manual_refresh_and_empty_fast_path() {
+    torn_json_and_incomplete_snapshot_remain_retryable();
+    manual_refresh_detects_equal_size_equal_timestamp_rewrite();
+    empty_messages_dir_persists_fast_path_cursor_and_stays_idle();
+}
+
+#[test]
+fn legacy_cursor_recovery_and_rollback() {
+    legacy_seen_cursor_is_recovered_without_touching_other_apps_or_orphans();
+    failed_ingest_rolls_back_legacy_deletion_and_cursor_then_retries();
+    authoritative_correction_can_lower_completeness_without_affecting_foreign_row();
+}
+
+#[test]
+fn source_rollups_and_retry_recovery() {
+    rebuilding_codebuddy_rollups_preserves_archived_other_source_totals();
+    failed_source_rollup_retries_even_after_cursor_and_events_commit();
 }

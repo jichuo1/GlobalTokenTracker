@@ -777,7 +777,6 @@ pub fn compute_at(ev: &UsageEvent, p: &Price, threshold: u64) -> f64 {
 mod tests {
     use super::*;
 
-    #[test]
     fn normalize_examples() {
         assert_eq!(normalize_key("stealth/custom-alpha"), "custom-alpha");
         assert_eq!(
@@ -791,13 +790,11 @@ mod tests {
         assert_eq!(normalize_key("kimi-k3[1m]"), "kimi-k3");
     }
 
-    #[test]
     fn candidates_peel() {
         let c = candidates("bedrock/global.anthropic.claude-opus-5-5-20260901-high");
         assert!(c.contains(&"claude-opus-5-5".to_string()), "{c:?}");
     }
 
-    #[test]
     fn math_uses_per_1m() {
         let p = Price {
             input: 3.0,
@@ -837,7 +834,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
     fn reprice_backfills_unpriced_events() {
         let s = Store::open_memory().unwrap();
         s.upsert_event(&unpriced_ev("u1", "brand-new-model"))
@@ -870,7 +866,6 @@ mod tests {
         assert_eq!(src2, "unpriced");
     }
 
-    #[test]
     fn override_beats_live_and_live_beats_seed() {
         let s = Store::open_memory().unwrap();
         put_price(&s, "seed", "m-x", 1.0, 1.0);
@@ -898,7 +893,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn staleness_flags_seed_only_book() {
         let s = Store::open_memory().unwrap();
         assert!(prices_stale(&s).unwrap()); // no live rows
@@ -926,7 +920,6 @@ mod tests {
         ]})
     }
 
-    #[test]
     fn llmpricing_books_reference_then_cheapest() {
         let s = Store::open_memory().unwrap();
         let n = upsert_llmpricing(s.conn(), &llmpricing_fixture(), now_ms()).unwrap();
@@ -955,7 +948,6 @@ mod tests {
         assert_eq!(inp2, 0.5);
     }
 
-    #[test]
     fn the_book_bills_the_consensus_not_the_highest_ranked_feed() {
         let s = Store::open_memory().unwrap();
         // Two feeds say 1.4/4.4, the (formerly top-ranked) llmpricing row says
@@ -983,7 +975,6 @@ mod tests {
         assert_eq!((via, p.input), ("override", 42.0));
     }
 
-    #[test]
     fn every_spelling_of_a_model_resolves_to_the_same_price() {
         let s = Store::open_memory().unwrap();
         put_price(&s, "openrouter", "claude-opus-4.6", 5.0, 25.0);
@@ -1012,7 +1003,6 @@ mod tests {
         ));
     }
 
-    #[test]
     fn price_rows_show_the_consensus_and_who_agreed() {
         let s = Store::open_memory().unwrap();
         put_price(&s, "portkey", "gpt-5", 1.25, 10.0);
@@ -1033,7 +1023,6 @@ mod tests {
         assert_eq!((p.input, p.output), (r.input, r.output));
     }
 
-    #[test]
     fn price_search_ignores_case_and_separators_and_ranks_prefixes_first() {
         use crate::store::filter_prices;
         let s = Store::open_memory().unwrap();
@@ -1103,7 +1092,6 @@ mod tests {
         PriceBook::load(&s).unwrap()
     }
 
-    #[test]
     fn six_digit_date_and_vendor_suffix_are_peeled() {
         let b = sample_book();
         assert_eq!(
@@ -1120,7 +1108,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn provider_colon_model_uses_the_model_after_the_colon() {
         let b = sample_book();
         assert_eq!(
@@ -1147,7 +1134,6 @@ mod tests {
         assert_eq!(resolved(&b, "llama3.1:70b-instruct", None), None);
     }
 
-    #[test]
     fn four_digit_peel_only_when_the_exact_id_is_absent() {
         let s = Store::open_memory().unwrap();
         put_model(&s, "x-model", 1.0, 2.0);
@@ -1164,7 +1150,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn routing_placeholder_is_never_priced_by_a_namesake_row() {
         let b = sample_book(); // two sources price "auto"
         assert_eq!(resolved(&b, "auto", None), None);
@@ -1176,7 +1161,6 @@ mod tests {
         assert_eq!(resolved(&b, "auto", Some("auto")), None);
     }
 
-    #[test]
     fn rule_aliases_map_a_name_to_a_book_key() {
         let mut b = sample_book();
         assert_eq!(resolved(&b, "my-local-glm", None), None);
@@ -1205,7 +1189,6 @@ mod tests {
         assert!((cost - 3.0).abs() < 1e-9);
     }
 
-    #[test]
     fn price_marks_only_peeled_matches_as_estimated() {
         let b = sample_book();
         let mk = |m: &str| UsageEvent {
@@ -1222,7 +1205,6 @@ mod tests {
         assert_eq!(b.price(&UsageEvent::default()).2, CostSource::Unpriced);
     }
 
-    #[test]
     fn every_bundled_feed_format_has_an_importer_and_unknown_ones_do_not() {
         let r = Rules::bundled();
         assert!(r.feeds.iter().all(|f| importer(f).is_some()));
@@ -1231,7 +1213,6 @@ mod tests {
         assert!(importer(&f).is_none());
     }
 
-    #[test]
     fn long_context_tiers_apply_above_the_threshold_only() {
         let p = Price {
             input: 3.0,
@@ -1343,7 +1324,6 @@ mod tests {
         assert_eq!(event_row(&s, "auto1").1, "computed");
     }
 
-    #[test]
     fn zero_token_unpriced_rows_stay_unpriced_when_the_model_resolves() {
         let s = Store::open_memory().unwrap();
         put_model(&s, "claude-opus-5", 5.0, 25.0);
@@ -1373,7 +1353,6 @@ mod tests {
         assert_eq!(event_row(&s, "meta2"), (0.0, "unpriced".into(), None));
     }
 
-    #[test]
     fn reprice_unpriced_uses_the_shared_function_and_rebuilds_rollups() {
         let s = Store::open_memory().unwrap();
         let mut e = unpriced_ev("u1", "brand-new-model-202606");
@@ -1391,7 +1370,6 @@ mod tests {
         assert!((rolled - 0.007).abs() < 1e-9, "{rolled}");
     }
 
-    #[test]
     fn stale_gate_uses_attempt_stamp_12h_ttl() {
         let s = Store::open_memory().unwrap();
         // Fresh attempt (e.g. a failed fetch) → not stale for the next 12h.
@@ -1408,5 +1386,55 @@ mod tests {
             .unwrap();
         put_price(&s, "models.dev", "m-z", 1.0, 1.0);
         assert!(!prices_stale(&s).unwrap());
+    }
+
+    #[test]
+    fn key_normalization_and_suffix_peeling() {
+        normalize_examples();
+        candidates_peel();
+        six_digit_date_and_vendor_suffix_are_peeled();
+        provider_colon_model_uses_the_model_after_the_colon();
+        four_digit_peel_only_when_the_exact_id_is_absent();
+    }
+
+    #[test]
+    fn cost_math_and_long_context_tiers() {
+        math_uses_per_1m();
+        long_context_tiers_apply_above_the_threshold_only();
+    }
+
+    #[test]
+    fn resolution_precedence_and_consensus_billing() {
+        override_beats_live_and_live_beats_seed();
+        the_book_bills_the_consensus_not_the_highest_ranked_feed();
+        every_spelling_of_a_model_resolves_to_the_same_price();
+    }
+
+    #[test]
+    fn aliases_placeholders_and_estimated_cost_source() {
+        routing_placeholder_is_never_priced_by_a_namesake_row();
+        rule_aliases_map_a_name_to_a_book_key();
+        price_marks_only_peeled_matches_as_estimated();
+    }
+
+    #[test]
+    fn price_rows_search_and_feed_importers() {
+        llmpricing_books_reference_then_cheapest();
+        price_rows_show_the_consensus_and_who_agreed();
+        price_search_ignores_case_and_separators_and_ranks_prefixes_first();
+        every_bundled_feed_format_has_an_importer_and_unknown_ones_do_not();
+    }
+
+    #[test]
+    fn reprice_unpriced_backfill_and_rollups() {
+        reprice_backfills_unpriced_events();
+        zero_token_unpriced_rows_stay_unpriced_when_the_model_resolves();
+        reprice_unpriced_uses_the_shared_function_and_rebuilds_rollups();
+    }
+
+    #[test]
+    fn staleness_and_attempt_ttl_gates() {
+        staleness_flags_seed_only_book();
+        stale_gate_uses_attempt_stamp_12h_ttl();
     }
 }

@@ -67,7 +67,69 @@ class GroupTests(unittest.TestCase):
     def submit(self,s,**kw):
         return s.groups.submit({"topic":"fixture research","needs_web":False,**kw})["group_id"]
 
-    def test_group_plans_three_mixed_roles_and_requires_codex_final_review(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_group_planning_leader_qualification_and_topic_delivery(self):
+        self._run_cases(
+            self._case_group_plans_three_mixed_roles_and_requires_codex_final_review,
+            self._case_no_low_quality_model_is_promoted_to_leader,
+            self._case_initial_submit_codex_does_not_start_unnecessary_members,
+            self._case_members_receive_original_topic_even_when_context_is_empty,
+        )
+
+    def test_approvals_for_budget_seats_and_sanitized_reasons(self):
+        self._run_cases(
+            self._case_budget_extension_requires_explicit_codex_approval_and_caps_at_100m,
+            self._case_seats_change_only_after_approval_and_remain_within_eight,
+            self._case_approval_reason_cannot_export_credentials,
+        )
+
+    def test_role_replacement_failover_and_temporary_avoidance(self):
+        self._run_cases(
+            self._case_leader_can_replace_low_quality_role_without_changing_seats,
+            self._case_failed_source_is_replaced_and_successful_work_is_still_metered,
+            self._case_failed_explicit_replacement_is_temporarily_avoided,
+        )
+
+    def test_group_isolation_and_concurrency_limits(self):
+        self._run_cases(
+            self._case_two_groups_have_isolated_budgets_and_scope_deduplication,
+            self._case_group_concurrency_keeps_one_global_slot_for_mainline,
+            self._case_group_shared_reservation_cannot_start_two_when_only_one_fits,
+        )
+
+    def test_group_cancellation_and_race_safety(self):
+        self._run_cases(
+            self._case_cancel_preserves_actual_late_usage_and_does_not_revive_group,
+            self._case_cancel_between_approval_check_and_transition_cannot_revive_group,
+        )
+
+    def test_group_restart_and_partial_evidence_recovery(self):
+        self._run_cases(
+            self._case_restart_requires_explicit_resume_without_replaying_members,
+            self._case_partial_restart_marks_missing_evidence_and_never_claims_completion,
+        )
+
+    def test_group_native_budget_and_output_ceiling(self):
+        self._run_cases(
+            self._case_explicit_small_group_budget_blocks_large_native_reservation,
+            self._case_group_uses_native_ceiling_above_ordinary_limit,
+        )
+
+    def test_caller_handoff_and_cached_leader_decision_reuse(self):
+        self._run_cases(
+            self._case_caller_member_handoff_is_metered_and_still_needs_leader_review,
+            self._case_saved_valid_leader_decision_is_reused_without_another_paid_call,
+        )
+
+    def _case_group_plans_three_mixed_roles_and_requires_codex_final_review(self):
         s=self.service();p=s.groups.plan({"topic":"fixture","needs_web":False})
         self.assertEqual(p["member_count"],3);self.assertTrue(p["available"])
         self.assertEqual([r["role"] for r in p["roles"]],["leader","collector","analyst"])
@@ -79,14 +141,14 @@ class GroupTests(unittest.TestCase):
         rows=s.store.conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0]
         self.assertEqual(rows,4)
 
-    def test_no_low_quality_model_is_promoted_to_leader(self):
+    def _case_no_low_quality_model_is_promoted_to_leader(self):
         calls=[]
         s=self.service(lambda *a:calls.append(a),candidates=[routes()[1]])
         g=self.submit(s);state=self.wait(s,g)
         self.assertEqual(state["pending_action"]["type"],"no_qualified_leader")
         self.assertEqual(calls,[])
 
-    def test_budget_extension_requires_explicit_codex_approval_and_caps_at_100m(self):
+    def _case_budget_extension_requires_explicit_codex_approval_and_caps_at_100m(self):
         def adapter(route,prompt,task,ctx):
             if is_leader(task):return reply({"action":"request_extension" if initial(task) else "submit_codex","rationale":"more scope"})
             return reply()
@@ -98,7 +160,7 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(state["budget_total"],100000000)
         self.assertEqual(state["pending_action"]["type"],"submit_codex")
 
-    def test_seats_change_only_after_approval_and_remain_within_eight(self):
+    def _case_seats_change_only_after_approval_and_remain_within_eight(self):
         def adapter(route,prompt,task,ctx):
             if is_leader(task):return reply({"action":"request_seat_change","member_count":4}) if initial(task) else reply({"action":"submit_codex"})
             return reply()
@@ -108,7 +170,7 @@ class GroupTests(unittest.TestCase):
         s.groups.adjust_seats(g,4,"approved division",True);state=self.wait(s,g)
         self.assertEqual(state["member_count"],4);self.assertEqual(len(state["roles"]),4)
 
-    def test_leader_can_replace_low_quality_role_without_changing_seats(self):
+    def _case_leader_can_replace_low_quality_role_without_changing_seats(self):
         seen=[];reviews=[0]
         def adapter(route,prompt,task,ctx):
             if is_leader(task):
@@ -123,7 +185,7 @@ class GroupTests(unittest.TestCase):
         self.assertIn(routes()[1].id,state["blocked_routes"])
         self.assertEqual(sum(source=="fast" for source,_ in seen),1)
 
-    def test_failed_source_is_replaced_and_successful_work_is_still_metered(self):
+    def _case_failed_source_is_replaced_and_successful_work_is_still_metered(self):
         failures=[]
         def adapter(route,prompt,task,ctx):
             if is_leader(task):return reply({"action":"continue_research" if initial(task) else "submit_codex"})
@@ -134,7 +196,7 @@ class GroupTests(unittest.TestCase):
         self.assertTrue(any(r.get("role")=="collector" and r.get("ok") and r["route"]["source"]!="fast" for r in s.store.job(g)["results"]))
         self.assertGreaterEqual(state["tokens_used"],40)
 
-    def test_two_groups_have_isolated_budgets_and_scope_deduplication(self):
+    def _case_two_groups_have_isolated_budgets_and_scope_deduplication(self):
         s=self.service();one=self.submit(s,work_key="one");two=self.submit(s,work_key="two")
         self.wait(s,one);self.wait(s,two)
         duplicate=s.groups.submit({"topic":"fixture research","needs_web":False,"work_key":"one"})
@@ -143,7 +205,7 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(s.groups.status(two)["tokens_used"],40)
         self.assertEqual(s.total_inflight,0)
 
-    def test_cancel_preserves_actual_late_usage_and_does_not_revive_group(self):
+    def _case_cancel_preserves_actual_late_usage_and_does_not_revive_group(self):
         gate=threading.Event();entered=threading.Event();count=[0];lock=threading.Lock()
         def adapter(route,prompt,task,ctx):
             if is_leader(task):return reply({"action":"continue_research" if initial(task) else "submit_codex"})
@@ -157,7 +219,7 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(state["state"],"cancelled")
         self.assertEqual((state["tokens_used"],state["tokens_reserved"]),(30,0))
 
-    def test_restart_requires_explicit_resume_without_replaying_members(self):
+    def _case_restart_requires_explicit_resume_without_replaying_members(self):
         directory=self.root/"restart";s=self.service(directory=directory);g=self.submit(s);before=self.wait(s,g)
         s.shutdown();self.services.remove(s)
         member_calls=[]
@@ -171,13 +233,13 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(member_calls,[])
         self.assertEqual(after["tokens_used"],before["tokens_used"]+10)
 
-    def test_explicit_small_group_budget_blocks_large_native_reservation(self):
+    def _case_explicit_small_group_budget_blocks_large_native_reservation(self):
         calls=[];s=self.service(lambda *a:calls.append(a));g=self.submit(s,token_budget=1000)
         state=self.wait(s,g)
         self.assertEqual(calls,[]);self.assertEqual(state["tokens_used"],0)
         self.assertEqual(state["tokens_reserved"],0)
 
-    def test_group_uses_native_ceiling_above_ordinary_limit(self):
+    def _case_group_uses_native_ceiling_above_ordinary_limit(self):
         caps=[]
         def adapter(route,prompt,task,ctx):
             caps.append(task.max_output_tokens)
@@ -186,14 +248,14 @@ class GroupTests(unittest.TestCase):
         self.assertIn(100000,caps)
         self.assertTrue(all(cap in (4096,100000) for cap in caps))
 
-    def test_initial_submit_codex_does_not_start_unnecessary_members(self):
+    def _case_initial_submit_codex_does_not_start_unnecessary_members(self):
         seen=[]
         def adapter(route,prompt,task,ctx):
             seen.append(task.prompt);return reply({"action":"submit_codex"})
         s=self.service(adapter);g=self.submit(s);state=self.wait(s,g)
         self.assertEqual(len(seen),1);self.assertEqual(state["tokens_used"],10)
 
-    def test_partial_restart_marks_missing_evidence_and_never_claims_completion(self):
+    def _case_partial_restart_marks_missing_evidence_and_never_claims_completion(self):
         directory=self.root/"partial";s=self.service(directory=directory)
         request=GroupRequest.parse({"topic":"partial fixture","needs_web":False})
         job=GroupJob(request);job.roles=s.groups.plan({"topic":"partial fixture","needs_web":False})["roles"]
@@ -216,7 +278,7 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(state["tokens_estimated"],100000)
         with self.assertRaises(ValueError):restored.groups.complete(job.id,True)
 
-    def test_failed_explicit_replacement_is_temporarily_avoided(self):
+    def _case_failed_explicit_replacement_is_temporarily_avoided(self):
         s=self.service();job=GroupJob(GroupRequest.parse({"topic":"fixture","needs_web":False}))
         job.roles=s.groups.plan({"topic":"fixture","needs_web":False})["roles"];job.round=1
         old=job.roles[1]["route"]["route_id"]
@@ -228,7 +290,7 @@ class GroupTests(unittest.TestCase):
         job.avoid_until[old]=now_ms()-1
         self.assertTrue(any(c["route"].id==old for c in s.groups._candidates(task,job)))
 
-    def test_group_concurrency_keeps_one_global_slot_for_mainline(self):
+    def _case_group_concurrency_keeps_one_global_slot_for_mainline(self):
         gate=threading.Event();three=threading.Event();count=[0];lock=threading.Lock();normal=threading.Event()
         def adapter(route,prompt,task,ctx):
             if getattr(task,"_research_group",False):
@@ -250,7 +312,7 @@ class GroupTests(unittest.TestCase):
             for f in futures:f.result()
         self.assertEqual(count[0],3)
 
-    def test_cancel_between_approval_check_and_transition_cannot_revive_group(self):
+    def _case_cancel_between_approval_check_and_transition_cannot_revive_group(self):
         def adapter(route,prompt,task,ctx):return reply({"action":"request_seat_change","member_count":4})
         s=self.service(adapter);g=self.submit(s);self.wait(s,g)
         original=s.groups._approved_job
@@ -261,7 +323,7 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(s.groups.status(g)["state"],"cancelled")
         self.assertEqual(s.groups.status(g)["member_count"],3)
 
-    def test_caller_member_handoff_is_metered_and_still_needs_leader_review(self):
+    def _case_caller_member_handoff_is_metered_and_still_needs_leader_review(self):
         s=self.service();job=GroupJob(GroupRequest.parse({"topic":"fixture","needs_web":False}))
         job.state="needs_codex";job.round=1;job.phase="leader_review";job.expected_slots=[1]
         job.results=[{"worker":5,"slot":1,"round":1,"phase":"research_round","role":"collector","ok":False,"codex_fallback":{"recommended_model":"gpt-6-luna"}}]
@@ -273,11 +335,11 @@ class GroupTests(unittest.TestCase):
         self.assertEqual(state["pending_action"]["type"],"caller_member_completed")
         self.assertEqual(s.groups._missing_slots(job),[])
 
-    def test_approval_reason_cannot_export_credentials(self):
+    def _case_approval_reason_cannot_export_credentials(self):
         s=self.service()
         with self.assertRaises(ValueError):dispatch(s,"router_group_resume",{"group_id":"fixture","reason":"sk-"+"x"*32})
 
-    def test_group_shared_reservation_cannot_start_two_when_only_one_fits(self):
+    def _case_group_shared_reservation_cannot_start_two_when_only_one_fits(self):
         gate=threading.Event();entered=threading.Event();calls=[]
         def adapter(route,prompt,task,ctx):calls.append(route.id);entered.set();gate.wait(2);return reply()
         candidates=routes()
@@ -294,7 +356,7 @@ class GroupTests(unittest.TestCase):
             self.assertTrue(second.result(2)["ok"])
         self.assertEqual(len(calls),2);self.assertEqual((job.tokens_used,job.tokens_reserved),(20,0))
 
-    def test_members_receive_original_topic_even_when_context_is_empty(self):
+    def _case_members_receive_original_topic_even_when_context_is_empty(self):
         seen=[]
         def adapter(route,prompt,task,ctx):
             if is_leader(task):return reply({"action":"continue_research" if initial(task) else "submit_codex"})
@@ -304,7 +366,7 @@ class GroupTests(unittest.TestCase):
         self.wait(s,g)
         self.assertEqual(seen,["def original_source(): return 23"]*2)
 
-    def test_saved_valid_leader_decision_is_reused_without_another_paid_call(self):
+    def _case_saved_valid_leader_decision_is_reused_without_another_paid_call(self):
         s=self.service();job=GroupJob(GroupRequest.parse({"topic":"fixture","needs_web":False}))
         job.round=1;job.phase="leader_review";job.state="needs_codex";job.expected_slots=[]
         job.results=[{"worker":0,"slot":0,"role":"leader","round":1,"ok":True,

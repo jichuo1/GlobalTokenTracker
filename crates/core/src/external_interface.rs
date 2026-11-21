@@ -141,13 +141,11 @@ mod tests {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
-    #[test]
     fn missing_settings_preserve_legacy_enabled_without_writes() {
         let fixture = Fixture::new();
         assert!(read(&fixture.path()).unwrap().enabled);
         assert!(!fixture.path().exists());
     }
-    #[test]
     fn switch_persists_and_replaces_previous_value() {
         let fixture = Fixture::new();
         write(&fixture.path(), false).unwrap();
@@ -156,7 +154,6 @@ mod tests {
         assert!(read(&fixture.path()).unwrap().enabled);
         assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
     }
-    #[test]
     fn damaged_unknown_or_non_boolean_settings_fail_closed() {
         let fixture = Fixture::new();
         for value in [
@@ -173,7 +170,6 @@ mod tests {
             ));
         }
     }
-    #[test]
     fn global_off_blocks_other_ledgers_and_bom_is_supported() {
         let fixture = Fixture::new();
         let selected = fixture.0.join("custom.json");
@@ -189,5 +185,17 @@ mod tests {
         )
         .unwrap();
         assert!(check_paths(&[fixture.path(), selected]).is_ok());
+    }
+
+    #[test]
+    fn settings_read_write_and_defaults() {
+        missing_settings_preserve_legacy_enabled_without_writes();
+        switch_persists_and_replaces_previous_value();
+    }
+
+    #[test]
+    fn settings_validation_and_global_off_precedence() {
+        damaged_unknown_or_non_boolean_settings_fail_closed();
+        global_off_blocks_other_ledgers_and_bom_is_supported();
     }
 }

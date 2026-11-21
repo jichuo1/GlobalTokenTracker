@@ -4,11 +4,28 @@ from gtt_router.group_contract import GROUP_SCHEMA, LEADER_SCHEMA, GroupRequest,
 
 
 class GroupRequestTests(unittest.TestCase):
-    def test_empty_operation_fields_are_compatible_but_nonempty_actions_rejected(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_group_request_parsing_boundaries_and_redaction(self):
+        self._run_cases(
+            self._case_empty_operation_fields_are_compatible_but_nonempty_actions_rejected,
+            self._case_defaults_public_redaction_and_integral_float,
+            self._case_adaptive_roles_and_token_budget_boundaries,
+            self._case_rejects_unknown_output_limit_and_unsafe_or_unbounded_input,
+        )
+
+    def _case_empty_operation_fields_are_compatible_but_nonempty_actions_rejected(self):
         value=parse_leader_decision({"action":"submit_codex","next_tasks":[],"replace_roles":[],"feedback":[]})
         self.assertEqual(value["action"],"submit_codex")
         with self.assertRaises(ValueError):parse_leader_decision({"action":"submit_codex","replace_roles":["member-1"]})
-    def test_defaults_public_redaction_and_integral_float(self):
+    def _case_defaults_public_redaction_and_integral_float(self):
         group = GroupRequest.parse({"topic": "Compare primary evidence", "context": "x" * 70000,
                                     "member_count": 4.0, "max_rounds": 3.0, "deadline_s": 3600.0,
                                     "token_budget": 1000000.0})
@@ -25,7 +42,7 @@ class GroupRequestTests(unittest.TestCase):
         self.assertEqual(GROUP_SCHEMA["additionalProperties"], False)
         self.assertNotIn("max_output_tokens", GROUP_SCHEMA["properties"])
 
-    def test_adaptive_roles_and_token_budget_boundaries(self):
+    def _case_adaptive_roles_and_token_budget_boundaries(self):
         self.assertIsNone(GroupRequest.parse({"topic": "Adaptive", "token_budget": 50000000}).member_count)
         self.assertEqual(GroupRequest.parse({"topic": "Explicit", "member_count": 8, "token_budget": 1000}).member_count, 8)
         for fields in ({"member_count": 2}, {"member_count": 9}, {"token_budget": 50000001},
@@ -33,7 +50,7 @@ class GroupRequestTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 GroupRequest.parse({"topic": "x", **fields})
 
-    def test_rejects_unknown_output_limit_and_unsafe_or_unbounded_input(self):
+    def _case_rejects_unknown_output_limit_and_unsafe_or_unbounded_input(self):
         invalid = [
             {"topic": "x", "max_output_tokens": 4096},
             {"topic": "  "},
@@ -51,7 +68,23 @@ class GroupRequestTests(unittest.TestCase):
 
 
 class LeaderDecisionTests(unittest.TestCase):
-    def test_accepts_bounded_advisory_plan(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_leader_advisory_plan_and_input_validation(self):
+        self._run_cases(
+            self._case_accepts_bounded_advisory_plan,
+            self._case_rejects_arbitrary_actions_fields_secrets_and_private_urls,
+            self._case_limits_next_tasks_and_checks_needs_web_type,
+        )
+
+    def _case_accepts_bounded_advisory_plan(self):
         decision = parse_leader_decision({
             "action": "continue_research", "rationale": "Need a primary source.",
             "summary": "Evidence is incomplete.", "uncertainties": ["Version date"],
@@ -63,7 +96,7 @@ class LeaderDecisionTests(unittest.TestCase):
         self.assertEqual(LEADER_SCHEMA["properties"]["action"]["enum"],
                          ["blocked", "continue_research", "propose_merge", "request_extension", "request_seat_change", "submit_codex"])
 
-    def test_rejects_arbitrary_actions_fields_secrets_and_private_urls(self):
+    def _case_rejects_arbitrary_actions_fields_secrets_and_private_urls(self):
         invalid = [
             {"action": ["run", "shell"]},
             {"action": "execute_command"},
@@ -79,7 +112,7 @@ class LeaderDecisionTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_leader_decision(value)
 
-    def test_limits_next_tasks_and_checks_needs_web_type(self):
+    def _case_limits_next_tasks_and_checks_needs_web_type(self):
         tasks = [{"role": "analyst", "kind": "extract", "prompt": "x"}] * 8
         with self.assertRaises(ValueError):
             parse_leader_decision({"action": "continue_research", "next_tasks": tasks})

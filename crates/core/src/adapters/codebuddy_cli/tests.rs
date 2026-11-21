@@ -38,7 +38,6 @@ fn trace() -> Value {
 fn engine() -> Engine {
     Engine::new(Store::open_memory().unwrap()).unwrap()
 }
-#[test]
 fn aggregate_trace_ignores_spans_and_last_call_counters_and_is_idempotent() {
     let f = Fixture::new();
     let e = engine();
@@ -56,7 +55,6 @@ fn aggregate_trace_ignores_spans_and_last_call_counters_and_is_idempotent() {
     );
     assert_eq!(f.scan(&e).events_ingested, 0);
 }
-#[test]
 fn duplicate_trace_files_share_identity() {
     let a = Fixture::new();
     let b = Fixture::new();
@@ -67,7 +65,6 @@ fn duplicate_trace_files_share_identity() {
     b.scan(&e);
     assert_eq!(e.store.totals(None, None, None, None).unwrap().events, 1);
 }
-#[test]
 fn missing_dimensions_keep_reported_total_unclassified() {
     let f = Fixture::new();
     let e = engine();
@@ -81,7 +78,6 @@ fn missing_dimensions_keep_reported_total_unclassified() {
         (0, 0, 1200)
     );
 }
-#[test]
 fn inconsistent_dimensions_do_not_invent_token_splits() {
     let f = Fixture::new();
     let e = engine();
@@ -97,7 +93,6 @@ fn inconsistent_dimensions_do_not_invent_token_splits() {
         1200
     );
 }
-#[test]
 fn in_flight_and_zero_error_traces_do_not_create_usage() {
     let f = Fixture::new();
     let e = engine();
@@ -111,7 +106,6 @@ fn in_flight_and_zero_error_traces_do_not_create_usage() {
     f.write(&v);
     assert_eq!(f.scan(&e).events_ingested, 0);
 }
-#[test]
 fn paid_failed_trace_is_retained_and_multiple_models_are_not_guessed() {
     let f = Fixture::new();
     let e = engine();
@@ -137,4 +131,18 @@ fn write_failure_does_not_advance_cursor() {
         .execute_batch("DROP TRIGGER block_cli")
         .unwrap();
     assert_eq!(f.scan(&e).events_ingested, 1);
+}
+
+#[test]
+fn trace_aggregation_and_deduplication() {
+    aggregate_trace_ignores_spans_and_last_call_counters_and_is_idempotent();
+    duplicate_trace_files_share_identity();
+}
+
+#[test]
+fn unclassified_and_status_edge_cases() {
+    missing_dimensions_keep_reported_total_unclassified();
+    inconsistent_dimensions_do_not_invent_token_splits();
+    in_flight_and_zero_error_traces_do_not_create_usage();
+    paid_failed_trace_is_retained_and_multiple_models_are_not_guessed();
 }

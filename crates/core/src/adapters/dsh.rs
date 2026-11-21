@@ -366,7 +366,6 @@ mod tests {
 
     const T0: i64 = 1_790_695_060_000;
 
-    #[test]
     fn v4_zstd_message_emits_usage() {
         let (_r, dir) = session_dir("v4", "session-aaa");
         let file = dir.join("session.v4.jsonl.zstd");
@@ -402,7 +401,6 @@ mod tests {
         assert_eq!(out.consumed, data.len() as u64);
     }
 
-    #[test]
     fn rescan_emits_only_new_seqs() {
         let (_r, dir) = session_dir("delta", "session-bbb");
         let file = dir.join("session.v4.jsonl.zstd");
@@ -440,7 +438,6 @@ mod tests {
         assert_eq!(out2.consumed, 50.min(data.len()) as u64);
     }
 
-    #[test]
     fn header_fallback_and_missing_seq_still_emit() {
         let (_r, dir) = session_dir("fb", "session-ccc");
         let file = dir.join("session.v4.jsonl"); // compression: none
@@ -481,7 +478,6 @@ mod tests {
         zstd::stream::encode_all(text.as_bytes(), 0).unwrap()
     }
 
-    #[test]
     fn torn_zstd_tail_decodes_the_prefix() {
         let (_r, dir) = session_dir("torn", "session-eee");
         let file = dir.join("session.v4.jsonl.zstd");
@@ -508,7 +504,6 @@ mod tests {
         assert_eq!(out.consumed, data.len() as u64);
     }
 
-    #[test]
     fn zero_usage_is_skipped_not_counted() {
         let (_r, dir) = session_dir("zero", "session-fff");
         let file = dir.join("session.v4.jsonl.zstd");
@@ -526,7 +521,6 @@ mod tests {
         assert!(out.events.is_empty());
         assert_eq!(out.skipped, 1);
     }
-    #[test]
     fn fork_inherited_history_is_not_billed_again() {
         let (_root, dir) = session_dir("seeded", "child");
         let file = dir.join("session.jsonl");
@@ -553,5 +547,19 @@ mod tests {
                 .iter()
                 .all(|event| event.dedup_key != "dsh:child:2")
         );
+    }
+
+    #[test]
+    fn message_parsing_fallbacks_and_incremental_rescan() {
+        v4_zstd_message_emits_usage();
+        rescan_emits_only_new_seqs();
+        header_fallback_and_missing_seq_still_emit();
+    }
+
+    #[test]
+    fn torn_streams_zero_usage_and_fork_seeds() {
+        torn_zstd_tail_decodes_the_prefix();
+        zero_usage_is_skipped_not_counted();
+        fork_inherited_history_is_not_billed_again();
     }
 }

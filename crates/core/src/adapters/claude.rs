@@ -225,13 +225,11 @@ mod tests {
             .duration_ms
     }
 
-    #[test]
     fn duration_is_assistant_minus_preceding_input() {
         let o = parse(&[user(0, false), asst("a", 4, false, "")], None);
         assert_eq!(dur(&o, "a"), Some(4_000));
     }
 
-    #[test]
     fn streamed_message_uses_its_last_line() {
         let o = parse(
             &[
@@ -248,7 +246,6 @@ mod tests {
         assert_eq!(dur(&o, "b"), Some(2_000));
     }
 
-    #[test]
     fn state_chains_input_timestamps_across_chunks() {
         let first = parse(&[user(0, false)], None);
         assert!(first.events.is_empty());
@@ -264,7 +261,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn sidechain_has_its_own_input_slot() {
         let o = parse(
             &[
@@ -279,7 +275,6 @@ mod tests {
         assert_eq!(dur(&o, "side"), Some(4_000));
     }
 
-    #[test]
     fn implausible_gaps_are_dropped_and_explicit_duration_wins() {
         let o = parse(&[user(0, false), asst("a", 31 * 60, false, "")], None);
         assert_eq!(dur(&o, "a"), None);
@@ -290,5 +285,18 @@ mod tests {
             None,
         );
         assert_eq!(dur(&o, "a"), Some(1_234));
+    }
+
+    #[test]
+    fn turn_and_stream_duration_measurement() {
+        duration_is_assistant_minus_preceding_input();
+        streamed_message_uses_its_last_line();
+        implausible_gaps_are_dropped_and_explicit_duration_wins();
+    }
+
+    #[test]
+    fn chunk_state_and_sidechain_isolation() {
+        state_chains_input_timestamps_across_chunks();
+        sidechain_has_its_own_input_slot();
     }
 }

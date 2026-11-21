@@ -68,7 +68,6 @@ impl Drop for Fixture {
     }
 }
 
-#[test]
 fn disabled_interface_blocks_capabilities_snapshot_and_refresh_without_ledger_changes() {
     let fixture = Fixture::new();
     drop(fixture.seed());
@@ -89,7 +88,6 @@ fn disabled_interface_blocks_capabilities_snapshot_and_refresh_without_ledger_ch
     assert_eq!(fixture.call(&["snapshot"])["status"], "ok");
 }
 
-#[test]
 fn explicit_db_does_not_bypass_global_interface_switch() {
     let global = Fixture::new();
     let selected = Fixture::new();
@@ -113,7 +111,6 @@ fn explicit_db_does_not_bypass_global_interface_switch() {
     assert_eq!(value["error"]["code"], "external_interface_disabled");
 }
 
-#[test]
 fn capabilities_and_missing_snapshot_have_no_creation_side_effects() {
     let f = Fixture::new();
     let c = f.call(&["capabilities"]);
@@ -124,7 +121,6 @@ fn capabilities_and_missing_snapshot_have_no_creation_side_effects() {
     assert!(!f.0.exists());
 }
 
-#[test]
 fn version_negotiation_rejects_before_opening_database() {
     let f = Fixture::new();
     assert_eq!(
@@ -134,7 +130,6 @@ fn version_negotiation_rejects_before_opening_database() {
     assert!(!f.0.exists());
 }
 
-#[test]
 fn read_only_snapshot_is_sanitized_and_source_filtered() {
     let f = Fixture::new();
     let conn = f.seed();
@@ -166,7 +161,6 @@ fn read_only_snapshot_is_sanitized_and_source_filtered() {
     );
 }
 
-#[test]
 fn old_or_empty_schema_returns_explicit_partial_or_unavailable() {
     let f = Fixture::new();
     std::fs::create_dir_all(&f.0).unwrap();
@@ -186,7 +180,6 @@ fn old_or_empty_schema_returns_explicit_partial_or_unavailable() {
     );
 }
 
-#[test]
 fn bounded_results_report_truncation_and_invalid_filter_is_rejected() {
     let f = Fixture::new();
     let conn = f.seed();
@@ -205,7 +198,6 @@ fn bounded_results_report_truncation_and_invalid_filter_is_rejected() {
     drop(conn);
 }
 
-#[test]
 fn quota_semantics_fail_closed_for_age_clock_reset_and_non_allowance() {
     let f = Fixture::new();
     let conn = f.seed();
@@ -244,7 +236,6 @@ fn quota_semantics_fail_closed_for_age_clock_reset_and_non_allowance() {
     drop(conn);
 }
 
-#[test]
 fn latest_quota_tie_uses_id_and_dangerous_identifiers_are_redacted() {
     let f = Fixture::new();
     let conn = f.seed();
@@ -261,7 +252,6 @@ fn latest_quota_tie_uses_id_and_dangerous_identifiers_are_redacted() {
     drop(conn);
 }
 
-#[test]
 fn locked_database_returns_machine_error_without_raw_diagnostics() {
     let f = Fixture::new();
     let conn = f.seed();
@@ -271,7 +261,6 @@ fn locked_database_returns_machine_error_without_raw_diagnostics() {
     drop(conn);
 }
 
-#[test]
 fn refresh_requires_scope_and_unknown_scope_does_not_create_database() {
     let f = Fixture::new();
     assert_eq!(
@@ -286,7 +275,6 @@ fn refresh_requires_scope_and_unknown_scope_does_not_create_database() {
     assert!(!out.status.success());
 }
 
-#[test]
 fn disabled_refresh_never_discovers_files_or_polls_and_is_throttled() {
     let f = Fixture::new();
     let store = globaltokentracker_core::Store::open(&f.db()).unwrap();
@@ -373,7 +361,6 @@ fn cross_process_lock_survives_expired_metadata_and_releases_after_process_death
     drop(conn);
 }
 
-#[test]
 fn refresh_does_not_replace_a_corrupt_ledger_with_an_existing_backup() {
     let f = Fixture::new();
     let store = globaltokentracker_core::Store::open(&f.db()).unwrap();
@@ -386,4 +373,33 @@ fn refresh_does_not_replace_a_corrupt_ledger_with_an_existing_backup() {
         "refresh_failed"
     );
     assert_eq!(std::fs::read(f.db()).unwrap(), corrupt);
+}
+
+#[test]
+fn interface_switches_and_protocol_negotiation() {
+    disabled_interface_blocks_capabilities_snapshot_and_refresh_without_ledger_changes();
+    explicit_db_does_not_bypass_global_interface_switch();
+    capabilities_and_missing_snapshot_have_no_creation_side_effects();
+    version_negotiation_rejects_before_opening_database();
+}
+
+#[test]
+fn snapshot_sanitization_schemas_and_bounds() {
+    read_only_snapshot_is_sanitized_and_source_filtered();
+    old_or_empty_schema_returns_explicit_partial_or_unavailable();
+    bounded_results_report_truncation_and_invalid_filter_is_rejected();
+}
+
+#[test]
+fn quota_fail_closed_redaction_and_busy_errors() {
+    quota_semantics_fail_closed_for_age_clock_reset_and_non_allowance();
+    latest_quota_tie_uses_id_and_dangerous_identifiers_are_redacted();
+    locked_database_returns_machine_error_without_raw_diagnostics();
+}
+
+#[test]
+fn refresh_scoping_throttling_and_corrupt_ledger_safety() {
+    refresh_requires_scope_and_unknown_scope_does_not_create_database();
+    disabled_refresh_never_discovers_files_or_polls_and_is_throttled();
+    refresh_does_not_replace_a_corrupt_ledger_with_an_existing_backup();
 }

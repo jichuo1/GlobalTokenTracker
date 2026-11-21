@@ -186,7 +186,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn metric_keys_round_trip_and_default_to_tokens() {
         for m in METRICS {
             assert_eq!(HeatMetric::from_key(m.key()), m);
@@ -196,7 +195,6 @@ mod tests {
         assert_eq!(HeatMetric::default(), HeatMetric::Tokens);
     }
 
-    #[test]
     fn quartiles_ignore_zeros_and_one_outlier_cannot_flatten_the_rest() {
         assert_eq!(thresholds([0.0, 0.0].into_iter()), [0.0; 3]);
         let t = thresholds((1..=8).map(f64::from).chain([0.0, 0.0]));
@@ -214,7 +212,6 @@ mod tests {
         assert_eq!(level(5.0, &t), 1);
     }
 
-    #[test]
     fn summary_counts_active_days_and_longest_run() {
         let days: Vec<HeatDay> = [0, 3, 1, 0, 2, 2, 2, 0]
             .iter()
@@ -234,7 +231,6 @@ mod tests {
         assert_eq!(summarize(&days, HeatMetric::Calls).active_days, 0);
     }
 
-    #[test]
     fn month_marks_follow_the_monday_of_each_column() {
         // Mondays: Dec 29, Jan 5, 12, 19, 26, Feb 2 …
         let dates = (29..=31)
@@ -245,5 +241,17 @@ mod tests {
         let marks = month_marks(&days);
         // Dec label is dropped (next label only 1 column later), Jan @1, Feb @5.
         assert_eq!(marks, [(1, 1), (5, 2)]);
+    }
+
+    #[test]
+    fn metrics_and_quartile_thresholds() {
+        metric_keys_round_trip_and_default_to_tokens();
+        quartiles_ignore_zeros_and_one_outlier_cannot_flatten_the_rest();
+    }
+
+    #[test]
+    fn heat_summary_and_month_marks() {
+        summary_counts_active_days_and_longest_run();
+        month_marks_follow_the_monday_of_each_column();
     }
 }

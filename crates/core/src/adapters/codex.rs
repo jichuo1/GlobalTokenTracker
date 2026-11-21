@@ -393,7 +393,6 @@ mod tests {
         response(sec, r#"{"type":"custom_tool_call_output"}"#)
     }
 
-    #[test]
     fn plain_turn_runs_from_turn_start_to_the_last_model_output() {
         let o = parse(
             &[
@@ -408,7 +407,6 @@ mod tests {
         assert_eq!(durs(&o), [Some(5_000)]);
     }
 
-    #[test]
     fn token_count_after_tool_output_does_not_measure_the_tool() {
         // Real order: model output → tool runs → tool output → token_count
         // (milliseconds later). The call is the model's 5 s, then 4 s.
@@ -430,7 +428,6 @@ mod tests {
         assert_eq!(durs(&o), [Some(5_000), Some(4_000)]);
     }
 
-    #[test]
     fn older_order_token_count_before_tool_output_restarts_at_the_result() {
         let o = parse(
             &[
@@ -446,7 +443,6 @@ mod tests {
         assert_eq!(durs(&o), [Some(4_000), Some(3_000)]);
     }
 
-    #[test]
     fn a_new_user_message_restarts_the_clock_and_assistant_text_does_not() {
         let o = parse(
             &[
@@ -462,7 +458,6 @@ mod tests {
         assert_eq!(durs(&o), [Some(3_000), Some(4_000)]);
     }
 
-    #[test]
     fn a_dup_line_neither_emits_nor_resets() {
         let o = parse(
             &[
@@ -485,7 +480,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn append_scan_keeps_the_session_model_and_cwd() {
         let first = parse(
             &[
@@ -531,7 +525,6 @@ mod tests {
         assert_eq!(third.events[0].project.as_deref(), Some("D:/other"));
     }
 
-    #[test]
     fn state_without_model_and_cwd_fields_still_parses() {
         let old = r#"{"inc":{"input":10,"cached":0,"cache_write":0,"output":7,"reasoning":0},
                       "cum":{"input":10,"cached":0,"cache_write":0,"output":7,"reasoning":0},
@@ -543,7 +536,6 @@ mod tests {
         assert_eq!(o.events[0].model, None);
     }
 
-    #[test]
     fn call_state_survives_chunk_boundaries_and_old_state_still_parses() {
         let first = parse(&[started(0), asst(3, "message")], None);
         assert!(first.events.is_empty());
@@ -562,7 +554,6 @@ mod tests {
         assert_eq!(durs(&o), [Some(1_000)]);
     }
 
-    #[test]
     fn idle_gap_longer_than_30_minutes_is_not_a_duration() {
         let o = parse(
             &[
@@ -587,5 +578,26 @@ mod tests {
             .collect();
         assert_eq!(weekly.len(), 2);
         assert_eq!(weekly[1].used_percent, Some(30.0));
+    }
+
+    #[test]
+    fn turn_and_tool_duration_accounting() {
+        plain_turn_runs_from_turn_start_to_the_last_model_output();
+        token_count_after_tool_output_does_not_measure_the_tool();
+        older_order_token_count_before_tool_output_restarts_at_the_result();
+    }
+
+    #[test]
+    fn clock_resets_duplicates_and_idle_gaps() {
+        a_new_user_message_restarts_the_clock_and_assistant_text_does_not();
+        a_dup_line_neither_emits_nor_resets();
+        idle_gap_longer_than_30_minutes_is_not_a_duration();
+    }
+
+    #[test]
+    fn session_state_and_chunk_boundaries() {
+        append_scan_keeps_the_session_model_and_cwd();
+        state_without_model_and_cwd_fields_still_parses();
+        call_state_survives_chunk_boundaries_and_old_state_still_parses();
     }
 }

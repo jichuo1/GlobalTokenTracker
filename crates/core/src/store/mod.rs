@@ -662,7 +662,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn events_pages_tile_tied_timestamps_without_gaps_or_repeats() {
         let s = Store::open_memory().unwrap();
         // 25 requests in the same millisecond, among others around them.
@@ -698,7 +697,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    #[test]
     fn duration_rescan_drops_claude_and_codex_cursors_once() {
         let s = Store::open_memory().unwrap();
         let cursors = |s: &Store| -> Vec<String> {
@@ -744,7 +742,6 @@ mod tests {
         assert_eq!(cursors(&s).len(), 4);
     }
 
-    #[test]
     fn codex_model_rescan_drops_only_codex_cursors_once() {
         let s = Store::open_memory().unwrap();
         let cursors = |s: &Store| -> Vec<String> {
@@ -789,7 +786,6 @@ mod tests {
         assert_eq!(cursors(&s).len(), 4);
     }
 
-    #[test]
     fn antigravity_qoder_rescan_drops_cursors_and_purges_old_qoder_events() {
         let s = Store::open_memory().unwrap();
         for (src, path) in [
@@ -873,7 +869,6 @@ mod tests {
         assert_eq!(claude_cnt, 1);
     }
 
-    #[test]
     fn antigravity_timing_migration_drops_only_antigravity_cursors_and_keeps_events() {
         let s = Store::open_memory().unwrap();
         for (src, path) in [
@@ -936,7 +931,6 @@ mod tests {
         assert_eq!(cursors(&s).len(), 3);
     }
 
-    #[test]
     fn opencode_output_gains_reasoning_exactly_once() {
         let dir = std::env::temp_dir().join(format!("gtt_mig_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -975,7 +969,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn upsert_upgrades_snapshot_to_terminal() {
         let s = Store::open_memory().unwrap();
         assert!(s.upsert_event(&ev("k1", 0, None)).unwrap()); // interim: no output/cost
@@ -993,7 +986,6 @@ mod tests {
 
     /// Re-emitting a row unchanged must not count as a write (idle ticks would
     /// otherwise look like new data), while any real change still lands.
-    #[test]
     fn identical_reupsert_is_not_a_write() {
         let s = Store::open_memory().unwrap();
         let e = ev("same", 300, Some(0.02));
@@ -1020,7 +1012,6 @@ mod tests {
         assert_eq!(cost, 0.03);
     }
 
-    #[test]
     fn upsert_never_downgrades() {
         let s = Store::open_memory().unwrap();
         assert!(s.upsert_event(&ev("k2", 500, Some(0.01))).unwrap()); // terminal first
@@ -1037,7 +1028,6 @@ mod tests {
         assert_eq!(total, 500);
     }
 
-    #[test]
     fn completeness_counts_dims() {
         assert_eq!(ev("x", 0, None).completeness(), 1); // input only
         assert_eq!(ev("x", 1, Some(0.1)).completeness(), 3);
@@ -1062,7 +1052,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn rollups_respect_local_date_boundary() {
         let s = Store::open_memory().unwrap();
         s.upsert_event(&ev_ts("b1", BOUNDARY_MS)).unwrap();
@@ -1093,7 +1082,6 @@ mod tests {
         assert_eq!((d16, leftover), (2, 0));
     }
 
-    #[test]
     fn rollups_idempotent() {
         let s = Store::open_memory().unwrap();
         s.upsert_event(&ev_ts("r1", BOUNDARY_MS)).unwrap();
@@ -1109,7 +1097,6 @@ mod tests {
 
     /// Partial rebuild of only the touched days must yield byte-identical
     /// `daily_rollups` rows to a full rebuild — the scan path relies on it.
-    #[test]
     fn rollups_partial_rebuild_equals_full() {
         let dump = |s: &Store| -> Vec<String> {
             let mut st = s
@@ -1159,7 +1146,6 @@ mod tests {
         assert_eq!(d16, 1);
     }
 
-    #[test]
     fn rollups_partial_rebuild_offset_frame() {
         let s = Store::open_memory().unwrap();
         // 23:30Z on the 15th is 07:30 on the 16th in +08:00 — the day index
@@ -1189,7 +1175,6 @@ mod tests {
         assert_eq!(d16, 1);
     }
 
-    #[test]
     fn prune_preserves_rollups() {
         let s = Store::open_memory().unwrap();
         s.upsert_event(&ev_ts("old", BOUNDARY_MS)).unwrap();
@@ -1207,7 +1192,6 @@ mod tests {
         assert_eq!(kept, 2);
     }
 
-    #[test]
     fn sqlite_pragmas_applied() {
         let temp_dir = std::env::temp_dir().join(format!("gtt_test_pragmas_{}", now_ms()));
         let db_file = temp_dir.join("test_pragmas.db");
@@ -1237,7 +1221,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    #[test]
     fn archive_events_transfers_data_preserves_rollups_and_removes_from_main() {
         let s = Store::open_memory().unwrap();
         s.upsert_event(&ev_ts("old", BOUNDARY_MS)).unwrap();
@@ -1275,7 +1258,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    #[test]
     fn hourly_buckets_by_local_hour() {
         let s = Store::open_memory().unwrap();
         // 2025-01-15 10:30Z + 10:59Z → same "10:00" bucket; 11:05Z → next.
@@ -1291,7 +1273,6 @@ mod tests {
         assert_eq!(rows[0].events, 2);
     }
 
-    #[test]
     fn app_filter_scopes_queries() {
         let s = Store::open_memory().unwrap();
         let mut a = ev_ts("a1", BOUNDARY_MS);
@@ -1332,7 +1313,6 @@ mod tests {
         assert_eq!(rows[0].app, "codex");
     }
 
-    #[test]
     fn model_filter_scopes_queries() {
         let s = Store::open_memory().unwrap();
         let mut a = ev_ts("a1", BOUNDARY_MS);
@@ -1385,7 +1365,6 @@ mod tests {
     /// The eight rate sums: measured durations are exact, bounded timestamp
     /// spans are estimated, over-long/missing spans time out of the sums but
     /// still count as events — and the derived rates are ratios of sums.
-    #[test]
     fn speed_fields_aggregate_as_ratio_of_sums() {
         let s = Store::open_memory().unwrap();
         let put = |key: &str,
@@ -1476,7 +1455,6 @@ mod tests {
 
     /// `speed_exprs` and `EventRow` agree on what counts as timing: this is
     /// the invariant the cube/peer paths inherit.
-    #[test]
     fn speed_exprs_bound_matches_event_row_effective_ms() {
         let s = Store::open_memory().unwrap();
         let mut e = ev_ts("neg", BOUNDARY_MS);
@@ -1514,7 +1492,6 @@ mod tests {
         dir.join("ledger.db")
     }
 
-    #[test]
     fn backup_restores_missing_ledger() {
         let db = tmp_db("missing");
         {
@@ -1537,7 +1514,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
-    #[test]
     fn backup_restores_corrupt_ledger() {
         let db = tmp_db("corrupt");
         {
@@ -1561,7 +1537,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
-    #[test]
     fn backup_rotates_two_generations_and_throttles() {
         let db = tmp_db("rotate");
         let s = Store::open(&db).unwrap();
@@ -1584,7 +1559,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
-    #[test]
     fn insert_quota_dedups_identical_snapshots() {
         let s = Store::open_memory().unwrap();
         let q = quota_snap("workbuddy", "session_ctx", Some(21.5), 1000);
@@ -1610,7 +1584,6 @@ mod tests {
         assert_eq!(n, 2);
     }
 
-    #[test]
     fn latest_quotas_one_row_per_key() {
         let s = Store::open_memory().unwrap();
         // Flood: many snapshots sharing the MAX captured_at (WorkBuddy's
@@ -1639,7 +1612,6 @@ mod tests {
     /// The indexed rewrite must agree with the original window-function query
     /// on awkward data: NULL accounts (`IS`, not `=`), snapshots tied on
     /// `captured_at` (id breaks the tie) and several windows per app.
-    #[test]
     fn latest_quotas_matches_the_window_function_oracle() {
         let s = Store::open_memory().unwrap();
         let mut n = 0i64;
@@ -1690,7 +1662,6 @@ mod tests {
         assert_eq!(got, oracle);
     }
 
-    #[test]
     fn prune_quotas_ages_history_but_keeps_latest_per_key() {
         let s = Store::open_memory().unwrap();
         let now = now_ms();
@@ -1727,7 +1698,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn repeated_open_fast_path_re_runs_migration_if_marker_removed() {
         let temp_dir = std::env::temp_dir().join(format!("gtt_fast_open_{}", now_ms()));
         let db_file = temp_dir.join("ledger.db");
@@ -1759,5 +1729,83 @@ mod tests {
         );
         drop(s3);
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn cursor_rescan_migrations_are_scoped_and_idempotent() {
+        duration_rescan_drops_claude_and_codex_cursors_once();
+        codex_model_rescan_drops_only_codex_cursors_once();
+        antigravity_qoder_rescan_drops_cursors_and_purges_old_qoder_events();
+        antigravity_timing_migration_drops_only_antigravity_cursors_and_keeps_events();
+    }
+
+    #[test]
+    fn opencode_reasoning_and_fast_open_migrations() {
+        opencode_output_gains_reasoning_exactly_once();
+        repeated_open_fast_path_re_runs_migration_if_marker_removed();
+    }
+
+    #[test]
+    fn upsert_monotonicity_dedup_and_completeness() {
+        upsert_upgrades_snapshot_to_terminal();
+        identical_reupsert_is_not_a_write();
+        upsert_never_downgrades();
+        completeness_counts_dims();
+    }
+
+    #[test]
+    fn rollups_local_boundaries_and_idempotency() {
+        rollups_respect_local_date_boundary();
+        rollups_idempotent();
+    }
+
+    #[test]
+    fn rollups_partial_rebuilds_across_offsets() {
+        rollups_partial_rebuild_equals_full();
+        rollups_partial_rebuild_offset_frame();
+    }
+
+    #[test]
+    fn prune_and_archive_preserve_rollups() {
+        prune_preserves_rollups();
+        archive_events_transfers_data_preserves_rollups_and_removes_from_main();
+    }
+
+    #[test]
+    fn sqlite_pragmas_and_event_pagination() {
+        sqlite_pragmas_applied();
+        events_pages_tile_tied_timestamps_without_gaps_or_repeats();
+    }
+
+    #[test]
+    fn hourly_buckets_and_dimension_filters() {
+        hourly_buckets_by_local_hour();
+        app_filter_scopes_queries();
+        model_filter_scopes_queries();
+    }
+
+    #[test]
+    fn speed_aggregation_and_effective_ms_bounds() {
+        speed_fields_aggregate_as_ratio_of_sums();
+        speed_exprs_bound_matches_event_row_effective_ms();
+    }
+
+    #[test]
+    fn backup_restore_and_rotation() {
+        backup_restores_missing_ledger();
+        backup_restores_corrupt_ledger();
+        backup_rotates_two_generations_and_throttles();
+    }
+
+    #[test]
+    fn quota_insert_dedup_and_pruning() {
+        insert_quota_dedups_identical_snapshots();
+        prune_quotas_ages_history_but_keeps_latest_per_key();
+    }
+
+    #[test]
+    fn latest_quotas_uniqueness_and_window_oracle() {
+        latest_quotas_one_row_per_key();
+        latest_quotas_matches_the_window_function_oracle();
     }
 }

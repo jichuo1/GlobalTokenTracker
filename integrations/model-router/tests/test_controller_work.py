@@ -80,7 +80,61 @@ class ControllerWorkTests(unittest.TestCase):
     def enqueue(self, ident="research", **extra):
         return self.work("enqueue", items=[{"id": ident, "kind": "research", "instruction": "Check independent evidence", **extra}])
 
-    def test_controller_research_and_review_continue_during_native_execution(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_controller_research_review_and_dependency_gating(self):
+        self._run_cases(
+            self._case_controller_research_and_review_continue_during_native_execution,
+            self._case_controller_decisions_alone_never_release_model_dependencies,
+            self._case_caller_verification_can_create_exact_scoped_correction_without_external_review,
+        )
+
+    def test_current_and_snapshot_read_isolation(self):
+        self._run_cases(
+            self._case_current_read_claim_only_blocks_the_overlapping_operator,
+            self._case_snapshot_research_remains_immutable_while_operator_changes_file,
+            self._case_live_current_read_waits_for_writer_but_independent_work_is_ready,
+        )
+
+    def test_claim_expiry_and_external_change_invalidation(self):
+        self._run_cases(
+            self._case_expired_claim_releases_resources_but_cannot_report_completion,
+            self._case_current_read_external_change_requires_refresh,
+        )
+
+    def test_workspace_leases_and_admission_commit_deferral(self):
+        self._run_cases(
+            self._case_busy_workspace_assignment_is_queued_without_blocking_controller,
+            self._case_nonblocking_snapshot_does_not_leak_a_workspace_read_lease,
+            self._case_read_claim_during_admission_defers_commit_without_replaying_generation,
+        )
+
+    def test_same_file_edits_and_authority_bounds(self):
+        self._run_cases(
+            self._case_native_independent_same_file_edits_preserve_raw_report_and_apply_once,
+            self._case_invalid_scope_lease_and_item_identity_do_not_expand_authority,
+        )
+
+    def test_generation_recovery_and_branch_isolation(self):
+        self._run_cases(
+            self._case_truncated_branch_can_be_revised_while_independent_branch_runs,
+            self._case_unknown_paid_result_never_gets_generation_recovery,
+        )
+
+    def test_recovery_limits_and_resident_protocol_checks(self):
+        self._run_cases(
+            self._case_exhausted_node_budget_or_deadline_stops_recovery_without_new_calls,
+            self._case_old_resident_rejects_new_control_protocol_before_sending,
+        )
+
+    def _case_controller_research_and_review_continue_during_native_execution(self):
         release = threading.Event()
         def adapter(*args):
             self.assertTrue(release.wait(5))
@@ -120,7 +174,7 @@ class ControllerWorkTests(unittest.TestCase):
         finally:
             release.set()
 
-    def test_current_read_claim_only_blocks_the_overlapping_operator(self):
+    def _case_current_read_claim_only_blocks_the_overlapping_operator(self):
         self.create(count=2)
         self.enqueue(paths=["a.txt"], access="current")
         self.work("start", item_id="research")
@@ -136,7 +190,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.work("start", item_id="research")
         self.work("finish", item_id="research", summary="Actual changed source rechecked")
 
-    def test_snapshot_research_remains_immutable_while_operator_changes_file(self):
+    def _case_snapshot_research_remains_immutable_while_operator_changes_file(self):
         self.create()
         self.enqueue(paths=["a.txt"], access="snapshot")
         self.work("start", item_id="research")
@@ -146,7 +200,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.assertEqual((self.workspace / "a.txt").read_text(), "after")
         self.work("finish", item_id="research", summary="Research is bound to the frozen baseline")
 
-    def test_live_current_read_waits_for_writer_but_independent_work_is_ready(self):
+    def _case_live_current_read_waits_for_writer_but_independent_work_is_ready(self):
         release = threading.Event()
         def adapter(*args):
             self.assertTrue(release.wait(5))
@@ -167,7 +221,7 @@ class ControllerWorkTests(unittest.TestCase):
         finally:
             release.set()
 
-    def test_expired_claim_releases_resources_but_cannot_report_completion(self):
+    def _case_expired_claim_releases_resources_but_cannot_report_completion(self):
         self.create()
         clock = [now_ms()]
         with patch("gtt_router.controller_work.now_ms", side_effect=lambda: clock[0]):
@@ -185,7 +239,7 @@ class ControllerWorkTests(unittest.TestCase):
             self.work("start", item_id="research")
             self.work("finish", item_id="research", summary="Fresh source checked after reacquiring")
 
-    def test_current_read_external_change_requires_refresh(self):
+    def _case_current_read_external_change_requires_refresh(self):
         self.create()
         self.enqueue(paths=["a.txt"], access="current")
         self.work("start", item_id="research")
@@ -195,7 +249,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.work("start", item_id="research")
         self.work("finish", item_id="research", summary="Updated source reviewed")
 
-    def test_caller_verification_can_create_exact_scoped_correction_without_external_review(self):
+    def _case_caller_verification_can_create_exact_scoped_correction_without_external_review(self):
         self.create()
         self.assign()
         run = self.wait_for(lambda r: r["nodes"]["first"]["state"] == "succeeded")
@@ -217,7 +271,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.work("start", item_id="check")
         self.work("finish", item_id="check", summary="Corrected source now satisfies the contract", verdict="accepted")
 
-    def test_controller_decisions_alone_never_release_model_dependencies(self):
+    def _case_controller_decisions_alone_never_release_model_dependencies(self):
         self.create()
         self.enqueue()
         self.work("start", item_id="research")
@@ -225,7 +279,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.status()["nodes"]["first"]["state"], "pending")
 
-    def test_native_independent_same_file_edits_preserve_raw_report_and_apply_once(self):
+    def _case_native_independent_same_file_edits_preserve_raw_report_and_apply_once(self):
         def adapter(route, prompt, task, context):
             file = json.loads(task.context)["assignment"]["files"][0]
             body = fixtures.content("two independent fixes")
@@ -243,7 +297,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.assertEqual(len(raw["content"]["operations"]), 2)
         self.assertEqual((self.workspace / "a.txt").read_text(), "alpha=10\nbeta=20\n")
 
-    def test_invalid_scope_lease_and_item_identity_do_not_expand_authority(self):
+    def _case_invalid_scope_lease_and_item_identity_do_not_expand_authority(self):
         self.create()
         with self.assertRaisesRegex(ValueError, "scope"):
             self.enqueue(paths=["../secret"])
@@ -256,7 +310,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.assertFalse(result["controller_work"]["identity_verified"])
         self.assertEqual(self.calls, [])
 
-    def test_busy_workspace_assignment_is_queued_without_blocking_controller(self):
+    def _case_busy_workspace_assignment_is_queued_without_blocking_controller(self):
         self.create()
         entered, release = threading.Event(), threading.Event()
         def command_owner():
@@ -281,7 +335,7 @@ class ControllerWorkTests(unittest.TestCase):
             self.service_instance.store.wake()
         self.wait_for(lambda r: r["nodes"]["first"]["state"] == "succeeded")
 
-    def test_nonblocking_snapshot_does_not_leak_a_workspace_read_lease(self):
+    def _case_nonblocking_snapshot_does_not_leak_a_workspace_read_lease(self):
         service = self.create()
         grant = service.operator.validate_grant({"root": str(self.workspace), "writable_paths": ["a.txt"]})
         entered, release = threading.Event(), threading.Event()
@@ -301,7 +355,7 @@ class ControllerWorkTests(unittest.TestCase):
             release.set()
             thread.join(2)
 
-    def test_read_claim_during_admission_defers_commit_without_replaying_generation(self):
+    def _case_read_claim_during_admission_defers_commit_without_replaying_generation(self):
         service = self.create()
         submitted, release = threading.Event(), threading.Event()
         original = service.submit
@@ -325,7 +379,7 @@ class ControllerWorkTests(unittest.TestCase):
         finally:
             release.set()
 
-    def test_truncated_branch_can_be_revised_while_independent_branch_runs(self):
+    def _case_truncated_branch_can_be_revised_while_independent_branch_runs(self):
         release = threading.Event()
         attempts = {"first": 0, "second": 0}
         def adapter(route, prompt, task, context):
@@ -381,7 +435,7 @@ class ControllerWorkTests(unittest.TestCase):
         finally:
             release.set()
 
-    def test_unknown_paid_result_never_gets_generation_recovery(self):
+    def _case_unknown_paid_result_never_gets_generation_recovery(self):
         def adapter(*args):
             raise WorkerFailure("output_truncated", usage={"total_tokens": 300}, metering={"unknown_paid_outcome": True})
         self.create(adapter)
@@ -390,7 +444,7 @@ class ControllerWorkTests(unittest.TestCase):
         self.assertFalse(run.get("review_proposals"))
         self.assertFalse(any(a["type"] == "accept" for a in run["pending_actions"]))
 
-    def test_old_resident_rejects_new_control_protocol_before_sending(self):
+    def _case_old_resident_rejects_new_control_protocol_before_sending(self):
         from gtt_router.daemon import LocalClient
         client = object.__new__(LocalClient)
         for decision, feature in [({"type": "controller_work", "op": "start"}, "controller_work_v1"),
@@ -401,7 +455,7 @@ class ControllerWorkTests(unittest.TestCase):
                     client.call("router_dispatch", {"action": "coordinate", "decision": decision})
                 request.assert_not_called()
 
-    def test_exhausted_node_budget_or_deadline_stops_recovery_without_new_calls(self):
+    def _case_exhausted_node_budget_or_deadline_stops_recovery_without_new_calls(self):
         for exhausted_budget in (True, False):
             def adapter(*args):
                 raise WorkerFailure("output_truncated", usage={"total_tokens": 6000 if exhausted_budget else 300}, retry_after_s=0)

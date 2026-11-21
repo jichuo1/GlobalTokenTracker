@@ -17,7 +17,28 @@ class AtomicEditPlanTests(unittest.TestCase):
             "old_text": old, "new_text": new} for ident, old, new in [("first", "alpha=1", "alpha=10"), ("second", "beta=2", "beta=20")]]
         return snapshot, operations
 
-    def test_two_independent_replacements_become_one_idempotent_atomic_receipt(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_atomic_bundling_idempotence_and_slice_boundaries(self):
+        self._run_cases(
+            self._case_two_independent_replacements_become_one_idempotent_atomic_receipt,
+            self._case_slice_bundle_stays_inside_authorized_excerpt_and_preserves_surroundings,
+        )
+
+    def test_overlap_baseline_command_and_byte_limit_rejections(self):
+        self._run_cases(
+            self._case_overlap_duplicate_ids_and_mismatched_baselines_remain_rejected,
+            self._case_command_boundaries_and_byte_limits_cannot_be_hidden_by_bundling,
+        )
+
+    def _case_two_independent_replacements_become_one_idempotent_atomic_receipt(self):
         snapshot, edits = self.edits()
         original = copy.deepcopy(edits)
         operations, bundles = self.broker.plan_operations(self.grant, ["a.txt"], edits, [snapshot])
@@ -32,7 +53,7 @@ class AtomicEditPlanTests(unittest.TestCase):
         self.assertTrue(self.execute(repeated)["receipts"][0]["deduplicated"])
         self.assertEqual(edits, original)
 
-    def test_overlap_duplicate_ids_and_mismatched_baselines_remain_rejected(self):
+    def _case_overlap_duplicate_ids_and_mismatched_baselines_remain_rejected(self):
         snapshot, edits = self.edits()
         variants = []
         overlap = copy.deepcopy(edits)
@@ -52,7 +73,7 @@ class AtomicEditPlanTests(unittest.TestCase):
                 self.broker.plan_operations(self.grant, ["a.txt"], value, [snapshot])
         self.assertEqual((self.workspace / "a.txt").read_bytes(), snapshot["content"].encode())
 
-    def test_slice_bundle_stays_inside_authorized_excerpt_and_preserves_surroundings(self):
+    def _case_slice_bundle_stays_inside_authorized_excerpt_and_preserves_surroundings(self):
         snapshot, edits = self.edits("HEAD\r\nalpha=1\r\nbeta=2\r\nTAIL\r\n")
         snapshot.update(content="alpha=1\r\nbeta=2\r\n", excerpt_only=True, line_range=[2, 3])
         operations, bundles = self.broker.plan_operations(self.grant, ["a.txt"], edits, [snapshot])
@@ -63,7 +84,7 @@ class AtomicEditPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unique matches"):
             self.broker.plan_operations(self.grant, ["a.txt"], edits, [snapshot])
 
-    def test_command_boundaries_and_byte_limits_cannot_be_hidden_by_bundling(self):
+    def _case_command_boundaries_and_byte_limits_cannot_be_hidden_by_bundling(self):
         snapshot, edits = self.edits()
         command = self.command("pass")
         with self.assertRaisesRegex(ValueError, "separate reviewed batches"):

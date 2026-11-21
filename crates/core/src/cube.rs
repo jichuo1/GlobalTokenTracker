@@ -1263,7 +1263,6 @@ mod tests {
         s
     }
 
-    #[test]
     fn unclassified_tokens_match_sql_cube_and_model_trends() {
         let store = Store::open_memory().unwrap();
         store
@@ -1421,7 +1420,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn app_speed_preserves_weighted_sums_across_sql_cube_and_filters() {
         let store = Store::open_memory().unwrap();
         let start = day_start_ms(0) + 1000;
@@ -1485,7 +1483,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn cube_matches_sql_across_ranges_and_filters() {
         let store = ledger();
         let cube = Cube::build(&store).unwrap();
@@ -1518,7 +1515,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn heat_window_is_monday_aligned_contiguous_and_zero_filled() {
         let store = ledger();
         let heat = Cube::build(&store).unwrap().heat(None, None);
@@ -1544,7 +1540,6 @@ mod tests {
         assert!(all_events < store.event_count(None, None).unwrap());
     }
 
-    #[test]
     fn heat_follows_tool_and_model_filters_and_sums_durations() {
         let store = ledger();
         let cube = Cube::build(&store).unwrap();
@@ -1623,7 +1618,6 @@ mod tests {
         assert_equivalent(&store, &inc, Range::Today, None, None);
     }
 
-    #[test]
     fn a_range_edge_off_the_day_boundary_falls_back() {
         let store = ledger();
         let cube = Cube::build(&store).unwrap();
@@ -1634,7 +1628,6 @@ mod tests {
         assert!(cube.overview_parts(off_boundary, None, None).is_none());
     }
 
-    #[test]
     fn stale_today_hours_decline_instead_of_answering_wrong() {
         let store = ledger();
         let mut cube = Cube::build(&store).unwrap();
@@ -1642,7 +1635,6 @@ mod tests {
         assert!(cube.overview_parts(Range::Today, None, None).is_none());
     }
 
-    #[test]
     fn civil_dates_round_trip_known_days() {
         assert_eq!(civil_date(0), "1970-01-01");
         assert_eq!(civil_date(20_103), "2025-01-15"); // BOUNDARY_MS.div_euclid(day) in store tests
@@ -1663,5 +1655,25 @@ mod tests {
                 .unwrap();
             assert_eq!(civil_date(d), sql, "day {d}");
         }
+    }
+
+    #[test]
+    fn cube_matches_sql_for_totals_speed_and_unclassified() {
+        unclassified_tokens_match_sql_cube_and_model_trends();
+        app_speed_preserves_weighted_sums_across_sql_cube_and_filters();
+        cube_matches_sql_across_ranges_and_filters();
+    }
+
+    #[test]
+    fn heat_window_layout_and_filters() {
+        heat_window_is_monday_aligned_contiguous_and_zero_filled();
+        heat_follows_tool_and_model_filters_and_sums_durations();
+    }
+
+    #[test]
+    fn cube_fallbacks_and_civil_date_round_trip() {
+        a_range_edge_off_the_day_boundary_falls_back();
+        stale_today_hours_decline_instead_of_answering_wrong();
+        civil_dates_round_trip_known_days();
     }
 }

@@ -1280,7 +1280,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn parses_generations_into_billable_events() {
         let dir = temp_dir("parse");
         let db = dir.join("11111111-2222-3333-4444-555555555555.db");
@@ -1344,7 +1343,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn modern_turns_are_dated_from_the_steps_table() {
         let dir = temp_dir("steps");
         let db = dir.join("modern.db");
@@ -1390,7 +1388,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn falls_back_to_conversation_start_when_nothing_dates_a_turn() {
         let dir = temp_dir("fallback");
         let db = dir.join("plain.db");
@@ -1415,7 +1412,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn missing_model_ids_are_recovered_from_siblings_only() {
         let dir = temp_dir("models");
         let db = dir.join("m.db");
@@ -1452,7 +1448,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn a_sole_model_serves_unlabelled_rows_but_a_model_switch_blocks_it() {
         // One concrete id, every label identified → the unlabelled row inherits it.
         let blobs_ok = [
@@ -1474,7 +1469,6 @@ mod tests {
         assert_eq!(sm.sole, None);
     }
 
-    #[test]
     fn unchanged_databases_are_skipped_and_growth_is_picked_up() {
         let dir = temp_dir("fp");
         let db = dir.join("g.db");
@@ -1509,7 +1503,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn a_forked_copy_never_steals_or_double_counts_a_turn() {
         let dir = temp_dir("fork");
         let (a, b) = (dir.join("orig.db"), dir.join("fork.db"));
@@ -1569,7 +1562,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn databases_without_gen_metadata_are_ignored() {
         let dir = temp_dir("idx");
         let db = dir.join("idx.db");
@@ -1585,7 +1577,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn a_wal_database_left_without_sidecars_still_reads() {
         let dir = temp_dir("wal");
         let db = dir.join("w.db");
@@ -1602,7 +1593,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn corrupt_blobs_degrade_to_nothing() {
         let dir = temp_dir("bad");
         let db = dir.join("bad.db");
@@ -1625,7 +1615,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn discovery_covers_all_roots_and_skips_the_index() {
         let base = temp_dir("disc");
         let mk = |rel: &str, name: &str| {
@@ -1653,7 +1642,6 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[test]
     fn gemini_cli_home_relocates_the_base_directory() {
         let home = Path::new("/home/u");
         assert_eq!(base_dir_from(None, home), home.join(".gemini"));
@@ -1664,7 +1652,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn workspace_uris_become_native_paths() {
         assert_eq!(
             file_uri_to_path("file:///C:/Users/me/proj").as_deref(),
@@ -1739,7 +1726,6 @@ mod tests {
         ));
     }
 
-    #[test]
     fn measured_durations_power_all_five_speed_metrics() {
         let dir = temp_dir("speed");
         let db = dir.join("speed.db");
@@ -1818,7 +1804,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn step_timestamps_provide_estimated_speed_fallback_when_gen_durations_absent() {
         let dir = temp_dir("step_est");
         let db = dir.join("legacy.db");
@@ -1878,7 +1863,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn corrupt_duration_blobs_degrade_cleanly() {
         let dir = temp_dir("bad_dur");
         let db = dir.join("bad_dur.db");
@@ -1981,7 +1965,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn model_enum_metadata_and_gemini_4_aliases_recover_models() {
         let dir = temp_dir("enum_meta");
         let db = dir.join("enums.db");
@@ -2060,7 +2043,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn incremental_rescan_reads_only_tail_and_recovers_sibling_models() {
         let dir = temp_dir("incr");
         let db = dir.join("sess-incr.db");
@@ -2102,7 +2084,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn watch_roots_under_skips_parent_when_only_summaries_db_exists() {
         let base = temp_dir("watchroots");
         std::fs::create_dir_all(base.join("antigravity/conversations")).unwrap();
@@ -2116,5 +2097,48 @@ mod tests {
         let roots2 = watch_roots_under(&base);
         assert!(roots2.contains(&base.join("antigravity")));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn generation_parsing_and_turn_dating() {
+        parses_generations_into_billable_events();
+        modern_turns_are_dated_from_the_steps_table();
+        falls_back_to_conversation_start_when_nothing_dates_a_turn();
+    }
+
+    #[test]
+    fn model_recovery_and_enum_aliases() {
+        missing_model_ids_are_recovered_from_siblings_only();
+        a_sole_model_serves_unlabelled_rows_but_a_model_switch_blocks_it();
+        model_enum_metadata_and_gemini_4_aliases_recover_models();
+    }
+
+    #[test]
+    fn incremental_scanning_and_fork_isolation() {
+        unchanged_databases_are_skipped_and_growth_is_picked_up();
+        a_forked_copy_never_steals_or_double_counts_a_turn();
+        incremental_rescan_reads_only_tail_and_recovers_sibling_models();
+    }
+
+    #[test]
+    fn malformed_wal_and_non_generation_databases() {
+        databases_without_gen_metadata_are_ignored();
+        a_wal_database_left_without_sidecars_still_reads();
+        corrupt_blobs_degrade_to_nothing();
+    }
+
+    #[test]
+    fn discovery_watch_roots_and_paths() {
+        discovery_covers_all_roots_and_skips_the_index();
+        gemini_cli_home_relocates_the_base_directory();
+        workspace_uris_become_native_paths();
+        watch_roots_under_skips_parent_when_only_summaries_db_exists();
+    }
+
+    #[test]
+    fn speed_metrics_fallbacks_and_corrupt_durations() {
+        measured_durations_power_all_five_speed_metrics();
+        step_timestamps_provide_estimated_speed_fallback_when_gen_durations_absent();
+        corrupt_duration_blobs_degrade_cleanly();
     }
 }

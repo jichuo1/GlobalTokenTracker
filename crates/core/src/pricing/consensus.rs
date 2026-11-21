@@ -409,7 +409,6 @@ mod tests {
         decide(&ordered(v))
     }
 
-    #[test]
     fn canonical_ids_ignore_version_separators() {
         for (a, b) in [
             ("claude-opus-4.6", "claude-opus-4-6"),
@@ -431,7 +430,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_majority_outvotes_a_single_wrong_feed() {
         // The real `gpt-5` case: LiteLLM at half price.
         let (v, st) = verdict(vec![
@@ -455,7 +453,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_lone_high_precedence_outlier_cannot_win() {
         // llmpricing used to outrank everything: `gpt-oss-120b` at $2.92.
         let (v, _) = verdict(vec![
@@ -468,7 +465,6 @@ mod tests {
         assert_eq!((v.agree, v.total), (2, 3)); // seed is not a witness
     }
 
-    #[test]
     fn near_equal_prices_agree_and_the_trusted_number_is_used() {
         let (v, st) = verdict(vec![
             q("openrouter", "m", 0.28, 0.42),
@@ -483,7 +479,6 @@ mod tests {
         assert_eq!(st, [Stance::Agrees, Stance::Dissents, Stance::Agrees]);
     }
 
-    #[test]
     fn the_tolerance_is_what_separates_rounding_from_dissent() {
         let within = verdict(vec![
             q("portkey", "m", 5.0, 25.0),
@@ -499,7 +494,6 @@ mod tests {
         assert_eq!((beyond.0.agree, beyond.0.total), (1, 2));
     }
 
-    #[test]
     fn three_way_disagreement_takes_the_median_never_an_extreme() {
         let (v, st) = verdict(vec![
             q("portkey", "m", 1.0, 3.0),
@@ -511,7 +505,6 @@ mod tests {
         assert_eq!(st.iter().filter(|s| **s == Stance::Dissents).count(), 2);
     }
 
-    #[test]
     fn zero_rows_are_absence_not_a_vote_for_free() {
         // models.dev and the seed list 0/0 for a model that costs money.
         let (v, st) = verdict(vec![
@@ -526,7 +519,6 @@ mod tests {
         assert!(st.contains(&Stance::Ignored));
     }
 
-    #[test]
     fn when_only_zero_rows_exist_the_model_is_free() {
         let (v, st) = verdict(vec![
             q("models.dev", "free-m", 0.0, 0.0),
@@ -537,7 +529,6 @@ mod tests {
         assert!(st.iter().all(|s| *s == Stance::NoData));
     }
 
-    #[test]
     fn the_seed_only_speaks_when_no_live_source_knows_the_model() {
         let (v, _) = verdict(vec![q("seed", "offline-m", 3.0, 15.0)]);
         assert_eq!((v.price.input, v.price.output), (3.0, 15.0));
@@ -575,7 +566,6 @@ mod tests {
         assert_eq!(v.price.tier_batch, None);
     }
 
-    #[test]
     fn input_only_models_are_still_priced() {
         // Embedding models bill input only.
         let (v, _) = verdict(vec![
@@ -586,7 +576,6 @@ mod tests {
         assert_eq!((v.agree, v.total), (2, 2));
     }
 
-    #[test]
     fn garbage_numbers_never_vote() {
         let (v, st) = verdict(vec![
             q("portkey", "m", f64::NAN, 1.0),
@@ -598,7 +587,6 @@ mod tests {
         assert_eq!(st.iter().filter(|s| **s == Stance::NoData).count(), 2);
     }
 
-    #[test]
     fn a_source_counts_once_even_when_it_lists_two_spellings() {
         // LiteLLM keeps a plain and a regional route for the same model.
         let (v, st) = verdict(vec![
@@ -623,7 +611,6 @@ mod tests {
         assert_eq!((v.agree, v.total), (2, 2));
     }
 
-    #[test]
     fn groups_merge_spellings_and_prefer_the_common_one() {
         let s = crate::store::Store::open_memory().unwrap();
         let c = s.conn();
@@ -718,5 +705,38 @@ mod tests {
             }
         }
         assert!(g.len() > 1000);
+    }
+
+    #[test]
+    fn canonical_ids_and_spelling_groups() {
+        canonical_ids_ignore_version_separators();
+        a_source_counts_once_even_when_it_lists_two_spellings();
+        groups_merge_spellings_and_prefer_the_common_one();
+    }
+
+    #[test]
+    fn majority_and_outlier_voting() {
+        a_majority_outvotes_a_single_wrong_feed();
+        a_lone_high_precedence_outlier_cannot_win();
+    }
+
+    #[test]
+    fn tolerance_clustering_and_three_way_median() {
+        near_equal_prices_agree_and_the_trusted_number_is_used();
+        the_tolerance_is_what_separates_rounding_from_dissent();
+        three_way_disagreement_takes_the_median_never_an_extreme();
+    }
+
+    #[test]
+    fn zero_rows_and_seed_precedence() {
+        zero_rows_are_absence_not_a_vote_for_free();
+        when_only_zero_rows_exist_the_model_is_free();
+        the_seed_only_speaks_when_no_live_source_knows_the_model();
+    }
+
+    #[test]
+    fn input_only_and_invalid_quotes() {
+        input_only_models_are_still_priced();
+        garbage_numbers_never_vote();
     }
 }

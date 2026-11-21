@@ -83,28 +83,193 @@ class RouterTests(unittest.TestCase):
             time.sleep(.01)
         self.fail("job did not reach a terminal state")
 
-    def test_task_rejects_credentials_and_unbounded_context(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_task_parsing_and_contract_defaults(self):
+        self._run_cases(
+            self._case_task_rejects_credentials_and_unbounded_context,
+            self._case_fanout_defaults_to_discrepancy_verifier,
+            self._case_mutating_task_kinds_are_not_supported,
+            self._case_logical_tasks_have_a_quality_floor_by_default,
+        )
+
+    def test_catalog_and_route_redaction(self):
+        self._run_cases(
+            self._case_public_route_does_not_export_runtime_credentials,
+            self._case_static_catalog_preserves_disabled_providers,
+            self._case_benchmark_versions_and_unmatched_aliases_remain_distinct,
+        )
+
+    def test_ledger_snapshot_and_quota_accounting(self):
+        self._run_cases(
+            self._case_readonly_gtt_snapshot_excludes_raw_data,
+            self._case_absent_ledger_is_unknown,
+            self._case_wrong_account_quota_does_not_block_route,
+            self._case_exhausted_fresh_quota_blocks_and_unknown_is_not_zero,
+        )
+
+    def test_route_ranking_constraints(self):
+        self._run_cases(
+            self._case_provider_auth_circuit_blocks_sibling_models,
+            self._case_deadline_rejects_slow_high_quality_route,
+            self._case_web_requirement_never_falls_back_to_text_only,
+        )
+
+    def test_web_guard_and_url_policy(self):
+        self._run_cases(
+            self._case_guard_denies_shell_writes_agents_and_private_urls,
+            self._case_web_tool_budget_blocks_more_fetches,
+            self._case_url_control_characters_are_not_public_urls,
+        )
+
+    def test_web_cache_and_excerpt_controls(self):
+        self._run_cases(
+            self._case_only_this_successful_web_cache_can_be_read,
+            self._case_derived_excerpt_is_allowed_but_original_whole_page_is_not,
+            self._case_excerpt_preserves_focus_with_a_bounded_output,
+        )
+
+    def test_output_validation_and_error_classification(self):
+        self._run_cases(
+            self._case_urls_in_model_text_are_not_web_evidence,
+            self._case_output_contract_rejects_partial_and_non_json_reports,
+            self._case_error_taxonomy_scopes_auth_and_rate_limits,
+            self._case_classification_flags_reasoning_level_contract_breaks,
+        )
+
+    def test_async_failover_and_capacity_overflow(self):
+        self._run_cases(
+            self._case_async_submit_and_provider_failover,
+            self._case_capacity_overflow_uses_other_external_source_before_codex,
+            self._case_no_fallback_when_pinned_route_is_unavailable,
+        )
+
+    def test_codex_claims_dedup_and_restart_recovery(self):
+        self._run_cases(
+            self._case_codex_work_claim_avoids_duplicate_external_generation,
+            self._case_duplicate_work_key_reuses_job,
+            self._case_restart_marks_pending_work_interrupted_without_replaying,
+            self._case_codex_claim_lease_expires,
+        )
+
+    def test_codex_handoff_lifecycle_and_budgeting(self):
+        self._run_cases(
+            self._case_full_external_capacity_returns_explicit_luna_handoff,
+            self._case_cancelled_handoff_cannot_be_completed,
+            self._case_codex_handoff_usage_is_accounted,
+            self._case_caller_handoff_over_budget_is_visible,
+        )
+
+    def test_cancellation_and_handoff_races(self):
+        self._run_cases(
+            self._case_cancel_stops_running_attempt_and_prevents_fallback,
+            self._case_cancel_wins_while_handoff_validation_is_in_progress,
+            self._case_handoff_does_not_reuse_verifier_that_saw_only_one_report,
+        )
+
+    def test_fanout_and_shared_budgets(self):
+        self._run_cases(
+            self._case_fanout_collects_early_then_crosschecks,
+            self._case_attempt_budget_is_shared_across_workers,
+            self._case_token_reservations_prevent_parallel_budget_overcommit,
+            self._case_verifier_reports_are_included_in_reservation,
+        )
+
+    def test_usage_metering_and_cost_gating(self):
+        self._run_cases(
+            self._case_missing_usage_is_charged_as_estimate,
+            self._case_truncated_generation_usage_is_not_lost,
+            self._case_invalid_reported_token_types_are_not_zero,
+            self._case_observed_token_cost_gates_future_requests,
+        )
+
+    def test_adapters_native_slots_and_feedback(self):
+        self._run_cases(
+            self._case_generic_adapter_is_a_real_no_shell_process_protocol,
+            self._case_feedback_is_idempotent_and_can_be_corrected,
+            self._case_stable_native_slot_resets_prior_task_audits,
+            self._case_zcode_retries_once_with_the_default_reasoning_level,
+        )
+
+    def test_health_demotion_decay_and_snapshot(self):
+        self._run_cases(
+            self._case_repeated_failures_demote_the_route,
+            self._case_old_failures_decay_instead_of_permanent_suppression,
+            self._case_health_map_is_one_snapshot_matching_per_key_reads,
+            self._case_one_provider_auth_failure_does_not_demote_entire_software,
+            self._case_repeated_bridge_failures_demote_software_source,
+        )
+
+    def test_recovery_probe_outcomes_and_backoff(self):
+        self._run_cases(
+            self._case_successful_generation_probe_restores_availability_only,
+            self._case_failed_recovery_probe_backs_off,
+            self._case_model_list_or_wrong_probe_answer_does_not_restore_route,
+        )
+
+    def test_recovery_capacity_and_budget_gates(self):
+        self._run_cases(
+            self._case_recovery_yields_to_foreground_capacity,
+            self._case_recovery_honors_hourly_request_budget,
+            self._case_cancelled_recovery_is_counted_but_not_demoted,
+            self._case_disabled_source_capacity_is_not_bypassed_by_probe,
+        )
+
+    def test_manual_recheck_controls(self):
+        self._run_cases(
+            self._case_manual_recheck_is_not_limited_by_the_hourly_probe_budget,
+            self._case_manual_recheck_applies_the_node_effort_override,
+            self._case_failed_check_returns_the_bounded_provider_message,
+        )
+
+    def test_effort_validation_and_presets(self):
+        self._run_cases(
+            self._case_graph_requires_node_effort_before_production,
+            self._case_effort_presets_are_a_bounded_deduped_list,
+        )
+
+    def test_permanent_pool_expiry_semantics(self):
+        self._run_cases(
+            self._case_validate_accepts_permanent_pool_expiry,
+            self._case_permanent_pool_entry_never_expires_in_route_reason,
+            self._case_permanent_pool_does_not_block_directed_dispatch_gate,
+        )
+
+    def test_workflow_templates_and_cache(self):
+        self._run_cases(
+            self._case_templates_payload_is_stamped_not_reparsed,
+            self._case_workflow_templates_differentiate_budgets_within_limits,
+        )
+
+    def _case_task_rejects_credentials_and_unbounded_context(self):
         for text in ["Bearer " + "abc123" * 10, "sk-" + "x" * 32, "-----BEGIN PRIVATE KEY-----"]:
             with self.assertRaises(ValueError):
                 Task.parse({"kind": "code_review", "prompt": text})
         with self.assertRaises(ValueError):
             Task.parse({"kind": "research", "prompt": "x" * 64001})
 
-    def test_fanout_defaults_to_discrepancy_verifier(self):
+    def _case_fanout_defaults_to_discrepancy_verifier(self):
         self.assertTrue(Task.parse({"kind": "research", "prompt": "bounded", "fanout": 2}).verify)
 
-    def test_mutating_task_kinds_are_not_supported(self):
+    def _case_mutating_task_kinds_are_not_supported(self):
         for kind in ["implementation", "deploy", "shell", "merge"]:
             with self.assertRaises(ValueError):
                 Task.parse({"kind": kind, "prompt": "bounded"})
 
-    def test_public_route_does_not_export_runtime_credentials(self):
+    def _case_public_route_does_not_export_runtime_credentials(self):
         r = route()
         r.runtime = {"apiKey": "very-private", "provider_config": "credential-file"}
         self.assertNotIn("very-private", json.dumps(r.public()))
         self.assertNotIn("credential-file", json.dumps(r.public()))
 
-    def test_static_catalog_preserves_disabled_providers(self):
+    def _case_static_catalog_preserves_disabled_providers(self):
         path = self.root / "providers.json"
         path.write_text(json.dumps({"config": {"providerConfigRules": {"providerRules": [
             {"providerId": "off", "enabled": False, "config": {"access": {"type": "api-key", "apiKey": "secret"}, "personalModelIds": ["m"]}},
@@ -114,7 +279,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual([(r.provider, r.effort) for r in routes], [("on", "max")])
         self.assertNotIn("secret", json.dumps([r.public() for r in routes]))
 
-    def test_readonly_gtt_snapshot_excludes_raw_data(self):
+    def _case_readonly_gtt_snapshot_excludes_raw_data(self):
         db = self.root / "ledger.sqlite"
         with sqlite3.connect(db) as c:
             c.executescript("CREATE TABLE usage_events(app,provider_id,model,ts_start,duration_ms,ttft_ms);"
@@ -130,17 +295,17 @@ class RouterTests(unittest.TestCase):
         self.assertNotIn("credential-bearing-raw", json.dumps(s))
         self.assertEqual(hashlib.sha256(db.read_bytes()).digest(), before)
 
-    def test_absent_ledger_is_unknown(self):
+    def _case_absent_ledger_is_unknown(self):
         self.assertFalse(snapshot(self.root / "missing.db")["available"])
         self.assertFalse(quota_for(route(), {"quotas": []})["known"])
 
-    def test_wrong_account_quota_does_not_block_route(self):
+    def _case_wrong_account_quota_does_not_block_route(self):
         r = route()
         r.quota_app = "zcode"
         ledger = {"quotas": [{"app": "zcode", "account_key": account_key("other-account"), "remaining_percent": 0}]}
         self.assertFalse(quota_for(r, ledger)["known"])
 
-    def test_exhausted_fresh_quota_blocks_and_unknown_is_not_zero(self):
+    def _case_exhausted_fresh_quota_blocks_and_unknown_is_not_zero(self):
         r = route()
         r.quota_app = "zcode"
         task = Task("code_review", "bounded")
@@ -149,13 +314,13 @@ class RouterTests(unittest.TestCase):
         self.assertIn("fresh_quota_exhausted", rejected[0]["reasons"])
         self.assertTrue(rank_routes(task, [r], {"quotas": []}, self.store)[0])
 
-    def test_provider_auth_circuit_blocks_sibling_models(self):
+    def _case_provider_auth_circuit_blocks_sibling_models(self):
         a, b, c = route(model="a"), route(model="b"), route(provider="other", model="c")
         self.store.failure("provider:" + a.failure_domain, "auth_failed", 60)
         candidates, _ = rank_routes(Task("code_review", "bounded"), [a, b, c], {"quotas": []}, self.store)
         self.assertEqual([c["route"].model for c in candidates], ["c"])
 
-    def test_benchmark_versions_and_unmatched_aliases_remain_distinct(self):
+    def _case_benchmark_versions_and_unmatched_aliases_remain_distinct(self):
         path = self.root / "bench.json"
         path.write_text(json.dumps({"schema_version": 1, "models": [{"aliases": ["exact-v1"], "intelligence": 41, "benchmark_version": "Terminal-Bench 4.0"}]}))
         profiles = load_profiles(path)
@@ -163,18 +328,18 @@ class RouterTests(unittest.TestCase):
         self.assertNotIn("exact-v2", profiles)
         self.assertEqual(profiles["exact-v1"]["benchmark_version"], "Terminal-Bench 4.0")
 
-    def test_deadline_rejects_slow_high_quality_route(self):
+    def _case_deadline_rejects_slow_high_quality_route(self):
         fast, slow = route(model="fast", latency=1), route(model="slow", quality=90, latency=200)
         candidates, rejected = rank_routes(Task("logic_check", "bounded", deadline_s=10, timeout_mode="hard"), [slow, fast], {"quotas": []}, self.store)
         self.assertEqual(candidates[0]["route"].model, "fast")
         self.assertIn("unlikely_to_meet_deadline", rejected[0]["reasons"])
 
-    def test_web_requirement_never_falls_back_to_text_only(self):
+    def _case_web_requirement_never_falls_back_to_text_only(self):
         candidates, rejected = rank_routes(Task("research", "bounded", needs_web=True), [route()], {"quotas": []}, self.store)
         self.assertFalse(candidates)
         self.assertIn("web_not_supported", rejected[0]["reasons"])
 
-    def test_guard_denies_shell_writes_agents_and_private_urls(self):
+    def _case_guard_denies_shell_writes_agents_and_private_urls(self):
         for tool in ["run_command", "write_to_file", "invoke_subagent", "call_mcp_tool", "view_file"]:
             self.assertEqual(decide({"toolCall": {"name": tool, "args": {}}}, True)[0], "deny")
         for url in ["file:///secret", "http://127.0.0.1/test", "http://192.168.1.2/test", "https://localhost/test", "https://user:password@example.com/test"]:
@@ -182,7 +347,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(decide({"toolCall": {"name": "read_url_content", "args": {"Url": "https://example.com/doc"}}}, True)[0], "allow")
         self.assertEqual(decide({"toolCall": {"name": "search_web", "args": {"query": "public docs"}}}, False)[0], "deny")
 
-    def test_urls_in_model_text_are_not_web_evidence(self):
+    def _case_urls_in_model_text_are_not_web_evidence(self):
         body = content()
         body["sources"] = [{"url": "https://example.com/doc", "title": "doc", "claim": "a"}]
         with self.assertRaises(WorkerFailure):
@@ -190,17 +355,17 @@ class RouterTests(unittest.TestCase):
         verified = validate_result({"text": json.dumps(body), "observed_urls": ["https://example.com/doc/"]}, True)
         self.assertTrue(verified["content"]["sources"][0]["verified_by_tool"])
 
-    def test_output_contract_rejects_partial_and_non_json_reports(self):
+    def _case_output_contract_rejects_partial_and_non_json_reports(self):
         for text in ["helpful prose", json.dumps({**content(), "complete": False}), json.dumps({"summary": "x", "complete": True})]:
             with self.assertRaises(WorkerFailure):
                 validate_result({"text": text}, False)
 
-    def test_error_taxonomy_scopes_auth_and_rate_limits(self):
+    def _case_error_taxonomy_scopes_auth_and_rate_limits(self):
         self.assertEqual(classify_error({"data": {"code": "provider_not_configured"}}).scope, "provider")
         self.assertEqual(classify_error("HTTP 429").code, "rate_limited")
         self.assertEqual(classify_error("model_not_found").scope, "route")
 
-    def test_async_submit_and_provider_failover(self):
+    def _case_async_submit_and_provider_failover(self):
         first, sibling, fallback = route(model="bad", quality=50), route(model="sibling", quality=49), route(source="other", provider="other", model="good")
         calls = []
         def adapter(r, prompt, task, ctx):
@@ -217,7 +382,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(calls, ["bad", "good"])
         self.assertEqual(len(result["attempts"]), 2)
 
-    def test_capacity_overflow_uses_other_external_source_before_codex(self):
+    def _case_capacity_overflow_uses_other_external_source_before_codex(self):
         entered, release = threading.Event(), threading.Event()
         def adapter(r, prompt, task, ctx):
             if r.source == "preferred":
@@ -236,7 +401,7 @@ class RouterTests(unittest.TestCase):
         release.set()
         self.wait(service, first["job_id"])
 
-    def test_full_external_capacity_returns_explicit_luna_handoff(self):
+    def _case_full_external_capacity_returns_explicit_luna_handoff(self):
         entered, release = threading.Event(), threading.Event()
         def adapter(r, prompt, task, ctx):
             entered.set()
@@ -255,7 +420,7 @@ class RouterTests(unittest.TestCase):
         release.set()
         self.wait(service, first["job_id"])
 
-    def test_codex_work_claim_avoids_duplicate_external_generation(self):
+    def _case_codex_work_claim_avoids_duplicate_external_generation(self):
         calls = []
         service = self.service([route()], lambda *args: calls.append(1) or response())
         service.sync_codex_agents("root", [{"id": "local-agent", "model": "gpt-6-luna", "workflow_id": "workflow", "work_key": "path:review", "status": "running"}])
@@ -266,7 +431,7 @@ class RouterTests(unittest.TestCase):
         job = service.submit({"kind": "code_review", "prompt": "bounded", "workflow_id": "workflow", "work_key": "path:implementation"})
         self.assertEqual(self.wait(service, job["job_id"])["state"], "succeeded")
 
-    def test_cancel_stops_running_attempt_and_prevents_fallback(self):
+    def _case_cancel_stops_running_attempt_and_prevents_fallback(self):
         entered = threading.Event()
         def adapter(r, prompt, task, ctx):
             entered.set()
@@ -282,7 +447,7 @@ class RouterTests(unittest.TestCase):
         self.assertFalse(any(r.get("codex_fallback") for r in result["results"]))
         self.assertEqual(service.total_inflight, 0)
 
-    def test_fanout_collects_early_then_crosschecks(self):
+    def _case_fanout_collects_early_then_crosschecks(self):
         r = route()
         r.max_parallel = 2
         def adapter(route, prompt, task, ctx):
@@ -298,7 +463,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(len(result["results"]), 3)
         self.assertTrue(result["results"][-1]["verifier"])
 
-    def test_attempt_budget_is_shared_across_workers(self):
+    def _case_attempt_budget_is_shared_across_workers(self):
         r = route()
         r.max_parallel = 2
         service = self.service([r, route(provider="q", model="q")], lambda *a: (_ for _ in ()).throw(WorkerFailure("temporary")))
@@ -306,7 +471,7 @@ class RouterTests(unittest.TestCase):
         result = self.wait(service, job["job_id"])
         self.assertLessEqual(result["attempt_count"], 2)
 
-    def test_token_reservations_prevent_parallel_budget_overcommit(self):
+    def _case_token_reservations_prevent_parallel_budget_overcommit(self):
         r = route()
         r.max_parallel = 2
         entered, release = threading.Event(), threading.Event()
@@ -335,14 +500,14 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(result["attempt_count"], 1)
         self.assertEqual(result["tokens_reserved"], 0)
 
-    def test_duplicate_work_key_reuses_job(self):
+    def _case_duplicate_work_key_reuses_job(self):
         service = self.service([route()], lambda *a: (time.sleep(.1), response())[1])
         task = {"kind": "extract", "prompt": "bounded", "work_key": "lookup:contract"}
         one, two = service.submit(task), service.submit(task)
         self.assertEqual(one["job_id"], two["job_id"])
         self.assertTrue(two["deduplicated"])
 
-    def test_restart_marks_pending_work_interrupted_without_replaying(self):
+    def _case_restart_marks_pending_work_interrupted_without_replaying(self):
         path = self.root / "recover.sqlite"
         s = StateStore(path)
         task = Task("extract", "bounded")
@@ -352,7 +517,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(s.job("pending")["state"], "interrupted")
         s.close()
 
-    def test_generic_adapter_is_a_real_no_shell_process_protocol(self):
+    def _case_generic_adapter_is_a_real_no_shell_process_protocol(self):
         fixture = Path(__file__).with_name("worker_fixture.py")
         r = route(model="fixture-model")
         r.runtime = {"command": [sys.executable, str(fixture)]}
@@ -361,7 +526,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(result["actual_selection"]["model"], "fixture-model")
         self.assertEqual(validate_result(result, False)["content"]["summary"], "fixture response")
 
-    def test_missing_usage_is_charged_as_estimate(self):
+    def _case_missing_usage_is_charged_as_estimate(self):
         service = self.service([route()], lambda *a: {"text": json.dumps(content()), "usage": {}, "observed_urls": []})
         job = service.submit({"kind": "extract", "prompt": "bounded", "max_output_tokens": 2048})
         result = self.wait(service, job["job_id"])
@@ -369,7 +534,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(result["tokens_used"], result["tokens_estimated"])
         self.assertEqual(result["attempts"][0]["token_measurement"], "estimated")
 
-    def test_verifier_reports_are_included_in_reservation(self):
+    def _case_verifier_reports_are_included_in_reservation(self):
         r = route()
         r.max_parallel = 2
         def adapter(route, prompt, task, ctx):
@@ -382,14 +547,14 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(result["attempt_count"], 2)
         self.assertEqual(result["results"][-1]["error"]["code"], "token_budget_exhausted")
 
-    def test_no_fallback_when_pinned_route_is_unavailable(self):
+    def _case_no_fallback_when_pinned_route_is_unavailable(self):
         service = self.service([route()], lambda *a: response())
         job = service.submit({"kind": "extract", "prompt": "bounded", "preferred_route": "missing", "allow_fallback": False})
         result = self.wait(service, job["job_id"])
         self.assertEqual(result["state"], "failed")
         self.assertFalse(result["results"][0].get("codex_fallback"))
 
-    def test_cancelled_handoff_cannot_be_completed(self):
+    def _case_cancelled_handoff_cannot_be_completed(self):
         service = self.service([], lambda *a: response())
         job = service.submit({"kind": "extract", "prompt": "bounded"})
         self.assertEqual(self.wait(service, job["job_id"])["state"], "needs_codex")
@@ -398,14 +563,14 @@ class RouterTests(unittest.TestCase):
             service.complete_codex(job["job_id"], 0, "gpt-6-luna", content(), {"total_tokens": 100})
         self.assertEqual(service.status(job["job_id"])["state"], "cancelled")
 
-    def test_codex_handoff_usage_is_accounted(self):
+    def _case_codex_handoff_usage_is_accounted(self):
         service = self.service([], lambda *a: response())
         job = service.submit({"kind": "extract", "prompt": "bounded"})
         self.wait(service, job["job_id"])
         service.complete_codex(job["job_id"], 0, "gpt-6-luna", content(), {"total_tokens": 234})
         self.assertEqual(service.store.job(job["job_id"])["tokens_used"], 234)
 
-    def test_caller_handoff_over_budget_is_visible(self):
+    def _case_caller_handoff_over_budget_is_visible(self):
         service = self.service([], lambda *a: response())
         job = service.submit({"kind": "extract", "prompt": "bounded", "token_budget": 12000})
         self.wait(service, job["job_id"])
@@ -413,7 +578,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(result["state"], "partial")
         self.assertEqual(result["error"]["code"], "caller_handoff_exceeded_token_budget")
 
-    def test_only_this_successful_web_cache_can_be_read(self):
+    def _case_only_this_successful_web_cache_can_be_read(self):
         cache = self.root / "content.md"
         other = self.root / "credentials.json"
         audit = self.root / "audit.jsonl"
@@ -421,14 +586,14 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(decide({"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(cache), "StartLine": 1, "EndLine": 100}}}, True, audit)[0], "allow")
         self.assertEqual(decide({"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(other)}}}, True, audit)[0], "deny")
 
-    def test_codex_claim_lease_expires(self):
+    def _case_codex_claim_lease_expires(self):
         service = self.service([route()], lambda *a: response())
         service.sync_codex_agents("root", [{"id": "agent", "workflow_id": "w", "work_key": "k", "status": "running"}])
         service.codex_agents["root"]["expires_at"] = now_ms() - 1
         job = service.submit({"kind": "extract", "prompt": "bounded", "workflow_id": "w", "work_key": "k"})
         self.assertEqual(self.wait(service, job["job_id"])["state"], "succeeded")
 
-    def test_truncated_generation_usage_is_not_lost(self):
+    def _case_truncated_generation_usage_is_not_lost(self):
         def adapter(*a):
             raise WorkerFailure("output_truncated", usage={"totalTokens": 2048}, retry_after_s=0)
         service = self.service([route()], adapter, allow_codex_fallback=False)
@@ -436,7 +601,7 @@ class RouterTests(unittest.TestCase):
         result = self.wait(service, job["job_id"])
         self.assertEqual(result["tokens_used"], 2048)
 
-    def test_cancel_wins_while_handoff_validation_is_in_progress(self):
+    def _case_cancel_wins_while_handoff_validation_is_in_progress(self):
         service = self.service([], lambda *a: response())
         job = service.submit({"kind": "extract", "prompt": "bounded"})
         self.wait(service, job["job_id"])
@@ -462,7 +627,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(outcomes, ["rejected"])
         self.assertEqual(service.status(job["job_id"])["state"], "cancelled")
 
-    def test_handoff_does_not_reuse_verifier_that_saw_only_one_report(self):
+    def _case_handoff_does_not_reuse_verifier_that_saw_only_one_report(self):
         entered, release = threading.Event(), threading.Event()
         def adapter(r, prompt, task, ctx):
             entered.set()
@@ -481,7 +646,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(completed["state"], "needs_codex")
         self.assertTrue(completed["results"][-1]["verifier"])
 
-    def test_invalid_reported_token_types_are_not_zero(self):
+    def _case_invalid_reported_token_types_are_not_zero(self):
         for invalid in [False, -1, float("nan"), "100"]:
             service = self.service([route()], lambda *a, value=invalid: {"text": json.dumps(content()), "usage": {"total_tokens": value}, "native_usage": {"total": value}, "observed_urls": []})
             job = service.submit({"kind": "extract", "prompt": "bounded"})
@@ -489,7 +654,7 @@ class RouterTests(unittest.TestCase):
             self.assertGreater(result["tokens_estimated"], 0)
             json.dumps(result, allow_nan=False)
 
-    def test_feedback_is_idempotent_and_can_be_corrected(self):
+    def _case_feedback_is_idempotent_and_can_be_corrected(self):
         service = self.service([route()], lambda *a: response())
         job = service.submit({"kind": "extract", "prompt": "bounded"})
         self.wait(service, job["job_id"])
@@ -499,20 +664,20 @@ class RouterTests(unittest.TestCase):
         corrected = service.feedback(job["job_id"], 0, False)
         self.assertEqual(corrected, {"samples": 1, "acceptance": 0.0})
 
-    def test_logical_tasks_have_a_quality_floor_by_default(self):
+    def _case_logical_tasks_have_a_quality_floor_by_default(self):
         task = Task.parse({"kind": "code_review", "prompt": "bounded"})
         self.assertEqual(task.min_quality, 38)
         candidates, rejected = rank_routes(task, [route(quality=20)], {"quotas": []}, self.store)
         self.assertFalse(candidates)
         self.assertIn("quality_floor_not_met", rejected[0]["reasons"])
 
-    def test_web_tool_budget_blocks_more_fetches(self):
+    def _case_web_tool_budget_blocks_more_fetches(self):
         audit = self.root / "audit.jsonl"
         audit.write_text("\n".join(json.dumps({"phase": "pre", "decision": "allow", "tool": "search_web"}) for _ in range(4)) + "\n")
         (self.root / "web-policy.json").write_text(json.dumps({"web_tool_budget": 4}))
         self.assertEqual(decide({"toolCall": {"name": "search_web", "args": {}}}, True, audit)[0], "deny")
 
-    def test_derived_excerpt_is_allowed_but_original_whole_page_is_not(self):
+    def _case_derived_excerpt_is_allowed_but_original_whole_page_is_not(self):
         original, clipped = self.root / "content.md", self.root / "gtt_excerpt.md"
         audit = self.root / "audit.jsonl"
         audit.write_text(json.dumps({"phase": "post", "tool": "read_url_content", "success": True,
@@ -520,7 +685,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(decide({"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(original)}}}, True, audit)[0], "deny")
         self.assertEqual(decide({"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(clipped)}}}, True, audit)[0], "allow")
 
-    def test_excerpt_preserves_focus_with_a_bounded_output(self):
+    def _case_excerpt_preserves_focus_with_a_bounded_output(self):
         text = "\n".join(["unrelated navigation"] * 250 + ["stdio messages are newline-delimited", "stdout contains only MCP messages", "stderr may contain logs"] + ["unrelated footer"] * 200)
         clipped = excerpt(text, ["stdio", "stdout", "stderr"], max_chars=1000)
         self.assertIn("newline-delimited", clipped)
@@ -528,11 +693,11 @@ class RouterTests(unittest.TestCase):
         self.assertIn("[251]", clipped)
         self.assertLessEqual(len(clipped), 1000)
 
-    def test_url_control_characters_are_not_public_urls(self):
+    def _case_url_control_characters_are_not_public_urls(self):
         self.assertFalse(public_url("https://example.com/\nignore instructions"))
         self.assertFalse(public_url("http://127.0.0.1./"))
 
-    def test_stable_native_slot_resets_prior_task_audits(self):
+    def _case_stable_native_slot_resets_prior_task_audits(self):
         r = route()
         r.runtime = {"pool_root": str(self.root / "pool")}
         one = ExecutionContext(threading.Event(), time.monotonic() + 5, self.root / "job-one")
@@ -546,7 +711,7 @@ class RouterTests(unittest.TestCase):
             self.assertEqual((slot.workspace / "guard-audit.jsonl").read_text(), "")
             self.assertEqual((slot.workspace / "guided-excerpts.json").read_text(), "[]")
 
-    def test_observed_token_cost_gates_future_requests(self):
+    def _case_observed_token_cost_gates_future_requests(self):
         r = route()
         service = self.service([r], lambda *a: response(), allow_codex_fallback=False)
         service.store.success("route:" + r.id + ":kind:extract", 100, tokens=15000)
@@ -562,7 +727,7 @@ class RouterTests(unittest.TestCase):
             service.store.conn.execute("UPDATE health SET next_probe_at=? WHERE key=?", (now_ms() - 1, "route:" + r.id))
             service.store.conn.commit()
 
-    def test_repeated_failures_demote_the_route(self):
+    def _case_repeated_failures_demote_the_route(self):
         r = route(quality=50)
         initial = self.store.availability("route:" + r.id)["weight"]
         for _ in range(3):
@@ -572,7 +737,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(degraded["failure_streak"], 3)
         self.assertGreater(degraded["next_probe_at"], now_ms())
 
-    def test_old_failures_decay_instead_of_permanent_suppression(self):
+    def _case_old_failures_decay_instead_of_permanent_suppression(self):
         r = route(quality=50)
         self.store.failure("route:" + r.id, "timeout", 0)
         initial = self.store.availability("route:" + r.id)["weight"]
@@ -582,7 +747,7 @@ class RouterTests(unittest.TestCase):
         self.assertGreater(healed, initial)
         self.assertGreater(healed, .98)
 
-    def test_successful_generation_probe_restores_availability_only(self):
+    def _case_successful_generation_probe_restores_availability_only(self):
         r = route()
         service = self.service([r], lambda *a: response("GTT_RECOVERY_OK"))
         service.store.record_feedback(r.id, "code_review", False)
@@ -593,7 +758,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(service.store.availability("route:" + r.id)["weight"], 1)
         self.assertEqual(service.store.quality(r.id, "code_review")["acceptance"], 0)
 
-    def test_failed_recovery_probe_backs_off(self):
+    def _case_failed_recovery_probe_backs_off(self):
         r = route()
         def adapter(*a):
             raise WorkerFailure("auth_failed", scope="provider", retry_after_s=0)
@@ -606,7 +771,7 @@ class RouterTests(unittest.TestCase):
         second = service.recovery.tick()
         self.assertEqual(second["retry_after_s"], 4)
 
-    def test_recovery_yields_to_foreground_capacity(self):
+    def _case_recovery_yields_to_foreground_capacity(self):
         r = route()
         service = self.service([r], lambda *a: response("GTT_RECOVERY_OK"))
         self.make_due(service, r)
@@ -614,7 +779,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(service.recovery.tick()["reason"], "foreground_busy")
         service.total_inflight = 0
 
-    def test_recovery_honors_hourly_request_budget(self):
+    def _case_recovery_honors_hourly_request_budget(self):
         r = route()
         service = self.service([r], lambda *a: response("GTT_RECOVERY_OK"))
         service.recovery.settings["max_probes_per_hour"] = 1
@@ -622,7 +787,7 @@ class RouterTests(unittest.TestCase):
         self.make_due(service, r)
         self.assertEqual(service.recovery.tick()["reason"], "recovery_hourly_budget")
 
-    def test_manual_recheck_is_not_limited_by_the_hourly_probe_budget(self):
+    def _case_manual_recheck_is_not_limited_by_the_hourly_probe_budget(self):
         r = route()
         service = self.service([r], lambda *a: response("GTT_RECOVERY_OK"))
         service.recovery.settings["max_probes_per_hour"] = 1
@@ -636,7 +801,7 @@ class RouterTests(unittest.TestCase):
         self.assertTrue(result["checked"], result)
         self.assertTrue(result["success"], result)
 
-    def test_manual_recheck_applies_the_node_effort_override(self):
+    def _case_manual_recheck_applies_the_node_effort_override(self):
         r = route()
         seen = []
         def adapter(route_arg, *a):
@@ -651,7 +816,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(seen, ["high"])
         self.assertEqual(service.catalog.routes[0].effort, "")
 
-    def test_failed_check_returns_the_bounded_provider_message(self):
+    def _case_failed_check_returns_the_bounded_provider_message(self):
         r = route()
         def adapter(*a):
             raise WorkerFailure("provider_request_failed", retry_after_s=0,
@@ -664,7 +829,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(result["code"], "provider_request_failed")
         self.assertIn("no level for p/m", result["detail"])
 
-    def test_classification_flags_reasoning_level_contract_breaks(self):
+    def _case_classification_flags_reasoning_level_contract_breaks(self):
         failure = classify_error({"code": -32603, "data": {"name": "ModelProtocolError",
                                                            "message": "Reasoning level is required for p/m"}})
         self.assertEqual(failure.code, "reasoning_level_required")
@@ -676,7 +841,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(generic.code, "provider_request_failed")
         self.assertIn("Provider rejected", generic.details["provider_message"])
 
-    def test_zcode_retries_once_with_the_default_reasoning_level(self):
+    def _case_zcode_retries_once_with_the_default_reasoning_level(self):
         from gtt_router import adapters as adapters_module
         from gtt_router.models import Task as ModelTask
         r = Route(source="zcode", provider="p", model="m", effort="", adapter="zcode_rpc",
@@ -708,7 +873,7 @@ class RouterTests(unittest.TestCase):
         self.assertNotIn("options", sent[0])
         self.assertEqual(sent[1]["options"]["reasoningLevel"], adapters_module.ZCODE_DEFAULT_EFFORT)
 
-    def test_graph_requires_node_effort_before_production(self):
+    def _case_graph_requires_node_effort_before_production(self):
         from gtt_router.scheduling import graph
         node = {"id": "n1", "title": "n1", "route_id": "r", "node_type": "model", "x": 1, "y": 1,
                 "task": {"kind": "extract", "prompt": "bounded"}}
@@ -726,7 +891,7 @@ class RouterTests(unittest.TestCase):
         local = graph(copy.deepcopy(base) | {"nodes": [dict(node, node_type="output", route_id="", effort="")]})
         self.assertEqual(local["nodes"][0]["node_type"], "output")
 
-    def test_effort_presets_are_a_bounded_deduped_list(self):
+    def _case_effort_presets_are_a_bounded_deduped_list(self):
         from gtt_router.scheduling import validate
         settings = validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [],
                              "effort_presets": ["ultra", "ultra", "turbo"]})
@@ -738,7 +903,7 @@ class RouterTests(unittest.TestCase):
             validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [], "workflows": [],
                       "effort_presets": [f"level{i}" for i in range(17)]})
 
-    def test_health_map_is_one_snapshot_matching_per_key_reads(self):
+    def _case_health_map_is_one_snapshot_matching_per_key_reads(self):
         from gtt_router.store import default_health
         r = route()
         service = self.service([r], lambda *a: response())
@@ -756,13 +921,13 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(target["last_error"], "auth_failed")
         self.assertEqual(target["connectivity"], "verification_required")
 
-    def test_templates_payload_is_stamped_not_reparsed(self):
+    def _case_templates_payload_is_stamped_not_reparsed(self):
         from gtt_router.scheduling import templates_payload
         first = templates_payload()
         self.assertIs(templates_payload(), first, "an unchanged file must reuse the cached payload")
         self.assertIsInstance(first, list)
 
-    def test_model_list_or_wrong_probe_answer_does_not_restore_route(self):
+    def _case_model_list_or_wrong_probe_answer_does_not_restore_route(self):
         r = route()
         service = self.service([r], lambda *a: response("available models: m"))
         self.make_due(service, r)
@@ -770,21 +935,21 @@ class RouterTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertLess(service.store.availability("route:" + r.id)["weight"], 1)
 
-    def test_one_provider_auth_failure_does_not_demote_entire_software(self):
+    def _case_one_provider_auth_failure_does_not_demote_entire_software(self):
         r = route()
         service = self.service([r], lambda *a: response())
         service.record_failure(r, WorkerFailure("auth_failed", scope="provider"))
         self.assertLess(service.store.availability("provider:" + r.failure_domain)["weight"], 1)
         self.assertEqual(service.store.availability("source:" + r.source)["weight"], 1)
 
-    def test_repeated_bridge_failures_demote_software_source(self):
+    def _case_repeated_bridge_failures_demote_software_source(self):
         r = route()
         service = self.service([r], lambda *a: response())
         for _ in range(3):
             service.record_failure(r, WorkerFailure("adapter_error"))
         self.assertLess(service.store.availability("source:" + r.source)["weight"], .9)
 
-    def test_cancelled_recovery_is_counted_but_not_demoted(self):
+    def _case_cancelled_recovery_is_counted_but_not_demoted(self):
         r = route()
         entered = threading.Event()
         def adapter(route, prompt, task, ctx):
@@ -804,7 +969,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(service.store.health("route:" + r.id)["failure_streak"], 1)
         self.assertEqual(service.store.probe_budget(now_ms() - 3600000)["count"], 1)
 
-    def test_disabled_source_capacity_is_not_bypassed_by_probe(self):
+    def _case_disabled_source_capacity_is_not_bypassed_by_probe(self):
         r = route()
         service = self.service([r], lambda *a: response("GTT_RECOVERY_OK"))
         self.make_due(service, r)
@@ -812,7 +977,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(service.recovery.tick()["reason"], "no_due_route")
 
 
-    def test_validate_accepts_permanent_pool_expiry(self):
+    def _case_validate_accepts_permanent_pool_expiry(self):
         from gtt_router.scheduling import PERMANENT_POOL_EXPIRY, validate
         settings = validate({"enabled": True, "mode": "directed", "sources": {}, "pool": [
             {"route_id": "r", "expires_at": PERMANENT_POOL_EXPIRY, "tags": ["always"]}], "workflows": [], "effort_presets": []})
@@ -822,7 +987,7 @@ class RouterTests(unittest.TestCase):
             validate({"enabled": True, "mode": "auto", "sources": {}, "pool": [
                 {"route_id": "r", "expires_at": PERMANENT_POOL_EXPIRY + 1, "tags": []}], "workflows": [], "effort_presets": []})
 
-    def test_permanent_pool_entry_never_expires_in_route_reason(self):
+    def _case_permanent_pool_entry_never_expires_in_route_reason(self):
         from gtt_router.scheduling import PERMANENT_POOL_EXPIRY, route_reason, validate
         member = route()
         value = validate({"enabled": True, "mode": "directed", "sources": {}, "pool": [
@@ -833,7 +998,7 @@ class RouterTests(unittest.TestCase):
             {"route_id": member.id, "expires_at": 1, "tags": []}], "workflows": [], "effort_presets": []})
         self.assertEqual(route_reason(expired, member), "directed_pool_expired")
 
-    def test_permanent_pool_does_not_block_directed_dispatch_gate(self):
+    def _case_permanent_pool_does_not_block_directed_dispatch_gate(self):
         from gtt_router.controls import DispatchBlocked
         from gtt_router.scheduling import PERMANENT_POOL_EXPIRY
         member = route()
@@ -852,7 +1017,7 @@ class RouterTests(unittest.TestCase):
             service.require_scheduling()
         self.assertEqual(error.exception.code, "directed_pool_expired")
 
-    def test_workflow_templates_differentiate_budgets_within_limits(self):
+    def _case_workflow_templates_differentiate_budgets_within_limits(self):
         from gtt_router.profiles import ABS_LIMITS, DEFAULT_LIMITS
         from gtt_router.scheduling import graph
         templates = json.loads((Path(__file__).resolve().parents[1] / "workflow-templates.json").read_text(encoding="utf-8"))

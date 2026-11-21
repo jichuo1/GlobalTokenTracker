@@ -19,7 +19,48 @@ def report():
 
 
 class ReportProtocolTests(unittest.TestCase):
-    def test_redundant_leader_request_ids_preserve_exact_task_bindings(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_leader_decision_request_ids_and_feedback_normalization(self):
+        self._run_cases(
+            self._case_redundant_leader_request_ids_preserve_exact_task_bindings,
+            self._case_feedback_accepts_only_unambiguous_slot_spellings,
+            self._case_normalized_duplicate_feedback_cannot_vote_twice,
+        )
+
+    def test_report_envelope_normalization_and_web_evidence_gate(self):
+        self._run_cases(
+            self._case_common_complete_envelopes_are_normalized_without_changing_evidence,
+            self._case_web_evidence_gate_is_preserved_for_wrapped_json,
+        )
+
+    def test_report_json_rejection_and_required_fields(self):
+        self._run_cases(
+            self._case_truncated_json_and_ambiguous_or_multiple_documents_remain_failed,
+            self._case_duplicates_nonfinite_numbers_and_invalid_unicode_are_rejected,
+            self._case_completion_marker_and_required_fields_are_never_invented,
+        )
+
+    def test_contract_diagnostics_and_process_frame_bounds(self):
+        self._run_cases(
+            self._case_contract_diagnostics_have_no_model_content,
+            self._case_real_process_object_framing_and_bounded_large_frames,
+        )
+
+    def test_resident_contract_version_detection_and_dispatch(self):
+        self._run_cases(
+            self._case_old_resident_contract_is_detected_before_generation_or_planning,
+            self._case_current_contract_dispatch_and_old_readback_cleanup_remain_available,
+        )
+
+    def _case_redundant_leader_request_ids_preserve_exact_task_bindings(self):
         tasks = [{"role": "collector", "kind": "extract", "prompt": "Read supplied evidence", "information_request_ids": ["6:0"]},
                  {"role": "checker", "kind": "logic_check", "prompt": "Clarify missing question", "information_request_ids": ["12:1"]}]
         data = {"action": "continue_research", "information_request_ids": ["12:1", "6:0"], "next_tasks": tasks}
@@ -33,7 +74,7 @@ class ReportProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_leader_decision({"action": "submit_codex", "information_request_ids": []})
 
-    def test_common_complete_envelopes_are_normalized_without_changing_evidence(self):
+    def _case_common_complete_envelopes_are_normalized_without_changing_evidence(self):
         body = json.dumps(report())
         for text, shape in [(body, "json"), ("\ufeff" + body, "json"), ("```json\n" + body + "\n```", "json_fence"),
                             ("Report:\n```JSON\r\n" + body + "\r\n```\nDone.", "json_fence"),
@@ -43,7 +84,7 @@ class ReportProtocolTests(unittest.TestCase):
                 self.assertEqual(result["content"], report())
                 self.assertEqual(result["report_envelope"], shape)
 
-    def test_truncated_json_and_ambiguous_or_multiple_documents_remain_failed(self):
+    def _case_truncated_json_and_ambiguous_or_multiple_documents_remain_failed(self):
         body = json.dumps(report())
         for text in [body[:-1], body + body, body + " null", body + ' "second"', "[" + body + "]",
                      "```json\n" + body + "\n```\n```json\n" + body + "\n```",
@@ -51,14 +92,14 @@ class ReportProtocolTests(unittest.TestCase):
             with self.subTest(text=text[:45]), self.assertRaises(WorkerFailure):
                 validate_result({"text": text}, False)
 
-    def test_duplicates_nonfinite_numbers_and_invalid_unicode_are_rejected(self):
+    def _case_duplicates_nonfinite_numbers_and_invalid_unicode_are_rejected(self):
         for text in ['{"summary":"first","summary":"second"}', '{"summary":"x","extra":NaN}',
                      '{"summary":"x","extra":Infinity}', '{"summary":"x","extra":1e999}',
                      '{"summary":"x","extra":-1e999}', '{"summary":"\\ud800"}']:
             with self.subTest(text=text), self.assertRaises(ReportContractError):
                 parse_report(text)
 
-    def test_completion_marker_and_required_fields_are_never_invented(self):
+    def _case_completion_marker_and_required_fields_are_never_invented(self):
         for marker in [False, "true", 1, None]:
             with self.subTest(marker=marker), self.assertRaises(WorkerFailure) as failed:
                 validate_result({"text": json.dumps({**report(), "complete": marker})}, False)
@@ -68,7 +109,7 @@ class ReportProtocolTests(unittest.TestCase):
             with self.assertRaises(WorkerFailure):
                 validate_result({"text": json.dumps(body)}, False)
 
-    def test_web_evidence_gate_is_preserved_for_wrapped_json(self):
+    def _case_web_evidence_gate_is_preserved_for_wrapped_json(self):
         body = report()
         body["sources"] = [{"url": "https://example.com/page"}]
         text = "Report:\n```json\n" + json.dumps(body) + "\n```"
@@ -78,7 +119,7 @@ class ReportProtocolTests(unittest.TestCase):
         result = validate_result({"text": text, "observed_urls": ["https://example.com/page"]}, True)
         self.assertTrue(result["content"]["sources"][0]["verified_by_tool"])
 
-    def test_contract_diagnostics_have_no_model_content(self):
+    def _case_contract_diagnostics_have_no_model_content(self):
         with self.assertRaises(WorkerFailure) as failed:
             validate_result({"text": '{"summary":"private supplied content",'}, False)
         public = failed.exception.public()
@@ -88,7 +129,7 @@ class ReportProtocolTests(unittest.TestCase):
         malicious = WorkerFailure("invalid_output_contract", details={"contract_reason": "private-text", "report_chars": 20})
         self.assertNotIn("contract_reason", malicious.public()["details"])
 
-    def test_feedback_accepts_only_unambiguous_slot_spellings(self):
+    def _case_feedback_accepts_only_unambiguous_slot_spellings(self):
         for value in [1, 1.0, "1", "slot 1", " slot  1 "]:
             decision = parse_leader_decision({"action": "continue_research", "feedback": [
                 {"worker": value, "accepted": False, "reason": "unsupported claim"}]})
@@ -98,13 +139,13 @@ class ReportProtocolTests(unittest.TestCase):
                 parse_leader_decision({"action": "continue_research", "feedback": [
                     {"worker": value, "accepted": False, "reason": "unsupported claim"}]})
 
-    def test_normalized_duplicate_feedback_cannot_vote_twice(self):
+    def _case_normalized_duplicate_feedback_cannot_vote_twice(self):
         with self.assertRaises(ValueError):
             parse_leader_decision({"action": "continue_research", "feedback": [
                 {"worker": 1, "accepted": True, "reason": "supported"},
                 {"worker": "slot 1", "accepted": False, "reason": "conflicting vote"}]})
 
-    def test_real_process_object_framing_and_bounded_large_frames(self):
+    def _case_real_process_object_framing_and_bounded_large_frames(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for mode, maximum, expected in [("array", 2097152, "native_protocol_mismatch"),
@@ -126,7 +167,7 @@ class ReportProtocolTests(unittest.TestCase):
             self.assertEqual(context.protocol_frame_bytes(), 16777216)
             self.assertEqual(context.in_workspace(root / "slot").protocol_frame_bytes(), 16777216)
 
-    def test_old_resident_contract_is_detected_before_generation_or_planning(self):
+    def _case_old_resident_contract_is_detected_before_generation_or_planning(self):
         client = object.__new__(LocalClient)
         with patch.object(client, "_request", return_value={"service": "gtt-model-router"}) as request:
             for method in ("router_submit", "router_plan", "router_group_resume"):
@@ -134,7 +175,7 @@ class ReportProtocolTests(unittest.TestCase):
                     client.call(method, {})
             self.assertTrue(all(call.kwargs == {"timeout": 2} and call.args == () for call in request.call_args_list))
 
-    def test_current_contract_dispatch_and_old_readback_cleanup_remain_available(self):
+    def _case_current_contract_dispatch_and_old_readback_cleanup_remain_available(self):
         client = object.__new__(LocalClient)
         with patch.object(client, "_request", side_effect=[{"runtime_contract_version": RUNTIME_CONTRACT_VERSION}, {"job_id": "fixture"}]) as request:
             self.assertEqual(client.call("router_submit", {}), {"job_id": "fixture"})

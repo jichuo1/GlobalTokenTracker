@@ -60,7 +60,59 @@ class ControlsTests(unittest.TestCase):
     def usage_count(self, service):
         return service.store.conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0]
 
-    def test_switch_missing_legacy_and_strict_formats(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_switch_format_paths_and_config_reload(self):
+        self._run_cases(
+            self._case_switch_missing_legacy_and_strict_formats,
+            self._case_global_switch_cannot_be_bypassed_by_custom_ledger,
+            self._case_legacy_root_matches_native_when_current_directory_has_no_ledger,
+            self._case_production_gate_tracks_ledger_config_reload,
+        )
+
+    def test_switch_off_blocks_mcp_and_observations(self):
+        self._run_cases(
+            self._case_off_blocks_every_mcp_operation_and_reopen_restores_reads,
+            self._case_off_blocks_observation_and_sqlite_fallback,
+        )
+
+    def test_monitor_requirements_and_registration_validation(self):
+        self._run_cases(
+            self._case_monitor_is_required_for_both_submission_types,
+            self._case_worker_wrong_workflow_idle_finished_expired_are_not_supervisors,
+            self._case_registration_rejects_non_luna_or_missing_scope,
+            self._case_monitor_does_not_claim_worker_coverage_and_verifier_keeps_workflow,
+        )
+
+    def test_switch_and_monitor_dispatch_billing_boundaries(self):
+        self._run_cases(
+            self._case_expired_monitor_blocks_queued_call_without_billing,
+            self._case_switch_blocks_final_dispatch_after_reservation_without_charging,
+            self._case_switch_blocks_retry_but_retains_first_call_usage,
+            self._case_inflight_finishes_and_bills_once_after_switch_off,
+        )
+
+    def test_recovery_supervision_switch_and_capacity(self):
+        self._run_cases(
+            self._case_recovery_requires_monitor_and_switch,
+            self._case_recovery_revalidates_before_adapter_without_penalty,
+            self._case_monitor_uses_real_shared_capacity,
+        )
+
+    def test_mcp_schema_and_supervisor_status_visibility(self):
+        self._run_cases(
+            self._case_mcp_advertises_supervisor_role_and_recheck_workflow,
+            self._case_supervisor_status_shows_only_live_same_workflow_monitor,
+        )
+
+    def _case_switch_missing_legacy_and_strict_formats(self):
         require_interface([self.flag])
         self.assertFalse(self.flag.exists())
         self.flag.write_bytes(b'\xef\xbb\xbf{"schema_version":1,"enabled":true}')
@@ -74,7 +126,7 @@ class ControlsTests(unittest.TestCase):
                 with self.assertRaisesRegex(DispatchBlocked, "settings_invalid"):
                     require_interface([self.flag])
 
-    def test_global_switch_cannot_be_bypassed_by_custom_ledger(self):
+    def _case_global_switch_cannot_be_bypassed_by_custom_ledger(self):
         self.flag_value(False)
         custom = self.root / "custom" / "ledger.db"
         with patch.dict(os.environ, {"GTT_DATA_DIR": str(self.root)}):
@@ -84,7 +136,7 @@ class ControlsTests(unittest.TestCase):
         with self.assertRaisesRegex(DispatchBlocked, "external_interface_disabled"):
             require_interface(paths)
 
-    def test_legacy_root_matches_native_when_current_directory_has_no_ledger(self):
+    def _case_legacy_root_matches_native_when_current_directory_has_no_ledger(self):
         current, legacy = self.root / ".globaltokentracker", self.root / ".codeledger"
         current.mkdir()
         legacy.mkdir()
@@ -95,7 +147,7 @@ class ControlsTests(unittest.TestCase):
             (current / "ledger.db").touch()
             self.assertEqual(control_paths(config)[0], current.resolve() / self.flag.name)
 
-    def test_production_gate_tracks_ledger_config_reload(self):
+    def _case_production_gate_tracks_ledger_config_reload(self):
         old_ledger = self.root / "old" / "ledger.db"
         new_ledger = self.root / "new" / "ledger.db"
         new_ledger.parent.mkdir()
@@ -116,7 +168,7 @@ class ControlsTests(unittest.TestCase):
             with self.assertRaisesRegex(DispatchBlocked, "external_interface_disabled"):
                 service.require_external_interface()
 
-    def test_off_blocks_every_mcp_operation_and_reopen_restores_reads(self):
+    def _case_off_blocks_every_mcp_operation_and_reopen_restores_reads(self):
         service = self.service()
         self.flag_value(False)
         for tool in TOOLS:
@@ -127,7 +179,7 @@ class ControlsTests(unittest.TestCase):
         self.assertIn("routes", dispatch(service, "router_inventory", {}))
         self.assertEqual(self.usage_count(service), 0)
 
-    def test_off_blocks_observation_and_sqlite_fallback(self):
+    def _case_off_blocks_observation_and_sqlite_fallback(self):
         self.flag_value(False)
         config = {"ledger_path": str(self.root / "ledger.db"), "gtt_interface": {"allow_legacy_fallback": True}}
         with patch.dict(os.environ, {"GTT_DATA_DIR": str(self.root)}), \
@@ -138,7 +190,7 @@ class ControlsTests(unittest.TestCase):
         cli.assert_not_called()
         legacy.assert_not_called()
 
-    def test_monitor_is_required_for_both_submission_types(self):
+    def _case_monitor_is_required_for_both_submission_types(self):
         service = self.service()
         with self.assertRaisesRegex(DispatchBlocked, "luna_supervisor_required"):
             self.submit(service)
@@ -147,7 +199,7 @@ class ControlsTests(unittest.TestCase):
         self.assertFalse(service.jobs)
         self.assertFalse(service.groups.jobs)
 
-    def test_worker_wrong_workflow_idle_finished_expired_are_not_supervisors(self):
+    def _case_worker_wrong_workflow_idle_finished_expired_are_not_supervisors(self):
         service = self.service()
         for kwargs in [{"role": "worker"}, {"workflow_id": "other"}, {"status": "idle"}, {"status": "finished"}]:
             with self.subTest(kwargs=kwargs):
@@ -159,13 +211,13 @@ class ControlsTests(unittest.TestCase):
         with self.assertRaisesRegex(DispatchBlocked, "luna_supervisor_required"):
             self.submit(service)
 
-    def test_registration_rejects_non_luna_or_missing_scope(self):
+    def _case_registration_rejects_non_luna_or_missing_scope(self):
         service = self.service()
         for kwargs in [{"model": "gpt-6-sol"}, {"workflow_id": ""}, {"id": ""}, {"role": "observer"}]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 self.monitor(service, **kwargs)
 
-    def test_monitor_does_not_claim_worker_coverage_and_verifier_keeps_workflow(self):
+    def _case_monitor_does_not_claim_worker_coverage_and_verifier_keeps_workflow(self):
         service = self.service()
         self.monitor(service, "non-default", work_key="review")
         job = self.submit(service, workflow_id="non-default", work_key="review", verify=True, max_attempts=2)
@@ -173,7 +225,7 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(data["state"], "succeeded")
         self.assertEqual(len(data["attempts"]), 2)
 
-    def test_expired_monitor_blocks_queued_call_without_billing(self):
+    def _case_expired_monitor_blocks_queued_call_without_billing(self):
         entered = []
         service = self.service(lambda *a: entered.append(True) or response())
         self.monitor(service)
@@ -186,7 +238,7 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(data["tokens_used"], 0)
         self.assertEqual(self.usage_count(service), 0)
 
-    def test_switch_blocks_final_dispatch_after_reservation_without_charging(self):
+    def _case_switch_blocks_final_dispatch_after_reservation_without_charging(self):
         entered = []
         service = self.service(lambda *a: entered.append(True) or response())
         self.monitor(service)
@@ -205,7 +257,7 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(self.usage_count(service), 0)
         self.assertEqual(service.store.health("route:" + route().id)["failure_streak"], 0)
 
-    def test_switch_blocks_retry_but_retains_first_call_usage(self):
+    def _case_switch_blocks_retry_but_retains_first_call_usage(self):
         entered = []
         def fail(*a):
             entered.append(True)
@@ -219,7 +271,7 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(data["results"][0]["error"]["code"], "external_interface_disabled")
         self.assertNotIn("codex_fallback", data["results"][0])
 
-    def test_inflight_finishes_and_bills_once_after_switch_off(self):
+    def _case_inflight_finishes_and_bills_once_after_switch_off(self):
         entered, finish = threading.Event(), threading.Event()
         def adapter(*a):
             entered.set()
@@ -237,7 +289,7 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(len(data["attempts"]), 1)
         self.assertEqual(self.usage_count(service), 1)
 
-    def test_recovery_requires_monitor_and_switch(self):
+    def _case_recovery_requires_monitor_and_switch(self):
         service = self.service(lambda *a: response("GTT_RECOVERY_OK"))
         r = service.catalog.routes[0]
         self.assertEqual(service.recovery.recheck(r.id)["reason"], "luna_supervisor_required")
@@ -251,7 +303,7 @@ class ControlsTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(self.usage_count(service), 1)
 
-    def test_recovery_revalidates_before_adapter_without_penalty(self):
+    def _case_recovery_revalidates_before_adapter_without_penalty(self):
         entered = []
         service = self.service(lambda *a: entered.append(True) or response("GTT_RECOVERY_OK"))
         self.monitor(service)
@@ -267,7 +319,7 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(service.total_inflight, 0)
         self.assertEqual(service.store.health("route:" + route().id)["failure_streak"], 0)
 
-    def test_monitor_uses_real_shared_capacity(self):
+    def _case_monitor_uses_real_shared_capacity(self):
         service = self.service()
         self.monitor(service)
         service.limits["combined_parallel"] = 1
@@ -308,13 +360,13 @@ class ControlsTests(unittest.TestCase):
                     self.assertEqual(before, after)
                     self.assertEqual(job.state, "needs_codex")
 
-    def test_mcp_advertises_supervisor_role_and_recheck_workflow(self):
+    def _case_mcp_advertises_supervisor_role_and_recheck_workflow(self):
         schemas = {t["name"]: t["inputSchema"] for t in TOOLS}
         role = schemas["router_sync_codex_agents"]["properties"]["agents"]["items"]["properties"]["role"]
         self.assertEqual(role["enum"], ["worker", "supervisor"])
         self.assertIn("workflow_id", schemas["router_recheck"]["properties"])
 
-    def test_supervisor_status_shows_only_live_same_workflow_monitor(self):
+    def _case_supervisor_status_shows_only_live_same_workflow_monitor(self):
         service = self.service()
         self.monitor(service, "round")
         info = service.coordination.supervisor("status", "round")["supervision"]

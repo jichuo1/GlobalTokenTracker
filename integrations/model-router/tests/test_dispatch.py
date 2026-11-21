@@ -31,7 +31,50 @@ class DispatchTests(unittest.TestCase):
     def control(self, service, action, **params):
         return dispatch(service, "router_dispatch", {"action": action, **params})
 
-    def test_concurrent_retries_and_completed_retry_execute_once(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_intake_idempotency_legacy_forwarding_and_group_receipts(self):
+        self._run_cases(
+            self._case_concurrent_retries_and_completed_retry_execute_once,
+            self._case_all_legacy_submissions_forward_to_one_intake_and_mcp_hides_them,
+            self._case_group_uses_the_same_receipt_and_existing_shared_execution,
+        )
+
+    def test_workflow_admission_preflight_and_envelope_validation(self):
+        self._run_cases(
+            self._case_saved_workflow_is_resolved_once_and_requires_matching_revision,
+            self._case_permanently_incompatible_downstream_is_rejected_before_paid_upstream,
+            self._case_invalid_envelopes_and_pool_switch_do_not_create_admissions,
+        )
+
+    def test_management_controls_and_cancellation_during_admission(self):
+        self._run_cases(
+            self._case_management_can_reconcile_and_cancel_when_external_interface_is_off,
+            self._case_cancel_during_admission_does_not_wait_for_discovery,
+        )
+
+    def test_report_collection_pagination_and_branch_cursors(self):
+        self._run_cases(
+            self._case_large_report_is_lossless_and_bound_to_its_dispatch,
+            self._case_workflow_collection_preserves_parallel_branch_cursor_and_report_ownership,
+        )
+
+    def test_restart_durability_and_unknown_outcome_guards(self):
+        self._run_cases(
+            self._case_restart_retains_receipt_and_ambiguous_admission_never_replays,
+            self._case_task_unknown_outcome_requires_acknowledgement_for_a_new_identity,
+            self._case_persisted_interrupted_target_is_not_reported_running_after_restart,
+            self._case_request_identity_cannot_change_workflow_controls_or_escape_unknown_guard,
+        )
+
+    def _case_concurrent_retries_and_completed_retry_execute_once(self):
         calls = []
         def adapter(*args):
             calls.append(True)
@@ -48,7 +91,7 @@ class DispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "request_id_conflict"):
             self.control(service, "submit", request=self.request(prompt="different"), request_id="same")
 
-    def test_all_legacy_submissions_forward_to_one_intake_and_mcp_hides_them(self):
+    def _case_all_legacy_submissions_forward_to_one_intake_and_mcp_hides_them(self):
         service = self.service([fixtures.route()], lambda *a: fixtures.response())
         receipt = dispatch(service, "router_submit", {"task": self.request()["task"]})
         self.assertIn("dispatch_id", receipt)
@@ -60,7 +103,7 @@ class DispatchTests(unittest.TestCase):
         self.wait(service, receipt["job_id"])
         self.assertEqual(self.control(service, "list")["dispatches"][0]["job_id"], receipt["job_id"])
 
-    def test_saved_workflow_is_resolved_once_and_requires_matching_revision(self):
+    def _case_saved_workflow_is_resolved_once_and_requires_matching_revision(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: fixtures.response())
         prior = settings(service.store)
@@ -76,7 +119,7 @@ class DispatchTests(unittest.TestCase):
         # user has subsequently removed or changed the saved graph.
         self.assertEqual(self.control(service, "submit", request=request, request_id="saved")["run_id"], receipt["run_id"])
 
-    def test_permanently_incompatible_downstream_is_rejected_before_paid_upstream(self):
+    def _case_permanently_incompatible_downstream_is_rejected_before_paid_upstream(self):
         route = fixtures.route()
         route.profile["allowed_kinds"] = ["extract"]
         service = self.service([route], lambda *a: self.fail("preflight must prevent paid upstream"))
@@ -86,7 +129,7 @@ class DispatchTests(unittest.TestCase):
             self.control(service, "submit", request={"kind": "workflow", "definition": definition}, request_id="preflight")
         self.assertEqual(service.store.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
-    def test_management_can_reconcile_and_cancel_when_external_interface_is_off(self):
+    def _case_management_can_reconcile_and_cancel_when_external_interface_is_off(self):
         entered, release = threading.Event(), threading.Event()
         def adapter(*args):
             entered.set()
@@ -108,7 +151,7 @@ class DispatchTests(unittest.TestCase):
         release.set()
         self.wait(service, receipt["job_id"])
 
-    def test_large_report_is_lossless_and_bound_to_its_dispatch(self):
+    def _case_large_report_is_lossless_and_bound_to_its_dispatch(self):
         service = self.service([fixtures.route()], lambda *a: fixtures.response("测试证据" * 3000))
         receipt = self.control(service, "submit", request=self.request(), request_id="report")
         job = self.wait(service, receipt["job_id"])
@@ -129,7 +172,7 @@ class DispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown report"):
             self.control(service, "report", request_id="report", worker=99)
 
-    def test_workflow_collection_preserves_parallel_branch_cursor_and_report_ownership(self):
+    def _case_workflow_collection_preserves_parallel_branch_cursor_and_report_ownership(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: fixtures.response())
         receipt = self.control(service, "submit", request={"kind": "workflow", "definition": self.definition(route)}, request_id="dag")
@@ -149,7 +192,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(page["next_cursor"], 0)
         self.assertTrue(page["has_more"])
 
-    def test_restart_retains_receipt_and_ambiguous_admission_never_replays(self):
+    def _case_restart_retains_receipt_and_ambiguous_admission_never_replays(self):
         service = self.service([fixtures.route()], lambda *a: fixtures.response())
         original = service.submit
         def ambiguous(*args, **kwargs):
@@ -166,7 +209,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(again["job_id"], receipt["job_id"])
         self.assertTrue(again["deduplicated"])
 
-    def test_cancel_during_admission_does_not_wait_for_discovery(self):
+    def _case_cancel_during_admission_does_not_wait_for_discovery(self):
         service = self.service([fixtures.route()], lambda *a: fixtures.response())
         entered, release = threading.Event(), threading.Event()
         original = service.submit
@@ -187,7 +230,7 @@ class DispatchTests(unittest.TestCase):
         self.assertIsNone(receipt["target_id"])
         self.assertEqual(service.store.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
-    def test_task_unknown_outcome_requires_acknowledgement_for_a_new_identity(self):
+    def _case_task_unknown_outcome_requires_acknowledgement_for_a_new_identity(self):
         service = self.service([fixtures.route()], lambda *a: (_ for _ in ()).throw(WorkerFailure("timeout")))
         request = self.request(max_attempts=1, allowed_routes=[fixtures.route().id])
         first = self.control(service, "submit", request=request, request_id="task-first")
@@ -199,7 +242,7 @@ class DispatchTests(unittest.TestCase):
         self.assertNotEqual(acknowledged["dispatch_id"], first["dispatch_id"])
         self.wait(service, acknowledged["job_id"])
 
-    def test_persisted_interrupted_target_is_not_reported_running_after_restart(self):
+    def _case_persisted_interrupted_target_is_not_reported_running_after_restart(self):
         service = self.service([fixtures.route()], lambda *a: fixtures.response())
         first = self.control(service, "submit", request=self.request(), request_id="restart")
         self.wait(service, first["job_id"])
@@ -213,7 +256,7 @@ class DispatchTests(unittest.TestCase):
         status = self.control(restored, "status", request_id="restart")
         self.assertEqual(status["state"], "interrupted")
 
-    def test_group_uses_the_same_receipt_and_existing_shared_execution(self):
+    def _case_group_uses_the_same_receipt_and_existing_shared_execution(self):
         service = self.service([fixtures.route()], lambda *a: fixtures.response())
         request = {"kind": "group", "request": {"topic": "bounded fixture", "needs_web": False}}
         with patch.object(service.groups.pool, "submit"):
@@ -222,7 +265,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(receipt["detail"]["state"], "queued")
         self.control(service, "cancel", request_id="group")
 
-    def test_invalid_envelopes_and_pool_switch_do_not_create_admissions(self):
+    def _case_invalid_envelopes_and_pool_switch_do_not_create_admissions(self):
         service = self.service([fixtures.route()], lambda *a: self.fail("no generation"))
         for request in ({"kind": "unknown"}, {"kind": "task", "task": {}, "extra": True},
                         {"kind": "workflow", "saved_workflow_id": "missing"},
@@ -235,7 +278,7 @@ class DispatchTests(unittest.TestCase):
             self.control(service, "submit", request=self.request(), request_id="off")
         self.assertEqual(self.control(service, "list")["dispatches"], [])
 
-    def test_request_identity_cannot_change_workflow_controls_or_escape_unknown_guard(self):
+    def _case_request_identity_cannot_change_workflow_controls_or_escape_unknown_guard(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: (_ for _ in ()).throw(WorkerFailure("timeout", usage={"total_tokens": 12})))
         definition = self.definition(route, 1)

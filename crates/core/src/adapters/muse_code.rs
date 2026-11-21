@@ -421,7 +421,6 @@ mod tests {
         parse_at(&item(), lines, state)
     }
 
-    #[test]
     fn model_completed_is_normalized_and_mirrors_are_not_counted() {
         let usage = r#"{"input_tokens":40599,"output_tokens":514,"reasoning_tokens":300,"cache_read_tokens":40564,"cache_write_tokens":0,"cached_tokens":40564}"#;
         // The same call restated as goal attribution and as a whole-attempt
@@ -457,7 +456,6 @@ mod tests {
         assert_eq!(e.status.as_deref(), Some("tool_calls"));
     }
 
-    #[test]
     fn automated_review_calls_are_counted_with_object_model() {
         let review = format!(
             r#"{{"schema_version":1,"id":"r-env","stream":{{"kind":"session","id":"sess-1"}},"recorded_at":{US},"payload_type":"runtime.session","payload":{{"kind":"approval","event":{{"kind":"automated_review_completed","review_id":"rev-1","status":"approved","duration_ms":900,"ttft_ms":123,"completed_at_ms":1794975660035,"model":{{"provider_id":"meta","model_id":"muse-ember-1.0","reasoning_effort":"low"}},"usage":{{"input_tokens":42465,"cached_input_tokens":465,"non_cached_input_tokens":42000,"output_tokens":371,"reasoning_tokens":239,"total_tokens":42836}}}}}}}}"#
@@ -474,7 +472,6 @@ mod tests {
         assert_eq!(e.status.as_deref(), Some("approved"));
     }
 
-    #[test]
     fn dedup_fallbacks_state_chaining_and_half_lines() {
         let usage = r#"{"input_tokens":10,"output_tokens":2,"reasoning_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cached_tokens":0}"#;
         // No source id → the envelope record id keys the call.
@@ -501,7 +498,6 @@ mod tests {
         assert!(out.events.is_empty());
     }
 
-    #[test]
     fn subagent_log_without_metadata_inherits_parent_workspace() {
         let base = std::env::temp_dir().join(format!("gtt-muse-code-test-{}", std::process::id()));
         let child_dir = base.join("sess-9/subagent/child-1");
@@ -526,7 +522,6 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[test]
     fn collect_sessions_skips_tool_outputs_and_spool_dirs() {
         let base = std::env::temp_dir().join(format!(
             "gtt-muse-walk-{}-{}",
@@ -549,5 +544,18 @@ mod tests {
             vec![main.join("session.jsonl"), sub.join("session.jsonl")]
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn completion_review_and_streaming_parsing() {
+        model_completed_is_normalized_and_mirrors_are_not_counted();
+        automated_review_calls_are_counted_with_object_model();
+        dedup_fallbacks_state_chaining_and_half_lines();
+    }
+
+    #[test]
+    fn subagent_workspace_inheritance_and_discovery() {
+        subagent_log_without_metadata_inherits_parent_workspace();
+        collect_sessions_skips_tool_outputs_and_spool_dirs();
     }
 }

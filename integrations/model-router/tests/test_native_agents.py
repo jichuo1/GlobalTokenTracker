@@ -31,11 +31,53 @@ class NativeAgentTests(unittest.TestCase):
         return ExecutionContext(threading.Event(),time.monotonic()+timeout,self.root/"work")
     def received(self):
         return json.loads(next(self.root.rglob("received.json")).read_text())
-    def test_catalog_keeps_all_providers_and_models_not_only_default(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_opencode_discovery_explicit_selection_and_permission_checks(self):
+        self._run_cases(
+            self._case_catalog_keeps_all_providers_and_models_not_only_default,
+            self._case_explicit_model_variant_and_all_tool_denials_are_sent,
+            self._case_permission_overrides_are_verified_before_prompt,
+        )
+
+    def test_opencode_error_contracts_and_cancellation(self):
+        self._run_cases(
+            self._case_model_mismatch_tool_and_truncation_are_not_success,
+            self._case_cancellation_interrupts_pending_response_and_closes_process,
+        )
+
+    def test_print_agent_isolation_and_error_contracts(self):
+        self._run_cases(
+            self._case_print_native_prompt_is_stdin_and_customizations_are_disabled,
+            self._case_print_tool_model_mismatch_or_turn_cutoff_is_not_success,
+        )
+
+    def test_dsh_overlay_tool_blocking_and_execution(self):
+        self._run_cases(
+            self._case_dsh_disables_tools_but_keeps_factory_services_and_pins_model,
+            self._case_dsh_unknown_profile_cannot_silently_enable_tools,
+            self._case_dsh_final_and_reported_usage_are_parsed_and_tools_rejected,
+        )
+
+    def test_catalog_isolation_registration_merge_and_effort_grading(self):
+        self._run_cases(
+            self._case_discovery_failure_is_isolated_to_one_source,
+            self._case_registration_preserves_existing_manual_sources_and_limits,
+            self._case_max_effort_profile_does_not_grade_a_lower_effort_route,
+        )
+
+    def _case_catalog_keeps_all_providers_and_models_not_only_default(self):
         rows=discover_opencode(self.source())
         self.assertEqual({(r["provider"],r["id"]) for r in rows},{("p1","m1"),("p1","m2"),("p2","m1")})
         self.assertEqual(next(r for r in rows if r["provider"]=="p1" and r["id"]=="m1")["effort"],"max")
-    def test_explicit_model_variant_and_all_tool_denials_are_sent(self):
+    def _case_explicit_model_variant_and_all_tool_denials_are_sent(self):
         result=validate_result(opencode(self.route(self.source()),"bounded input",self.task,self.context()),False)
         self.assertEqual(result["actual_selection"]["model"],"m2")
         self.assertEqual(result["usage"]["total_tokens"],16)
@@ -44,17 +86,17 @@ class NativeAgentTests(unittest.TestCase):
         self.assertEqual(body["variant"],"max")
         self.assertTrue(all(value is False for value in body["tools"].values()))
         self.assertFalse(body["tools"]["custom_tool"])
-    def test_permission_overrides_are_verified_before_prompt(self):
+    def _case_permission_overrides_are_verified_before_prompt(self):
         with self.assertRaises(WorkerFailure) as error:
             opencode(self.route(self.source(scenario="permission")),"input",self.task,self.context())
         self.assertEqual(error.exception.code,"native_permission_contract_failed")
         self.assertFalse(list(self.root.rglob("received.json")))
-    def test_model_mismatch_tool_and_truncation_are_not_success(self):
+    def _case_model_mismatch_tool_and_truncation_are_not_success(self):
         for scenario,code in [("mismatch","model_selection_mismatch"),("tool","unexpected_tool_call"),("truncate","output_truncated")]:
             with self.subTest(scenario=scenario),self.assertRaises(WorkerFailure) as error:
                 opencode(self.route(self.source(scenario=scenario)),"input",self.task,self.context())
             self.assertEqual(error.exception.code,code)
-    def test_cancellation_interrupts_pending_response_and_closes_process(self):
+    def _case_cancellation_interrupts_pending_response_and_closes_process(self):
         context=self.context()
         timer=threading.Timer(.15,context.cancel.set);timer.start()
         try:
@@ -62,7 +104,7 @@ class NativeAgentTests(unittest.TestCase):
                 opencode(self.route(self.source(scenario="pending")),"input",self.task,context)
             self.assertEqual(error.exception.code,"cancelled")
         finally:timer.join()
-    def test_print_native_prompt_is_stdin_and_customizations_are_disabled(self):
+    def _case_print_native_prompt_is_stdin_and_customizations_are_disabled(self):
         r=self.route(self.source("print"),model="m",adapter="claude_cli")
         result=validate_result(print_agent(r,"bounded-secret-free-input",self.task,self.context()),False)
         body=self.received()
@@ -72,19 +114,19 @@ class NativeAgentTests(unittest.TestCase):
         self.assertIn("--strict-mcp-config",body["args"])
         self.assertEqual(body["args"][body["args"].index("--tools")+1],"")
         self.assertEqual(result["usage"]["total_tokens"],15)
-    def test_print_tool_model_mismatch_or_turn_cutoff_is_not_success(self):
+    def _case_print_tool_model_mismatch_or_turn_cutoff_is_not_success(self):
         for scenario,code in [("tool","unexpected_tool_call"),("mismatch","model_selection_mismatch"),("truncate","output_truncated")]:
             with self.subTest(scenario=scenario),self.assertRaises(WorkerFailure) as error:
                 print_agent(self.route(self.source("print",scenario),model="m",adapter="codebuddy_cli"),"input",self.task,self.context())
             self.assertEqual(error.exception.code,code)
-    def test_discovery_failure_is_isolated_to_one_source(self):
+    def _case_discovery_failure_is_isolated_to_one_source(self):
         config={"benchmark_file":str(self.root/"missing.json"),"ledger_path":str(self.root/"missing.db"),
                 "sources":[self.source()|{"adapter":"opencode_http"},{"id":"other","adapter":"command_json","trusted":True,"command":[sys.executable],"models":[{"id":"m"}]}]}
         with patch("gtt_router.native_agents.discover_opencode",side_effect=WorkerFailure("native_connection_failed")):
             result=Catalog(config).refresh()
         self.assertEqual(len(result["routes"]),1)
         self.assertEqual(result["discovery_errors"][0]["reason"],"native_connection_failed")
-    def test_dsh_disables_tools_but_keeps_factory_services_and_pins_model(self):
+    def _case_dsh_disables_tools_but_keeps_factory_services_and_pins_model(self):
         entries=[{"id":i,"name":"@deepseek-ai/"+i} for i in ["agent-loop","agent-default-model","tools","tool-bash","tool-subagent","subagent","mcp-client"]]
         r=self.route({},model="deepseek-flash",provider="deepseek-official")
         overlay=dsh_overlay({"profile_entries":entries},r,self.root,4096)
@@ -94,11 +136,11 @@ class NativeAgentTests(unittest.TestCase):
         main=next(p for p in overlay if p["id"]=="agent-loop")["config"]["agents"][0]
         self.assertEqual(main["model"],"deepseek-flash")
         self.assertEqual(main["maxTokens"],4096)
-    def test_dsh_unknown_profile_cannot_silently_enable_tools(self):
+    def _case_dsh_unknown_profile_cannot_silently_enable_tools(self):
         with self.assertRaises(WorkerFailure):
             dsh_overlay({"profile_entries":[{"id":"tools","name":"third-party"}]},self.route({}),self.root,4096)
 
-    def test_registration_preserves_existing_manual_sources_and_limits(self):
+    def _case_registration_preserves_existing_manual_sources_and_limits(self):
         old={"sources":[{"id":"opencode","enabled":False,"command":["old"]},{"id":"custom","enabled":True}],
              "limits":{"global_parallel":4,"source_parallel":{"opencode":1}}}
         result=merge_registration(old,[{"id":"opencode","enabled":True,"command":["new"]},{"id":"claude","max_parallel":2}],[])
@@ -108,7 +150,7 @@ class NativeAgentTests(unittest.TestCase):
         self.assertEqual(result["limits"]["global_parallel"],4)
         self.assertEqual(len(result["sources"]),3)
 
-    def test_dsh_final_and_reported_usage_are_parsed_and_tools_rejected(self):
+    def _case_dsh_final_and_reported_usage_are_parsed_and_tools_rejected(self):
         for scenario in ["ok","tool"]:
             source=self.source("dsh",scenario)
             source["profile_entries"]=[{"id":i,"name":"@deepseek-ai/"+i} for i in ["agent-loop","agent-default-model","tools","tool-bash"]]
@@ -121,7 +163,7 @@ class NativeAgentTests(unittest.TestCase):
                 self.assertEqual(result["usage"]["total_tokens"],21)
                 self.assertEqual(result["actual_selection"]["evidence"],"validated_process_overlay")
 
-    def test_max_effort_profile_does_not_grade_a_lower_effort_route(self):
+    def _case_max_effort_profile_does_not_grade_a_lower_effort_route(self):
         bench=self.root/"benchmark.json"
         bench.write_text(json.dumps({"schema_version":1,"models":[{"aliases":["m"],"effort":"max","intelligence":51}]}))
         config={"benchmark_file":str(bench),"ledger_path":str(self.root/"missing.db"),"sources":[{"id":"s","adapter":"command_json","trusted":True,"command":[sys.executable],"models":[{"id":"m","effort":"low"}]}]}

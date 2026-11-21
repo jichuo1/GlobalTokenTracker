@@ -89,7 +89,49 @@ class OperatorTests(unittest.TestCase):
         self.grant["commands"] = {ident: {"argv": [sys.executable, "-u", "-c", code], "timeout_s": timeout}}
         return {"id": "command", "op": "run_command", "command_id": ident}
 
-    def test_grants_and_snapshots_are_exact_bounded_and_utf8(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_grants_and_file_mutation_idempotence(self):
+        self._run_cases(
+            self._case_grants_and_snapshots_are_exact_bounded_and_utf8,
+            self._case_real_creation_replacement_and_idempotence_preserve_operation_identity,
+        )
+
+    def test_baseline_replacement_and_concurrent_conflicts(self):
+        self._run_cases(
+            self._case_whole_batch_baselines_are_checked_before_any_file_changes,
+            self._case_replacement_must_have_exactly_one_match_and_ids_cannot_change_content,
+            self._case_concurrent_stale_assignments_conflict_instead_of_overwriting,
+        )
+
+    def test_cancellation_dispatch_gates_and_progress_locking(self):
+        self._run_cases(
+            self._case_cancelled_batch_and_cancel_at_replace_boundary_do_not_write,
+            self._case_closed_dispatch_stops_new_operations_and_keeps_partial_receipts,
+            self._case_progress_is_reported_without_holding_the_global_store_lock,
+        )
+
+    def test_unknown_write_and_command_reconciliation(self):
+        self._run_cases(
+            self._case_unknown_write_can_be_reconciled_from_after_hash_without_rewriting,
+            self._case_unknown_command_is_never_replayed,
+        )
+
+    def test_command_registry_timeout_and_cancellation(self):
+        self._run_cases(
+            self._case_command_registry_is_fixed_and_output_is_bounded_hashed_and_redacted,
+            self._case_timeout_kills_its_process_tree_and_preserves_unrelated_process,
+            self._case_command_cancellation_and_workspace_wait_cancellation_are_bounded,
+        )
+
+    def _case_grants_and_snapshots_are_exact_bounded_and_utf8(self):
         (self.workspace / "a.txt").write_bytes("中文\n".encode("utf-8"))
         normalized = self.broker.validate_grant(self.grant)
         self.assertEqual(normalized["max_file_bytes"], 1048576)
@@ -105,7 +147,7 @@ class OperatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "byte limit"):
             self.broker.snapshot({**self.grant, "max_file_bytes": 2}, ["a.txt"])
 
-    def test_real_creation_replacement_and_idempotence_preserve_operation_identity(self):
+    def _case_real_creation_replacement_and_idempotence_preserve_operation_identity(self):
         path = self.workspace / "a.txt"
         path.write_bytes(b"old\n")
         replace = {"id": "replace", "op": "replace_text", "path": "a.txt", "base_sha256": sha("old\n"),
@@ -124,7 +166,7 @@ class OperatorTests(unittest.TestCase):
         self.assertNotIn("新文件", payloads)
         self.assertGreaterEqual(self.service.gate_checks, 8)
 
-    def test_whole_batch_baselines_are_checked_before_any_file_changes(self):
+    def _case_whole_batch_baselines_are_checked_before_any_file_changes(self):
         (self.workspace / "a.txt").write_text("before", encoding="utf-8")
         (self.workspace / "b.txt").write_text("outside edit", encoding="utf-8")
         result = self.execute([self.write(old="before"), self.write("b.txt", old="stale", ident="write-b")])
@@ -133,7 +175,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(result["reason"], "operator_base_hash_mismatch")
         self.assertEqual(self.service.store.conn.execute("SELECT COUNT(*) FROM operator_operations").fetchone()[0], 0)
 
-    def test_replacement_must_have_exactly_one_match_and_ids_cannot_change_content(self):
+    def _case_replacement_must_have_exactly_one_match_and_ids_cannot_change_content(self):
         (self.workspace / "a.txt").write_text("same same", encoding="utf-8")
         op = {"id": "replace", "op": "replace_text", "path": "a.txt", "base_sha256": sha("same same"),
               "old_text": "same", "new_text": "other"}
@@ -146,7 +188,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(self.execute([original])["reason"], "applied_result_changed")
         self.assertEqual((self.workspace / "a.txt").read_text(), "external change")
 
-    def test_concurrent_stale_assignments_conflict_instead_of_overwriting(self):
+    def _case_concurrent_stale_assignments_conflict_instead_of_overwriting(self):
         (self.workspace / "a.txt").write_text("baseline", encoding="utf-8")
         barrier = threading.Barrier(2)
         def execute(number):
@@ -157,7 +199,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(sorted(r["state"] for r in results), ["applied", "conflict"])
         self.assertIn((self.workspace / "a.txt").read_text(), {"1", "2"})
 
-    def test_cancelled_batch_and_cancel_at_replace_boundary_do_not_write(self):
+    def _case_cancelled_batch_and_cancel_at_replace_boundary_do_not_write(self):
         path = self.workspace / "a.txt"
         path.write_text("baseline", encoding="utf-8")
         cancel = threading.Event()
@@ -174,7 +216,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(path.read_text(), "baseline")
         self.assertEqual(list(self.workspace.glob(".gtt-operator-*.tmp")), [])
 
-    def test_closed_dispatch_stops_new_operations_and_keeps_partial_receipts(self):
+    def _case_closed_dispatch_stops_new_operations_and_keeps_partial_receipts(self):
         self.service.blocked = True
         result = self.execute([self.write()])
         self.assertEqual(result["state"], "failed")
@@ -192,7 +234,7 @@ class OperatorTests(unittest.TestCase):
         self.assertTrue((self.workspace / "a.txt").exists())
         self.assertFalse((self.workspace / "b.txt").exists())
 
-    def test_unknown_write_can_be_reconciled_from_after_hash_without_rewriting(self):
+    def _case_unknown_write_can_be_reconciled_from_after_hash_without_rewriting(self):
         original_replace = os.replace
         operation = self.write()
         def replaced_then_lost(source, target):
@@ -208,7 +250,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(reconciled["state"], "applied")
         self.assertTrue(reconciled["receipts"][0]["reconciled"])
 
-    def test_unknown_command_is_never_replayed(self):
+    def _case_unknown_command_is_never_replayed(self):
         operation = self.command("print('never used')")
         with patch.object(self.broker, "_command", return_value={"state": "unknown", "reason": "fixture"}) as command:
             first = self.execute([operation])
@@ -218,7 +260,7 @@ class OperatorTests(unittest.TestCase):
         self.assertTrue(second["receipts"][0]["deduplicated"])
         self.assertEqual(command.call_count, 1)
 
-    def test_command_registry_is_fixed_and_output_is_bounded_hashed_and_redacted(self):
+    def _case_command_registry_is_fixed_and_output_is_bounded_hashed_and_redacted(self):
         text = "x" * 12000 + "\n"
         operation = self.command("import sys;print('x'*12000);sys.stderr.write('Bearer '+'s'*40)")
         result = self.execute([operation])
@@ -236,7 +278,7 @@ class OperatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside caller registry"):
             self.execute([{**operation, "command_id": "missing"}], assignment="missing-command")
 
-    def test_timeout_kills_its_process_tree_and_preserves_unrelated_process(self):
+    def _case_timeout_kills_its_process_tree_and_preserves_unrelated_process(self):
         code = ("import os,subprocess,sys,time,json;"
                 "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
                 "print(json.dumps({'parent':os.getpid(),'child':child.pid}),flush=True);time.sleep(30)")
@@ -259,7 +301,7 @@ class OperatorTests(unittest.TestCase):
             unrelated.terminate()
             unrelated.wait(timeout=5)
 
-    def test_command_cancellation_and_workspace_wait_cancellation_are_bounded(self):
+    def _case_command_cancellation_and_workspace_wait_cancellation_are_bounded(self):
         operation = self.command("from pathlib import Path;import time;Path('a.txt').write_text('started');time.sleep(30)")
         cancel = threading.Event()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -278,7 +320,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(result["receipts"][0]["reason"], "command_cancelled_outcome_unknown")
         self.assertFalse((self.workspace / "b.txt").exists())
 
-    def test_progress_is_reported_without_holding_the_global_store_lock(self):
+    def _case_progress_is_reported_without_holding_the_global_store_lock(self):
         progress, store_available = [], []
         def callback(value):
             progress.append(value)

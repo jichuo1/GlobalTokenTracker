@@ -13,7 +13,24 @@ class SettingsMergeTests(unittest.TestCase):
         return {"revision": 24, "sources": {"zcode": True}, "pool": [{"route_id": "r", "expires_at": 100}],
                 "workflows": [{"id": "w", "nodes": [{"id": "a", "task": {"prompt": "old", "max_output_tokens": 8192}}]}]}
 
-    def test_ui_source_edit_and_background_pool_lease_merge_without_losing_draft(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_three_way_settings_merge_conflicts_and_history_bounds(self):
+        self._run_cases(
+            self._case_ui_source_edit_and_background_pool_lease_merge_without_losing_draft,
+            self._case_same_field_conflicts_still_fail_closed,
+            self._case_keyed_workflow_nodes_merge_independent_fields_and_reject_delete_edit,
+            self._case_history_is_bounded_and_invalid_proof_is_not_used,
+        )
+
+    def _case_ui_source_edit_and_background_pool_lease_merge_without_losing_draft(self):
         base = self.value()
         local, remote = copy.deepcopy(base), copy.deepcopy(base)
         local["sources"]["codex"] = True
@@ -26,7 +43,7 @@ class SettingsMergeTests(unittest.TestCase):
         self.assertEqual(result["revision"], 25)
         self.assertEqual(local, before)
 
-    def test_same_field_conflicts_still_fail_closed(self):
+    def _case_same_field_conflicts_still_fail_closed(self):
         base = self.value()
         local, remote = copy.deepcopy(base), copy.deepcopy(base)
         local["pool"][0]["expires_at"] = 300
@@ -36,7 +53,7 @@ class SettingsMergeTests(unittest.TestCase):
             merge_settings(base, local, remote)
         self.assertEqual(remote, before)
 
-    def test_keyed_workflow_nodes_merge_independent_fields_and_reject_delete_edit(self):
+    def _case_keyed_workflow_nodes_merge_independent_fields_and_reject_delete_edit(self):
         base = self.value()
         local, remote = copy.deepcopy(base), copy.deepcopy(base)
         local["workflows"][0]["nodes"][0]["task"]["prompt"] = "user draft"
@@ -47,7 +64,7 @@ class SettingsMergeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "workflows.w"):
             merge_settings(base, local, remote)
 
-    def test_history_is_bounded_and_invalid_proof_is_not_used(self):
+    def _case_history_is_bounded_and_invalid_proof_is_not_used(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "history.json"
             for revision in range(12):

@@ -294,7 +294,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn usage_records_are_per_call_deltas() {
         let (_root, dir) = wire_dir("deltas");
         let file = dir.join("wire.jsonl");
@@ -337,7 +336,6 @@ mod tests {
         assert_eq!(out.consumed, data.len() as u64);
     }
 
-    #[test]
     fn append_segment_uses_cached_project() {
         let (_root, dir) = wire_dir("append");
         let file = dir.join("wire.jsonl");
@@ -361,7 +359,6 @@ mod tests {
         assert_eq!(out.events[0].project.as_deref(), Some("/cached/dir"));
     }
 
-    #[test]
     fn project_falls_back_to_session_index() {
         let (root, dir) = wire_dir("index");
         // No config.update anywhere — index must supply workDir.
@@ -390,7 +387,6 @@ mod tests {
         assert_eq!(out.events[0].project.as_deref(), Some("D:/idx/proj"));
     }
 
-    #[test]
     fn zero_usage_and_partial_tail_are_safe() {
         let (_root, dir) = wire_dir("tail");
         let file = dir.join("wire.jsonl");
@@ -414,7 +410,6 @@ mod tests {
         assert_eq!(out.consumed as usize, last_nl);
         assert!(last_nl < data.len());
     }
-    #[test]
     fn python_wire_usage_is_step_delta_not_context_occupancy() {
         let item = SourceItem {
             key: "cli-wire".into(),
@@ -445,7 +440,6 @@ mod tests {
         assert!(event.model.is_none());
     }
 
-    #[test]
     fn python_forwarded_usage_reuses_response_identity() {
         let item = SourceItem {
             key: "parent".into(),
@@ -497,5 +491,19 @@ mod tests {
                 .iter()
                 .all(|item| item.path.file_name().unwrap() == "wire.jsonl")
         );
+    }
+
+    #[test]
+    fn wire_usage_deltas_and_project_resolution() {
+        usage_records_are_per_call_deltas();
+        append_segment_uses_cached_project();
+        project_falls_back_to_session_index();
+        zero_usage_and_partial_tail_are_safe();
+    }
+
+    #[test]
+    fn python_wire_deltas_and_forwarded_identity() {
+        python_wire_usage_is_step_delta_not_context_occupancy();
+        python_forwarded_usage_reuses_response_identity();
     }
 }

@@ -725,7 +725,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    #[test]
     fn qualified_identifiers_are_compatible_without_admitting_paths_or_urls() {
         assert_eq!(label("provider:region"), Some("provider:region".into()));
         assert!(label("C:/private/file").is_none());
@@ -747,7 +746,6 @@ mod tests {
         let store = Store::open(&path).unwrap();
         (path, store)
     }
-    #[test]
     fn projection_remains_consistent_across_committed_wal_writer() {
         let (path, store) = fixture();
         store
@@ -777,7 +775,6 @@ mod tests {
         drop(store);
         cleanup(path);
     }
-    #[test]
     fn concurrent_claim_is_exclusive_and_completion_cooldown_is_shared() {
         let (path, store) = fixture();
         let first = RefreshLease::claim(&path, 30).unwrap().unwrap();
@@ -793,7 +790,6 @@ mod tests {
         drop(store);
         cleanup(path);
     }
-    #[test]
     fn expired_lease_can_recover_and_old_owner_cannot_delete_new_owner() {
         let (path, store) = fixture();
         store
@@ -810,7 +806,6 @@ mod tests {
         drop(store);
         cleanup(path);
     }
-    #[test]
     fn expired_metadata_never_overrides_live_os_lock() {
         let (path, store) = fixture();
         let first = RefreshLease::claim(&path, 30).unwrap().unwrap();
@@ -828,7 +823,6 @@ mod tests {
         drop(store);
         cleanup(path);
     }
-    #[test]
     fn heartbeat_database_failure_retains_gate_until_operation_finishes() {
         let (path, store) = fixture();
         let first = RefreshLease::claim_with_timing(
@@ -857,7 +851,6 @@ mod tests {
         drop(store);
         cleanup(path);
     }
-    #[test]
     fn orphaned_fresh_lease_and_future_cooldown_recover_without_permanent_block() {
         let (path, store) = fixture();
         store
@@ -873,5 +866,24 @@ mod tests {
         drop(lease);
         drop(store);
         cleanup(path);
+    }
+
+    #[test]
+    fn labels_and_wal_snapshot_consistency() {
+        qualified_identifiers_are_compatible_without_admitting_paths_or_urls();
+        projection_remains_consistent_across_committed_wal_writer();
+    }
+
+    #[test]
+    fn refresh_lease_exclusivity_and_recovery() {
+        concurrent_claim_is_exclusive_and_completion_cooldown_is_shared();
+        expired_lease_can_recover_and_old_owner_cannot_delete_new_owner();
+        orphaned_fresh_lease_and_future_cooldown_recover_without_permanent_block();
+    }
+
+    #[test]
+    fn refresh_lease_live_lock_and_heartbeat_guards() {
+        expired_metadata_never_overrides_live_os_lock();
+        heartbeat_database_failure_retains_gate_until_operation_finishes();
     }
 }

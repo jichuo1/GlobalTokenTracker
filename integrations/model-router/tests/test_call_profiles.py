@@ -20,20 +20,48 @@ class CallProfileTests(unittest.TestCase):
         prior = settings(service.store)
         return service.scheduling.control("save", value=prior | {"call_profile":value}, expected_revision=prior["revision"])
 
-    def test_all_presets_validate_and_do_not_accept_credentials_or_commands(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_profile_presets_defaults_and_explicit_limit_policies(self):
+        self._run_cases(
+            self._case_all_presets_validate_and_do_not_accept_credentials_or_commands,
+            self._case_task_overrides_preset_defaults_and_effective_policy_is_visible,
+            self._case_large_output_report_and_wait_limits_require_explicit_policy,
+        )
+
+    def test_source_options_and_dynamic_capacity_scaling(self):
+        self._run_cases(
+            self._case_source_options_reach_generation_and_recovery_without_mutating_catalog,
+            self._case_coordinator_and_native_capacity_can_grow_and_shrink_without_replay,
+        )
+
+    def test_pre_generation_billing_and_workflow_draft_persistence(self):
+        self._run_cases(
+            self._case_proven_pre_generation_failure_creates_no_estimated_bill,
+            self._case_profile_can_expand_workflow_capacity_while_drafts_remain_saveable,
+        )
+
+    def _case_all_presets_validate_and_do_not_accept_credentials_or_commands(self):
         for preset in presets(): validate(preset["value"])
         for value in [{"source_options":{"native":{"command":["anything"]}}}, {"limits":{"max_output_tokens":True}},
                       {"defaults":{"common":{"prompt":"injected"}}}, {"parallel":65}, {"limits":{"max_output_tokens":float("inf")}}]:
             with self.assertRaises(ValueError): validate(value)
 
-    def test_task_overrides_preset_defaults_and_effective_policy_is_visible(self):
+    def _case_task_overrides_preset_defaults_and_effective_policy_is_visible(self):
         service=self.service([fixtures.route()],lambda *a:fixtures.response())
         reply=self.apply(service,{"preset":"balanced","defaults":{"common":{"deadline_s":240}}})
         self.assertEqual(service.parse_task({"kind":"extract","prompt":"fixture"}).deadline_s,240)
         self.assertEqual(service.parse_task({"kind":"extract","prompt":"fixture","deadline_s":30}).deadline_s,30)
         self.assertEqual(reply["effective_profile"]["defaults"]["common"]["deadline_s"],240)
 
-    def test_large_output_report_and_wait_limits_require_explicit_policy(self):
+    def _case_large_output_report_and_wait_limits_require_explicit_policy(self):
         r=fixtures.route();r.output_limit=2000000
         service=self.service([r],lambda *a:fixtures.response())
         request={"kind":"extract","prompt":"fixture","max_output_tokens":1048576,"report_max_chars":8388608,"token_budget":5000000,"deadline_s":1800,"hard_deadline_s":7200}
@@ -45,7 +73,7 @@ class CallProfileTests(unittest.TestCase):
         self.assertEqual(output_budget(task,r)["effective_output_tokens"],524288)
         self.assertEqual(task.report_max_chars,8388608)
 
-    def test_source_options_reach_generation_and_recovery_without_mutating_catalog(self):
+    def _case_source_options_reach_generation_and_recovery_without_mutating_catalog(self):
         r=fixtures.route();observed=[]
         def adapter(route,*args):observed.append(copy.deepcopy(route.runtime));return fixtures.response("GTT_RECOVERY_OK")
         service=self.service([r],adapter)
@@ -58,7 +86,7 @@ class CallProfileTests(unittest.TestCase):
         self.assertTrue(service.recovery.recheck(r.id)["success"])
         self.assertEqual(service.store.probe_budget(0)["count"], 2)
 
-    def test_coordinator_and_native_capacity_can_grow_and_shrink_without_replay(self):
+    def _case_coordinator_and_native_capacity_can_grow_and_shrink_without_replay(self):
         r=fixtures.route();lock=threading.Lock();both=threading.Event();active=0;peak=0;calls=0;parallel=True
         def adapter(route,*args):
             nonlocal active,peak,calls
@@ -81,7 +109,7 @@ class CallProfileTests(unittest.TestCase):
         self.assertEqual(peak,1);self.assertEqual(calls,5)
         self.assertEqual(service.applied_coordinator_threads,1)
 
-    def test_proven_pre_generation_failure_creates_no_estimated_bill(self):
+    def _case_proven_pre_generation_failure_creates_no_estimated_bill(self):
         r=fixtures.route()
         def adapter(*args):raise WorkerFailure("native_configuration_error",scope="source",metering={"generation_not_started":True})
         service=self.service([r],adapter)
@@ -91,7 +119,7 @@ class CallProfileTests(unittest.TestCase):
         self.assertTrue(result["attempts"][0]["generation_not_started"])
         self.assertEqual(service.store.conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0],0)
 
-    def test_profile_can_expand_workflow_capacity_while_drafts_remain_saveable(self):
+    def _case_profile_can_expand_workflow_capacity_while_drafts_remain_saveable(self):
         from gtt_router.scheduling import graph
         r=fixtures.route();service=self.service([r],lambda *a:fixtures.response())
         empty={"id":"draft","name":"draft","nodes":[],"edges":[],"luna_supervision":False}

@@ -83,19 +83,16 @@ mod tests {
         }
     }
 
-    #[test]
     fn empty_series_is_empty() {
         assert_eq!(moving_average(&[]), Vec::<f64>::new());
         assert!(!is_hourly(&[]));
     }
 
-    #[test]
     fn series_start_divides_by_the_days_so_far() {
         let s = series(&["2026-03-01", "2026-03-02", "2026-03-03"], &[10, 20, 30]);
         near(&moving_average(&s), &[10.0, 15.0, 20.0]);
     }
 
-    #[test]
     fn contiguous_days_use_a_full_week_then_slide() {
         let dates: Vec<String> = (1..=9).map(|d| format!("2026-03-{d:02}")).collect();
         let refs: Vec<&str> = dates.iter().map(String::as_str).collect();
@@ -108,7 +105,6 @@ mod tests {
         assert!((ma[7] - 0.0).abs() < 1e-9);
     }
 
-    #[test]
     fn missing_days_count_as_zero_not_as_adjacent() {
         // Bars for Mar 1 and Mar 5 only: day 5's window holds both, w = 5.
         let s = series(&["2026-03-01", "2026-03-05"], &[50, 100]);
@@ -118,7 +114,6 @@ mod tests {
         near(&moving_average(&s), &[50.0, 10.0]);
     }
 
-    #[test]
     fn month_and_year_boundaries_are_calendar_correct() {
         let s = series(&["2025-12-30", "2026-01-01", "2026-01-02"], &[30, 60, 90]);
         // Dec 30 → Jan 2 is 4 calendar days.
@@ -130,7 +125,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn hourly_buckets_use_a_seven_hour_window() {
         let s = series(&["09:00", "10:00", "14:00", "17:00"], &[70, 70, 140, 7]);
         assert!(is_hourly(&s));
@@ -139,5 +133,19 @@ mod tests {
             &moving_average(&s),
             &[70.0, 70.0, 140.0 / 6.0 + 140.0 / 6.0, (140.0 + 7.0) / 7.0],
         );
+    }
+
+    #[test]
+    fn daily_moving_average_windows() {
+        empty_series_is_empty();
+        series_start_divides_by_the_days_so_far();
+        contiguous_days_use_a_full_week_then_slide();
+    }
+
+    #[test]
+    fn calendar_gaps_boundaries_and_hourly_windows() {
+        missing_days_count_as_zero_not_as_adjacent();
+        month_and_year_boundaries_are_calendar_correct();
+        hourly_buckets_use_a_seven_hour_window();
     }
 }

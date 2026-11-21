@@ -27,7 +27,28 @@ class ServiceWindowsTest(unittest.TestCase):
             time.sleep(.02)
         self.fail('Fixture job did not complete')
 
-    def test_hard_mode_does_not_use_short_ttft_as_absolute_limit(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_hard_mode_and_verifier_window_inheritance(self):
+        self._run_cases(
+            self._case_hard_mode_does_not_use_short_ttft_as_absolute_limit,
+            self._case_verifier_keeps_initial_window_and_price_preferences,
+        )
+
+    def test_waiting_baseline_and_activity_plan_horizons(self):
+        self._run_cases(
+            self._case_waiting_baseline_is_visible_without_claimed_activity,
+            self._case_activity_plan_uses_total_horizon_but_final_only_honors_first_window,
+        )
+
+    def _case_hard_mode_does_not_use_short_ttft_as_absolute_limit(self):
         observed = []
         def adapter(r, prompt, task, ctx):
             observed.append(ctx.deadline - time.monotonic())
@@ -39,7 +60,7 @@ class ServiceWindowsTest(unittest.TestCase):
         self.assertEqual(self.wait(service, job['job_id'])['state'], 'succeeded')
         self.assertGreater(observed[0], 590)
 
-    def test_verifier_keeps_initial_window_and_price_preferences(self):
+    def _case_verifier_keeps_initial_window_and_price_preferences(self):
         seen = []
         def adapter(r, prompt, task, ctx):
             seen.append((task.kind, task.deadline_s, task.price_weight, task.prefer_free, ctx.public_activity()))
@@ -52,7 +73,7 @@ class ServiceWindowsTest(unittest.TestCase):
         self.assertLessEqual(seen[1][1], 180)
         self.assertEqual(seen[1][2:4], (55, False))
 
-    def test_waiting_baseline_is_visible_without_claimed_activity(self):
+    def _case_waiting_baseline_is_visible_without_claimed_activity(self):
         def adapter(r, prompt, task, ctx):
             ctx.cancel.wait(.15)
             return response()
@@ -72,7 +93,7 @@ class ServiceWindowsTest(unittest.TestCase):
         self.assertEqual(activity['activity_count'], 0)
         self.assertGreater(activity['hard_remaining_s'], 1000)
 
-    def test_activity_plan_uses_total_horizon_but_final_only_honors_first_window(self):
+    def _case_activity_plan_uses_total_horizon_but_final_only_honors_first_window(self):
         r = route(latency=20)
         service = self.service(lambda *args: response())
         service.catalog.routes = [r]

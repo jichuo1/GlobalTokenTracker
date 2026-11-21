@@ -38,7 +38,77 @@ class SchedulingTests(unittest.TestCase):
             time.sleep(.05)
         self.fail("DAG did not terminate")
 
-    def test_pool_is_an_ordered_hard_allowlist_and_expiry_fails_closed(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_directed_pool_allowlist_recovery_and_rejection_plan(self):
+        self._run_cases(
+            self._case_pool_is_an_ordered_hard_allowlist_and_expiry_fails_closed,
+            self._case_pool_never_bypasses_quality_or_verified_recovery,
+            self._case_directed_mode_does_not_handoff_outside_pool,
+            self._case_directed_plan_retains_selected_route_rejection_after_many_outsiders,
+        )
+
+    def test_scheduling_controls_switches_and_settings_integrity(self):
+        self._run_cases(
+            self._case_switch_blocks_dispatch_and_probe_but_keeps_control_readable,
+            self._case_source_switch_and_optimistic_revision,
+            self._case_corrupt_settings_do_not_restore_broad_routing,
+            self._case_no_settings_write_occurs_during_steady_read_only_ranking,
+        )
+
+    def test_graph_validation_and_local_node_semantics(self):
+        self._run_cases(
+            self._case_graph_validates_cycles_duplicates_positions_and_custom_task_fields,
+            self._case_local_nodes_preserve_evidence_and_use_no_extra_model_budget,
+            self._case_gate_without_model_evidence_blocks_output,
+        )
+
+    def test_dag_evidence_fallback_and_pool_expiry(self):
+        self._run_cases(
+            self._case_dag_delivers_only_successful_upstream_evidence_and_accounts_once,
+            self._case_pool_expiry_after_paid_success_blocks_next_node_and_retains_usage,
+            self._case_node_fallback_stays_inside_explicit_routes_even_when_global_pool_order_differs,
+        )
+
+    def test_unknown_timeout_blocking_and_risk_acknowledgement(self):
+        self._run_cases(
+            self._case_unknown_timeout_blocks_downstream_without_replay,
+            self._case_unknown_result_requires_explicit_risk_acknowledgement_for_new_run,
+        )
+
+    def test_optional_monitor_workflows_probes_and_verification(self):
+        self._run_cases(
+            self._case_workflow_can_explicitly_disable_monitor_without_weakening_ordinary_calls,
+            self._case_manual_probe_optional_monitor_keeps_explicit_unbudgeted_behavior,
+            self._case_optional_monitor_and_route_pool_are_preserved_during_verification,
+        )
+
+    def test_request_deduplication_and_cancellation(self):
+        self._run_cases(
+            self._case_request_id_deduplicates_completed_runs_and_rejects_conflicts,
+            self._case_cancel_does_not_wait_for_slow_submission_or_issue_pending_model_request,
+        )
+
+    def test_information_support_and_public_excerpts(self):
+        self._run_cases(
+            self._case_information_support_binds_each_question_and_output_never_drops_unresolved_requests,
+            self._case_public_information_excerpt_is_explicit_and_does_not_mutate_full_state,
+        )
+
+    def test_workflow_budget_reservation_and_input_admission(self):
+        self._run_cases(
+            self._case_partially_charged_running_node_does_not_double_reserve_budget,
+            self._case_default_node_budget_includes_actual_input_and_does_not_over_admit,
+        )
+
+    def _case_pool_is_an_ordered_hard_allowlist_and_expiry_fails_closed(self):
         first, second, outsider = fixtures.route(model="first", quality=30), fixtures.route(model="second", quality=99), fixtures.route(model="outside", quality=99)
         service = self.service([first, second, outsider], lambda *a: fixtures.response())
         expiry = now_ms() + 10000
@@ -51,14 +121,14 @@ class SchedulingTests(unittest.TestCase):
             self.assertFalse(candidates)
             self.assertTrue(all("directed_pool_expired" in r["reasons"] for r in rejected))
 
-    def test_pool_never_bypasses_quality_or_verified_recovery(self):
+    def _case_pool_never_bypasses_quality_or_verified_recovery(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: fixtures.response())
         self.save(service, mode="directed", pool=[{"route_id": route.id, "expires_at": now_ms() + 10000, "tags": []}])
         service.store.failure("route:" + route.id, "auth_failed", 0)
         self.assertFalse(rank_routes(Task("extract", "fixture"), [route], {}, service.store)[0])
 
-    def test_switch_blocks_dispatch_and_probe_but_keeps_control_readable(self):
+    def _case_switch_blocks_dispatch_and_probe_but_keeps_control_readable(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: self.fail("must not dispatch"))
         self.save(service, enabled=False)
@@ -68,7 +138,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertFalse(dispatch(service, "router_scheduling", {})["settings"]["enabled"])
         self.assertEqual(service.store.probe_budget(0)["count"], 0)
 
-    def test_source_switch_and_optimistic_revision(self):
+    def _case_source_switch_and_optimistic_revision(self):
         a, b = fixtures.route(source="off"), fixtures.route(source="on")
         service = self.service([a, b], lambda *a: fixtures.response())
         self.save(service, sources={"off": False})
@@ -80,7 +150,7 @@ class SchedulingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "revision_conflict"):
             service.scheduling.control("save", value=conflicting, expected_revision=0)
 
-    def test_corrupt_settings_do_not_restore_broad_routing(self):
+    def _case_corrupt_settings_do_not_restore_broad_routing(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: fixtures.response())
         (service.state_dir / "scheduling.json").write_text('{"mode":"auto","mode":"directed"}')
@@ -88,7 +158,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertFalse(candidates)
         self.assertIn("scheduling_settings_invalid", rejected[0]["reasons"])
 
-    def test_graph_validates_cycles_duplicates_positions_and_custom_task_fields(self):
+    def _case_graph_validates_cycles_duplicates_positions_and_custom_task_fields(self):
         value = self.definition(fixtures.route())
         self.assertEqual(graph(value)["nodes"][0]["tags"], ["review"])
         negative=copy.deepcopy(value);negative["nodes"][0].update(x=-300,y=-200)
@@ -99,7 +169,7 @@ class SchedulingTests(unittest.TestCase):
             bad = copy.deepcopy(value);bad["nodes"][0][key] = val
             with self.assertRaises(ValueError): graph(bad)
 
-    def test_dag_delivers_only_successful_upstream_evidence_and_accounts_once(self):
+    def _case_dag_delivers_only_successful_upstream_evidence_and_accounts_once(self):
         route = fixtures.route()
         contexts = []
         def adapter(r, prompt, task, context):
@@ -117,7 +187,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertNotIn("input", run)
         self.assertEqual(len({n["job_id"] for n in run["nodes"].values()}), 2)
 
-    def test_unknown_timeout_blocks_downstream_without_replay(self):
+    def _case_unknown_timeout_blocks_downstream_without_replay(self):
         route = fixtures.route()
         calls = []
         def adapter(*args):
@@ -130,7 +200,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(run["tokens_used"], 12)
         self.assertEqual(len(calls), 1)
 
-    def test_directed_mode_does_not_handoff_outside_pool(self):
+    def _case_directed_mode_does_not_handoff_outside_pool(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: fixtures.response())
         self.save(service, mode="directed")
@@ -138,7 +208,7 @@ class SchedulingTests(unittest.TestCase):
             service.submit({"kind":"extract", "prompt":"fixture"})
         self.assertEqual(service.store.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
-    def test_workflow_can_explicitly_disable_monitor_without_weakening_ordinary_calls(self):
+    def _case_workflow_can_explicitly_disable_monitor_without_weakening_ordinary_calls(self):
         from gtt_router.service import RouterService
         r = fixtures.route()
         service = RouterService({"state_dir": str(self.root / "raw"), "limits": {}}, fixtures.FakeCatalog([r]), {"fake":lambda *a: fixtures.response()}, interface_paths=[self.root / "switch.json"])
@@ -154,7 +224,7 @@ class SchedulingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "luna_supervisor_required"):
             service.scheduling.submit(definition,request_id="new-supervised-request")
 
-    def test_local_nodes_preserve_evidence_and_use_no_extra_model_budget(self):
+    def _case_local_nodes_preserve_evidence_and_use_no_extra_model_budget(self):
         r = fixtures.route();calls = []
         def adapter(*a):calls.append(True);return fixtures.response("evidence")
         service = self.service([r], adapter)
@@ -168,7 +238,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(run["tokens_used"], 100)
         self.assertEqual(run["nodes"]["output"]["evidence_refs"], [run["nodes"]["0"]["job_id"]])
 
-    def test_gate_without_model_evidence_blocks_output(self):
+    def _case_gate_without_model_evidence_blocks_output(self):
         r = fixtures.route();service = self.service([r], lambda *a:self.fail("no model request"))
         definition = self.definition(r)
         for node in definition["nodes"]: node.update(node_type="gate", route_id="")
@@ -176,7 +246,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(run["nodes"]["0"]["reason"], "gate_requires_model_evidence")
         self.assertEqual(run["nodes"]["1"]["state"], "blocked")
 
-    def test_pool_expiry_after_paid_success_blocks_next_node_and_retains_usage(self):
+    def _case_pool_expiry_after_paid_success_blocks_next_node_and_retains_usage(self):
         r=fixtures.route();entered=threading.Event();release=threading.Event()
         def adapter(*a): entered.set();release.wait(3);return fixtures.response("preserved")
         service=self.service([r],adapter)
@@ -188,7 +258,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(run["nodes"]["1"]["state"],"blocked")
         self.assertEqual(run["tokens_used"],100)
 
-    def test_manual_probe_optional_monitor_keeps_explicit_unbudgeted_behavior(self):
+    def _case_manual_probe_optional_monitor_keeps_explicit_unbudgeted_behavior(self):
         from gtt_router.service import RouterService
         r=fixtures.route();service=RouterService({"state_dir":str(self.root/"probe"),"limits":{},"recovery":{"max_probes_per_hour":1}},fixtures.FakeCatalog([r]),{"fake":lambda *a:fixtures.response("GTT_RECOVERY_OK")},interface_paths=[self.root/"switch.json"]);self.services.append(service)
         first=service.scheduling.control("check",route_id=r.id,luna_supervision=False)
@@ -198,14 +268,14 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(service.store.probe_budget(0)["count"], 2)
         self.assertFalse(service._active_supervisors())
 
-    def test_no_settings_write_occurs_during_steady_read_only_ranking(self):
+    def _case_no_settings_write_occurs_during_steady_read_only_ranking(self):
         route = fixtures.route();service = self.service([route], lambda *a: fixtures.response())
         self.save(service)
         path = service.state_dir / "scheduling.json";stamp = path.stat().st_mtime_ns
         for _ in range(8):rank_routes(Task("extract", "fixture"), [route], {}, service.store)
         self.assertEqual(path.stat().st_mtime_ns, stamp)
 
-    def test_request_id_deduplicates_completed_runs_and_rejects_conflicts(self):
+    def _case_request_id_deduplicates_completed_runs_and_rejects_conflicts(self):
         r=fixtures.route();calls=[]
         def adapter(*a):calls.append(True);return fixtures.response()
         service=self.service([r],adapter);definition=self.definition(r,1)
@@ -216,7 +286,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(len(calls),1)
         with self.assertRaisesRegex(ValueError,"request_id_conflict"):service.scheduling.submit(definition,"changed",request_id="stable")
 
-    def test_optional_monitor_and_route_pool_are_preserved_during_verification(self):
+    def _case_optional_monitor_and_route_pool_are_preserved_during_verification(self):
         from gtt_router.service import RouterService
         r=fixtures.route();r.effort="low";outside=fixtures.route(source="outside",quality=99);calls=[]
         def adapter(route,*args):calls.append(route.id);return fixtures.response()
@@ -226,7 +296,7 @@ class SchedulingTests(unittest.TestCase):
         run=self.run_done(service,service.scheduling.submit(definition)["run_id"])
         self.assertEqual(run["state"],"succeeded");self.assertEqual(calls,[r.id,r.id]);self.assertFalse(service._active_supervisors())
 
-    def test_unknown_result_requires_explicit_risk_acknowledgement_for_new_run(self):
+    def _case_unknown_result_requires_explicit_risk_acknowledgement_for_new_run(self):
         r=fixtures.route();service=self.service([r],lambda *a:(_ for _ in ()).throw(WorkerFailure("timeout",usage={"total_tokens":12})))
         definition=self.definition(r,1)
         first=service.scheduling.submit(definition,request_id="first");self.run_done(service,first["run_id"])
@@ -236,7 +306,7 @@ class SchedulingTests(unittest.TestCase):
         accepted=service.scheduling.submit(definition,request_id="third",acknowledge_unknown_risk=True)
         self.assertNotEqual(accepted["run_id"],first["run_id"])
 
-    def test_cancel_does_not_wait_for_slow_submission_or_issue_pending_model_request(self):
+    def _case_cancel_does_not_wait_for_slow_submission_or_issue_pending_model_request(self):
         r=fixtures.route();service=self.service([r],lambda *a:self.fail("cancelled before generation"))
         entered=threading.Event();release=threading.Event();original=service.submit
         def delayed(*args,**kwargs):entered.set();release.wait(3);return original(*args,**kwargs)
@@ -247,7 +317,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(result["state"],"cancelled");self.assertEqual(result["tokens_used"],0)
         self.assertEqual(service.store.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0],0)
 
-    def test_node_fallback_stays_inside_explicit_routes_even_when_global_pool_order_differs(self):
+    def _case_node_fallback_stays_inside_explicit_routes_even_when_global_pool_order_differs(self):
         primary=fixtures.route(source="primary",quality=80);backup=fixtures.route(source="backup",quality=50);outside=fixtures.route(source="outside",quality=99);calls=[]
         def adapter(route,*args):
             calls.append(route.source)
@@ -260,7 +330,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(run["state"],"succeeded");self.assertEqual(calls,["primary","backup"])
         self.assertEqual(run["tokens_used"],100)
 
-    def test_information_support_binds_each_question_and_output_never_drops_unresolved_requests(self):
+    def _case_information_support_binds_each_question_and_output_never_drops_unresolved_requests(self):
         for support_mode in ["exact", "missing", "unrelated"]:
             with self.subTest(support=support_mode):
                 r=fixtures.route()
@@ -283,7 +353,7 @@ class SchedulingTests(unittest.TestCase):
                     self.assertEqual(len(result["nodes"]["out"]["information_requests"]),2)
                 if support_mode=="unrelated":self.assertEqual(result["nodes"]["1"]["state"],"blocked")
 
-    def test_partially_charged_running_node_does_not_double_reserve_budget(self):
+    def _case_partially_charged_running_node_does_not_double_reserve_budget(self):
         r=fixtures.route();r.max_parallel=4;release=threading.Event();third=threading.Event()
         def adapter(route,prompt,task,ctx):
             if task.prompt.startswith("职责：\nA") and 'counterexamples' in prompt:release.wait(5)
@@ -300,7 +370,7 @@ class SchedulingTests(unittest.TestCase):
         result=self.run_done(service,started["run_id"])
         self.assertEqual(result["state"],"succeeded");self.assertEqual(result["tokens_used"],400)
 
-    def test_default_node_budget_includes_actual_input_and_does_not_over_admit(self):
+    def _case_default_node_budget_includes_actual_input_and_does_not_over_admit(self):
         r=fixtures.route();service=self.service([r],lambda *a:self.fail("budget must stop generation"))
         definition=self.definition(r,1);definition["nodes"][0]["task"].pop("token_budget")
         bare=service.parse_task(definition["nodes"][0]["task"]).token_budget
@@ -309,7 +379,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(result["nodes"]["0"]["reason"],"workflow_token_budget_exhausted")
         self.assertEqual(result["tokens_used"],0)
 
-    def test_directed_plan_retains_selected_route_rejection_after_many_outsiders(self):
+    def _case_directed_plan_retains_selected_route_rejection_after_many_outsiders(self):
         outside=[fixtures.route(model=str(i)) for i in range(140)];selected=fixtures.route(model="selected")
         selected.auth_hint=False
         service=self.service([*outside,selected],lambda *a:self.fail("plan is read only"))
@@ -317,7 +387,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual([r["route_id"] for r in plan["rejected"]],[selected.id])
         self.assertEqual(plan["outside_allowed_routes_count"],140)
 
-    def test_public_information_excerpt_is_explicit_and_does_not_mutate_full_state(self):
+    def _case_public_information_excerpt_is_explicit_and_does_not_mutate_full_state(self):
         r=fixtures.route();service=self.service([r],lambda *a:fixtures.response())
         start=service.scheduling.submit(self.definition(r,1));self.run_done(service,start["run_id"])
         raw=service.scheduling.status(start["run_id"],full=True)

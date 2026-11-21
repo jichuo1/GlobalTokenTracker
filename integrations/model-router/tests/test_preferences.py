@@ -19,7 +19,41 @@ class PreferenceTests(unittest.TestCase):
     service = fixtures.RouterTests.service
     wait = fixtures.RouterTests.wait
 
-    def test_exact_preferences_are_scoped_and_cannot_bypass_hard_gates(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_preference_matching_hard_gates_and_validation(self):
+        self._run_cases(
+            self._case_exact_preferences_are_scoped_and_cannot_bypass_hard_gates,
+            self._case_model_preference_matches_multiple_sources_and_only_exact_names,
+            self._case_invalid_inputs_and_no_implicit_global_scope,
+        )
+
+    def test_scope_lifecycle_persistence_and_clearing(self):
+        self._run_cases(
+            self._case_merge_expiry_clear_and_persistence,
+            self._case_cleared_scope_is_visible_and_reverts_to_neutral,
+        )
+
+    def test_scope_concurrency_caps_and_isolation(self):
+        self._run_cases(
+            self._case_dynamic_cap_waits_without_cancellation_or_luna_bypass,
+            self._case_saturated_scope_does_not_block_other_scope_or_priority,
+        )
+
+    def test_group_scope_inheritance_and_coordinator_fairness(self):
+        self._run_cases(
+            self._case_group_roles_inherit_scope_without_changing_seats_or_budgets,
+            self._case_batched_scope_jobs_cannot_hoard_coordinators_before_first_reservation,
+        )
+
+    def _case_exact_preferences_are_scoped_and_cannot_bypass_hard_gates(self):
         strong = fixtures.route(source="other", model="strong", quality=80)
         preferred = fixtures.route(source="zcode", model="chosen", quality=41)
         service = self.service([strong, preferred], lambda *args: fixtures.response())
@@ -35,13 +69,13 @@ class PreferenceTests(unittest.TestCase):
         service.store.failure("provider:" + preferred.failure_domain, "auth_failed", 0)
         self.assertEqual(service.plan(task)["candidates"][0]["route"]["model"], "strong")
 
-    def test_model_preference_matches_multiple_sources_and_only_exact_names(self):
+    def _case_model_preference_matches_multiple_sources_and_only_exact_names(self):
         routes = [fixtures.route(source=s, model=m) for s, m in [("a", "chosen"), ("b", "chosen"), ("c", "chosen-other")]]
         ranked, _ = rank_routes(Task("extract", "bounded"), routes, {}, self.store, preferences={"preferred_models": ["chosen"]})
         matches = {c["route"].source: c["reasons"]["task_preference_boost"] for c in ranked}
         self.assertEqual(matches, {"a": 40, "b": 40, "c": 0})
 
-    def test_merge_expiry_clear_and_persistence(self):
+    def _case_merge_expiry_clear_and_persistence(self):
         scope = self.store.set_preferences({"preferred_sources": ["zcode"], "weight": 60}, ttl_s=60)
         changed = self.store.set_preferences({"concurrency_bias": -.5}, scope["scope_id"])
         self.assertEqual(changed["preferences"]["preferred_sources"], ["zcode"])
@@ -57,7 +91,7 @@ class PreferenceTests(unittest.TestCase):
         self.assertTrue(self.store.clear_preferences(scope["scope_id"])["cleared"])
         self.assertFalse(self.store.clear_preferences(scope["scope_id"])["cleared"])
 
-    def test_invalid_inputs_and_no_implicit_global_scope(self):
+    def _case_invalid_inputs_and_no_implicit_global_scope(self):
         for value in [{"weight": True}, {"concurrency_bias": float("nan")}, {"max_parallel": 2.5}, {"preferred_sources": "zcode"}, {"global": True}]:
             with self.assertRaises(ValueError):
                 self.store.set_preferences(value)
@@ -66,7 +100,7 @@ class PreferenceTests(unittest.TestCase):
         self.assertEqual(parallel_advice({"concurrency_bias": -1}, 4)["effective_max_parallel"], 1)
         self.assertEqual(parallel_advice({"concurrency_bias": 1, "max_parallel": 32}, 4)["effective_max_parallel"], 4)
 
-    def test_dynamic_cap_waits_without_cancellation_or_luna_bypass(self):
+    def _case_dynamic_cap_waits_without_cancellation_or_luna_bypass(self):
         r = fixtures.route()
         r.max_parallel = 4
         running, peak = 0, 0
@@ -100,7 +134,7 @@ class PreferenceTests(unittest.TestCase):
         self.assertEqual(peak, 2)
         self.assertEqual(service.inflight["scope:" + scope], 0)
 
-    def test_saturated_scope_does_not_block_other_scope_or_priority(self):
+    def _case_saturated_scope_does_not_block_other_scope_or_priority(self):
         service = self.service([fixtures.route()], lambda *args: fixtures.response())
         scope = service.preferences("set", preferences={"max_parallel": 1})["scope_id"]
         service.sync_codex_agents("test", [{"id": "actual-test-fixture", "status": "running", "preference_scope": scope}])
@@ -111,7 +145,7 @@ class PreferenceTests(unittest.TestCase):
         service.sync_codex_agents("test", [])
         self.assertEqual(self.wait(service, blocked)["state"], "succeeded")
 
-    def test_group_roles_inherit_scope_without_changing_seats_or_budgets(self):
+    def _case_group_roles_inherit_scope_without_changing_seats_or_budgets(self):
         service = self.service([fixtures.route(quality=80)], lambda *args: fixtures.response())
         scope = service.preferences("set", preferences={"concurrency_bias": -1})["scope_id"]
         req = GroupRequest.parse({"topic": "bounded", "needs_web": False, "preference_scope": scope})
@@ -123,7 +157,7 @@ class PreferenceTests(unittest.TestCase):
             self.assertEqual(task.preference_scope, scope)
             self.assertEqual(task.routing_strategy, expected)
 
-    def test_batched_scope_jobs_cannot_hoard_coordinators_before_first_reservation(self):
+    def _case_batched_scope_jobs_cannot_hoard_coordinators_before_first_reservation(self):
         service = self.service([fixtures.route()], lambda *args: fixtures.response())
         scope = service.preferences("set", preferences={"max_parallel": 1})["scope_id"]
         entered, release = threading.Event(), threading.Event()
@@ -145,7 +179,7 @@ class PreferenceTests(unittest.TestCase):
         for job in jobs:
             self.assertEqual(self.wait(service, job)["state"], "succeeded")
 
-    def test_cleared_scope_is_visible_and_reverts_to_neutral(self):
+    def _case_cleared_scope_is_visible_and_reverts_to_neutral(self):
         service = self.service([fixtures.route()], lambda *args: fixtures.response())
         scope = service.preferences("set", preferences={"max_parallel": 1})["scope_id"]
         service.preferences("clear", scope)
@@ -158,7 +192,23 @@ class StrategyTests(unittest.TestCase):
     setUp = fixtures.RouterTests.setUp
     tearDown = fixtures.RouterTests.tearDown
 
-    def test_strategy_changes_ranking_after_identical_hard_gates(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_routing_strategies_measured_cost_and_legacy_health_migration(self):
+        self._run_cases(
+            self._case_strategy_changes_ranking_after_identical_hard_gates,
+            self._case_estimates_do_not_count_as_measured_token_cost,
+            self._case_legacy_auth_migration_and_recovered_unseen_keys,
+        )
+
+    def _case_strategy_changes_ranking_after_identical_hard_gates(self):
         smart, fast = fixtures.route(model="smart", quality=90, latency=120), fixtures.route(provider="other", model="fast", quality=41, latency=1)
         self.assertEqual(rank_routes(Task("extract", "x", routing_strategy="quality"), [smart, fast], {}, self.store)[0][0]["route"].model, "smart")
         self.assertEqual(rank_routes(Task("extract", "x", routing_strategy="speed"), [smart, fast], {}, self.store)[0][0]["route"].model, "fast")
@@ -166,7 +216,7 @@ class StrategyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Task.parse({"kind": "extract", "prompt": "x", "routing_strategy": value})
 
-    def test_estimates_do_not_count_as_measured_token_cost(self):
+    def _case_estimates_do_not_count_as_measured_token_cost(self):
         r = fixtures.route()
         key = "route:" + r.id + ":kind:extract"
         for _ in range(4):
@@ -179,7 +229,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(ranked["reasons"]["token_cost_source"], "reported_same_kind_history")
         self.assertGreater(ranked["reasons"]["token_efficiency_penalty"], 4)
 
-    def test_legacy_auth_migration_and_recovered_unseen_keys(self):
+    def _case_legacy_auth_migration_and_recovered_unseen_keys(self):
         path = self.root / "legacy.sqlite"
         conn = sqlite3.connect(path)
         conn.execute("CREATE TABLE health(key TEXT PRIMARY KEY,failures INTEGER NOT NULL DEFAULT 0,successes INTEGER NOT NULL DEFAULT 0,latency_ms REAL,cooldown_until INTEGER NOT NULL DEFAULT 0,last_error TEXT)")

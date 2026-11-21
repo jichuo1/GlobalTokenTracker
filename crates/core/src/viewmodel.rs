@@ -1113,7 +1113,6 @@ mod tests {
     use jiff::civil::date;
     use jiff::tz::TimeZone;
 
-    #[test]
     fn custom_spans_read_back_days_and_hours() {
         let utc = TimeZone::UTC;
         let d = date(2026, 10, 12);
@@ -1155,7 +1154,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn quotas_rank_live_first_then_by_percent() {
         let q = |app: &str, pct: Option<f64>, reset: Option<i64>| QuotaRow {
             app: app.into(),
@@ -1180,7 +1178,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn quick_ranges_are_monday_first_and_inclusive() {
         let thu = date(2026, 10, 15);
         let days = |q: QuickRange| q.days_on(thu);
@@ -1208,7 +1205,6 @@ mod tests {
         assert_eq!(QuickRange::from_key("nope"), None);
     }
 
-    #[test]
     fn custom_days_are_inclusive_ordered_and_dst_safe() {
         let utc = TimeZone::UTC;
         let Range::Custom { start_ms, end_ms } =
@@ -1237,7 +1233,6 @@ mod tests {
         assert_eq!(local_date_in(&ny, r.end_ms().unwrap()), date(2026, 3, 10));
     }
 
-    #[test]
     fn custom_hours_are_inclusive_and_end_at_midnight() {
         let utc = TimeZone::UTC;
         let d = date(2026, 10, 7);
@@ -1262,7 +1257,6 @@ mod tests {
         assert!(r.hourly_in(&ny));
     }
 
-    #[test]
     fn hourly_only_for_today_and_single_day_windows() {
         let utc = TimeZone::UTC;
         assert!(Range::Today.hourly_in(&utc));
@@ -1272,7 +1266,6 @@ mod tests {
         assert!(!two.hourly_in(&utc));
     }
 
-    #[test]
     fn local_date_round_trips_through_day_start() {
         for name in ["UTC", "America/New_York", "Asia/Shanghai"] {
             let tz = TimeZone::get(name).unwrap();
@@ -1287,7 +1280,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn tokens_exact_groups() {
         assert_eq!(fmt::tokens_exact(0), "0");
         assert_eq!(fmt::tokens_exact(999), "999");
@@ -1301,7 +1293,6 @@ mod tests {
         assert_eq!(fmt::tokens_compact(1_730_848_235), "17.3亿");
     }
 
-    #[test]
     fn trim_f_strips_insignificant_zeros() {
         assert_eq!(fmt::trim_f(0.5, 4), "0.5");
         assert_eq!(fmt::trim_f(0.0038, 4), "0.0038");
@@ -1314,7 +1305,6 @@ mod tests {
         assert_eq!(fmt::trim_f(0.00004, 4), "0"); // below precision → clean zero
     }
 
-    #[test]
     fn usd_trims_trailing_zeros() {
         assert_eq!(fmt::usd(0.0), "$0");
         assert_eq!(fmt::usd(0.5), "$0.5");
@@ -1327,7 +1317,6 @@ mod tests {
 
     // `render` is pure (the global display slot is never written in tests —
     // parallel tests read it via `usd`), so conversion gets exercised here.
-    #[test]
     fn render_converts_ledger_usd_into_display_currency() {
         let cny = fmt::MoneyDisplay {
             code: "CNY".into(),
@@ -1348,13 +1337,11 @@ mod tests {
         assert_eq!(fmt::render(45.2, &identity), "$45.2"); // unknown rate → ledger USD
     }
 
-    #[test]
     fn money_prefix_falls_back_to_iso_code() {
         assert_eq!(fmt::prefix("HKD"), "HK$");
         assert_eq!(fmt::prefix("BRL"), "BRL ");
     }
 
-    #[test]
     fn quota_groups_fold_per_app() {
         use crate::store::QuotaRow;
         let row = |app: &str, kind: &str, pct: Option<f64>| QuotaRow {
@@ -1382,11 +1369,48 @@ mod tests {
         assert_eq!(super::quota_kind_label("brand_new_kind"), "brand_new_kind");
     }
 
-    #[test]
     fn range_roundtrip() {
         for r in super::Range::LIST {
             assert_eq!(super::Range::from_key(r.key()), r);
             assert_eq!(super::Range::from_label(r.label()), r);
         }
+    }
+
+    #[test]
+    fn custom_day_and_hour_spans_with_dst() {
+        custom_spans_read_back_days_and_hours();
+        custom_days_are_inclusive_ordered_and_dst_safe();
+        custom_hours_are_inclusive_and_end_at_midnight();
+    }
+
+    #[test]
+    fn quick_ranges_and_range_roundtrips() {
+        quick_ranges_are_monday_first_and_inclusive();
+        range_roundtrip();
+    }
+
+    #[test]
+    fn hourly_detection_and_local_date_roundtrip() {
+        hourly_only_for_today_and_single_day_windows();
+        local_date_round_trips_through_day_start();
+    }
+
+    #[test]
+    fn token_and_float_formatting() {
+        tokens_exact_groups();
+        trim_f_strips_insignificant_zeros();
+    }
+
+    #[test]
+    fn money_formatting_and_currency_render() {
+        usd_trims_trailing_zeros();
+        render_converts_ledger_usd_into_display_currency();
+        money_prefix_falls_back_to_iso_code();
+    }
+
+    #[test]
+    fn quota_ranking_and_grouping() {
+        quotas_rank_live_first_then_by_percent();
+        quota_groups_fold_per_app();
     }
 }

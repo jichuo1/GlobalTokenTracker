@@ -219,7 +219,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn project_transcript_emits_credit_events() {
         let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
         let data = br#"{"type":"workspace-directories","sessionId":"sess-1234","directories":["D:\\TestProj"]}
@@ -241,7 +240,6 @@ mod tests {
         assert!(ev.is_billable());
     }
 
-    #[test]
     fn subagent_transcript_resolves_parent_session() {
         let p = "/home/u/.qoder/projects/D--TestProj/sess-1234/subagents/agent-xyz.jsonl";
         let data = br#"{"type":"user","uuid":"u2","timestamp":"2026-10-08T06:51:11.000Z","message":{"role":"user","content":"sub"}}
@@ -259,7 +257,6 @@ mod tests {
         assert_eq!(ev.duration_ms, Some(4_000));
     }
 
-    #[test]
     fn non_billable_or_zero_credit_skipped() {
         let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
         let data = br#"{"type":"assistant","uuid":"a3","timestamp":"2026-10-08T06:51:20.000Z","cwd":"D:\\TestProj","sessionId":"sess-1234","message":{"id":"resp_3","role":"assistant","model":"smodel","usage":{"credits":0.0,"billable":true,"request_id":"zero"}}}
@@ -270,7 +267,6 @@ mod tests {
         assert_eq!(out.consumed, data.len() as u64);
     }
 
-    #[test]
     fn partial_tail_not_consumed() {
         let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
         let data = b"{\"type\":\"user\",\"timestamp\":\"2026-10-08T06:50:50Z\"}\n{\"type\":\"assistant\",\"time";
@@ -279,7 +275,6 @@ mod tests {
         assert!(out.consumed < data.len() as u64);
     }
 
-    #[test]
     fn user_timestamp_survives_across_segments() {
         let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
         let seg1 = br#"{"type":"user","uuid":"u1","timestamp":"2026-10-08T06:50:50.000Z","message":{"role":"user","content":"hi"}}
@@ -300,7 +295,6 @@ mod tests {
         assert_eq!(ev.request_model.as_deref(), Some("kmodel_latest"));
     }
 
-    #[test]
     fn unknown_model_key_passes_through() {
         let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
         let data = br#"{"type":"assistant","uuid":"a9","timestamp":"2026-10-08T06:51:20.000Z","cwd":"D:\\TestProj","sessionId":"sess-1234","message":{"id":"resp_9","role":"assistant","model":"brand_new_key","stop_reason":"end_turn","usage":{"credits":2.0,"billable":true,"request_id":"req-y"}}}
@@ -310,7 +304,6 @@ mod tests {
         assert_eq!(ev.model.as_deref(), Some("brand_new_key"));
         assert_eq!(ev.request_model.as_deref(), Some("brand_new_key"));
     }
-    #[test]
     fn workspace_header_survives_append_and_cache_only_receipt_counts() {
         let source = item("/tmp/qoder/s.jsonl");
         let head = b"{\"type\":\"workspace-directories\",\"directories\":[\"/project\"]}\n";
@@ -322,5 +315,24 @@ mod tests {
         assert_eq!(second.events.len(), 1);
         assert_eq!(second.events[0].project.as_deref(), Some("/project"));
         assert_eq!(second.events[0].cache_read_tokens, 100);
+    }
+
+    #[test]
+    fn transcript_credit_and_model_parsing() {
+        project_transcript_emits_credit_events();
+        subagent_transcript_resolves_parent_session();
+        unknown_model_key_passes_through();
+    }
+
+    #[test]
+    fn filtering_and_partial_tail_handling() {
+        non_billable_or_zero_credit_skipped();
+        partial_tail_not_consumed();
+    }
+
+    #[test]
+    fn cross_segment_state_and_cache_receipts() {
+        user_timestamp_survives_across_segments();
+        workspace_header_survives_append_and_cache_only_receipt_counts();
     }
 }

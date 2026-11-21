@@ -297,7 +297,6 @@ pub fn block_frames(i: usize, dir: f64) -> Vec<(f32, f32)> {
 mod tests {
     use super::*;
 
-    #[test]
     fn frames_start_at_from_and_land_exactly_on_to() {
         for f in [
             enter_frames(1.0, 1180.0),
@@ -315,14 +314,12 @@ mod tests {
         assert_eq!(leave_frames(-1.0, 1180.0).last().unwrap().1, 1180.0);
     }
 
-    #[test]
     fn progress_is_strictly_increasing() {
         for f in [enter_frames(1.0, 900.0), block_frames(9, 1.0)] {
             assert!(f.windows(2).all(|w| w[0].0 < w[1].0), "{f:?}");
         }
     }
 
-    #[test]
     fn a_block_holds_its_start_position_through_its_delay() {
         // block 5 waits 60ms of the 600ms flight before it moves
         let f = block_frames(5, 1.0);
@@ -332,7 +329,6 @@ mod tests {
         assert!((held.0 - 0.1).abs() < 1e-6, "{}", held.0);
     }
 
-    #[test]
     fn push_keeps_the_pages_exactly_one_width_apart() {
         // enter x − leave x == dir·w at every sample (same spring, same
         // sample times) → the pages never overlap or open a gap.
@@ -344,12 +340,24 @@ mod tests {
         }
     }
 
-    #[test]
     fn critically_damped_layer_never_overshoots() {
         assert!(
             enter_frames(1.0, 1000.0)
                 .iter()
                 .all(|&(_, x)| (0.0..=1000.0).contains(&x))
         );
+    }
+
+    #[test]
+    fn slide_frame_endpoints_progress_and_delay() {
+        frames_start_at_from_and_land_exactly_on_to();
+        progress_is_strictly_increasing();
+        a_block_holds_its_start_position_through_its_delay();
+    }
+
+    #[test]
+    fn slide_push_spacing_and_damping() {
+        push_keeps_the_pages_exactly_one_width_apart();
+        critically_damped_layer_never_overshoots();
     }
 }

@@ -7,7 +7,30 @@ from gtt_router.profiles import ABS_LIMITS
 
 
 class OutputBudgetTests(unittest.TestCase):
-    def test_zcode_inherited_option_range_and_personal_override(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_output_limit_inheritance_ceilings_and_native_caps(self):
+        self._run_cases(
+            self._case_zcode_inherited_option_range_and_personal_override,
+            self._case_large_ceiling_matches_mcp_schema_and_rejects_overflow,
+            self._case_native_limit_is_used_without_mutating_requested_budget,
+        )
+
+    def test_task_default_budgets_headroom_and_explicit_overrides(self):
+        self._run_cases(
+            self._case_logical_defaults_leave_reasoning_and_time_headroom,
+            self._case_simple_tasks_and_explicit_limits_keep_existing_behavior,
+            self._case_default_budget_covers_workers_and_verifier_and_stays_bounded,
+        )
+
+    def _case_zcode_inherited_option_range_and_personal_override(self):
         builtin={"modelConfigRules":{"modelRules":[{"modelMatch":".*","config":{"optionSpecs":{"maxOutputTokens":{"max":32000}}}}],
             "providerSiteRules":[{"modelMatch":".*","baseUrlMatch":"https://example.com","config":{"optionSpecs":{"maxOutputTokens":{"max":64000}}}}]}}
         provider={"config":{"api":{"type":"anthropic-messages","baseUrl":"https://elsewhere.example/"}}}
@@ -19,7 +42,7 @@ class OutputBudgetTests(unittest.TestCase):
         personal["modelConfigRules"]["manualProviderModelRules"]=[{"providerId":"p","modelId":"m","config":{}}]
         self.assertIsNone(zcode_output_limit(builtin,personal,"p",provider,"m"))
 
-    def test_large_ceiling_matches_mcp_schema_and_rejects_overflow(self):
+    def _case_large_ceiling_matches_mcp_schema_and_rejects_overflow(self):
         self.assertEqual(TASK_SCHEMA["properties"]["max_output_tokens"]["maximum"], ABS_LIMITS["max_output_tokens"])
         t = Task.parse({"kind": "logic_check", "prompt": "bounded", "max_output_tokens": 65536})
         self.assertEqual(t.max_output_tokens, 65536)
@@ -27,20 +50,20 @@ class OutputBudgetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Task.parse({"kind": "logic_check", "prompt": "bounded", "max_output_tokens": MAX_OUTPUT_TOKENS + 1})
 
-    def test_logical_defaults_leave_reasoning_and_time_headroom(self):
+    def _case_logical_defaults_leave_reasoning_and_time_headroom(self):
         for kind in ("code_review", "logic_check", "cross_check"):
             t = Task.parse({"kind": kind, "prompt": "bounded"})
             self.assertEqual((t.max_output_tokens, t.deadline_s), (32768, 600))
             self.assertGreater(t.token_budget, t.max_output_tokens)
 
-    def test_simple_tasks_and_explicit_limits_keep_existing_behavior(self):
+    def _case_simple_tasks_and_explicit_limits_keep_existing_behavior(self):
         t = Task.parse({"kind": "extract", "prompt": "bounded"})
         self.assertEqual((t.max_output_tokens, t.deadline_s, t.token_budget), (8192, 180, 24000))
         t = Task.parse({"kind": "logic_check", "prompt": "bounded", "max_output_tokens": 512,
                         "deadline_s": 20, "token_budget": 3000})
         self.assertEqual((t.max_output_tokens, t.deadline_s, t.token_budget), (512, 20, 3000))
 
-    def test_default_budget_covers_workers_and_verifier_and_stays_bounded(self):
+    def _case_default_budget_covers_workers_and_verifier_and_stays_bounded(self):
         t = Task.parse({"kind": "code_review", "prompt": "bounded", "fanout": 2})
         self.assertTrue(t.verify)
         self.assertGreater(t.token_budget, 3 * t.max_output_tokens)
@@ -48,7 +71,7 @@ class OutputBudgetTests(unittest.TestCase):
         t = Task.parse({"kind": "code_review", "prompt": "x" * 64000, "fanout": 4, "max_output_tokens": 65536})
         self.assertEqual(t.token_budget, DEFAULT_TASK_TOKENS)
 
-    def test_native_limit_is_used_without_mutating_requested_budget(self):
+    def _case_native_limit_is_used_without_mutating_requested_budget(self):
         r = Route("fixture", "p", "m", output_limit=4096)
         t = Task.parse({"kind": "code_review", "prompt": "bounded"})
         self.assertEqual(r.output_ceiling(t.max_output_tokens), 4096)

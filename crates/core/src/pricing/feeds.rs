@@ -1152,7 +1152,6 @@ mod tests {
         assert_eq!(dump(&a), dump(&b), "rows for {body}");
     }
 
-    #[test]
     fn models_dev_matches_the_value_implementation() {
         same_rows(
             &json!({
@@ -1180,7 +1179,6 @@ mod tests {
         same_rows(&json!("text"), import_models_dev, reference_models_dev);
     }
 
-    #[test]
     fn litellm_matches_the_value_implementation() {
         same_rows(
             &json!({
@@ -1205,7 +1203,6 @@ mod tests {
         same_rows(&json!(null), import_litellm, reference_litellm);
     }
 
-    #[test]
     fn litellm_imports_long_context_output_and_cache_read_tiers() {
         let s = Store::open_memory().unwrap();
         let body =
@@ -1226,7 +1223,6 @@ mod tests {
         assert!((cr.unwrap() - 0.6).abs() < 1e-9);
     }
 
-    #[test]
     fn llmpricing_matches_the_value_implementation() {
         same_rows(
             &json!({"meta": {"models": 6}, "models": [
@@ -1315,7 +1311,6 @@ mod tests {
         (a - b).abs() < 1e-9 * a.abs().max(1.0)
     }
 
-    #[test]
     fn openrouter_prices_are_decimal_strings_per_token() {
         let s = Store::open_memory().unwrap();
         let body = json!({"data": [
@@ -1356,7 +1351,6 @@ mod tests {
         assert_eq!(import_openrouter(s.conn(), "[1,2]", 1).unwrap(), 0);
     }
 
-    #[test]
     fn vercel_prices_use_input_output_names() {
         let s = Store::open_memory().unwrap();
         let body = json!({"object": "list", "data": [
@@ -1383,7 +1377,6 @@ mod tests {
         assert!(near(e.1, 0.02) && e.2 == 0.0, "input-only model: {e:?}");
     }
 
-    #[test]
     fn helicone_reads_only_the_model_makers_own_rows() {
         let s = Store::open_memory().unwrap();
         let body = json!({"metadata": {}, "data": [
@@ -1414,7 +1407,6 @@ mod tests {
         assert!(near(o.3.unwrap(), 0.5) && near(o.4.unwrap(), 6.25));
     }
 
-    #[test]
     fn langfuse_uses_the_default_tier_and_skips_blended_rows() {
         let s = Store::open_memory().unwrap();
         let body = json!([
@@ -1450,7 +1442,6 @@ mod tests {
         assert!(rows.iter().all(|r| r.0 != "text-ada-001"));
     }
 
-    #[test]
     fn llm_prices_skips_the_long_context_surcharge_rows() {
         let s = Store::open_memory().unwrap();
         let body = json!({"updated_at": "2026-09-28", "prices": [
@@ -1469,7 +1460,6 @@ mod tests {
         assert_eq!(rows.iter().find(|r| r.0 == "gpt-5-nano").unwrap().3, None);
     }
 
-    #[test]
     fn portkey_prices_are_cents_per_token() {
         let s = Store::open_memory().unwrap();
         let body = json!({
@@ -1593,5 +1583,31 @@ mod tests {
         assert!(import_models_dev(s.conn(), "{\"a\": {\"models\": ", 1).is_err());
         assert!(import_litellm(s.conn(), "not json", 1).is_err());
         assert_eq!(dump(&s).len(), 0);
+    }
+
+    #[test]
+    fn primary_feeds_match_value_oracles() {
+        models_dev_matches_the_value_implementation();
+        llmpricing_matches_the_value_implementation();
+    }
+
+    #[test]
+    fn litellm_oracle_and_long_context_tiers() {
+        litellm_matches_the_value_implementation();
+        litellm_imports_long_context_output_and_cache_read_tiers();
+    }
+
+    #[test]
+    fn gateway_cross_check_feeds_openrouter_vercel_portkey() {
+        openrouter_prices_are_decimal_strings_per_token();
+        vercel_prices_use_input_output_names();
+        portkey_prices_are_cents_per_token();
+    }
+
+    #[test]
+    fn provider_cross_check_feeds_helicone_langfuse_llm_prices() {
+        helicone_reads_only_the_model_makers_own_rows();
+        langfuse_uses_the_default_tier_and_skips_blended_rows();
+        llm_prices_skips_the_long_context_surcharge_rows();
     }
 }

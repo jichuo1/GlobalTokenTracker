@@ -41,7 +41,77 @@ class SchedulerCouplingTests(unittest.TestCase):
     seed = coordination.CoordinationTests.seed
     merge = coordination.CoordinationTests.merge
 
-    def test_cached_review_can_aggregate_many_reports_without_repaying_leader(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_restart_and_cached_resume_without_repaying(self):
+        self._run_cases(
+            self._case_cached_review_can_aggregate_many_reports_without_repaying_leader,
+            self._case_last_round_resume_can_finish_already_assigned_slices,
+            self._case_successful_initial_plan_survives_restart_without_paid_replanning,
+        )
+
+    def test_restore_reconciliation_and_seat_stability(self):
+        self._run_cases(
+            self._case_support_task_does_not_rewrite_the_persistent_collector_seat,
+            self._case_restore_reconciles_pending_zero_timeout_once_without_duplicate_usage,
+        )
+
+    def test_merge_locking_slice_safety_and_constraints(self):
+        self._run_cases(
+            self._case_control_and_merge_follow_same_lock_order,
+            self._case_merge_cannot_seal_pending_slice_work_permanently_read_only,
+            self._case_merge_preserves_source_parallel_and_exploration_constraints,
+        )
+
+    def test_information_request_resolution_and_fault_isolation(self):
+        self._run_cases(
+            self._case_one_support_does_not_resolve_two_distinct_information_requests,
+            self._case_split_support_closes_a_request_only_after_all_subranges_are_present,
+            self._case_malformed_advisory_communication_does_not_invalidate_a_valid_request,
+            self._case_journal_saturation_does_not_turn_valid_information_into_an_invalid_request,
+        )
+
+    def test_exploration_budget_accounting_and_isolation(self):
+        self._run_cases(
+            self._case_exploration_budget_cannot_block_a_later_primary_call,
+            self._case_exploration_usage_is_reserved_charged_and_released_once,
+        )
+
+    def test_headroom_budget_and_affordable_route_waiting(self):
+        self._run_cases(
+            self._case_wrapper_headroom_failure_is_immediate_and_never_handed_to_codex,
+            self._case_affordable_busy_route_is_waited_for_after_expensive_route_is_rejected,
+            self._case_permanent_budget_miss_does_not_wait_on_an_unrelated_reservation,
+        )
+
+    def test_scope_capacity_and_late_coverage_guards(self):
+        self._run_cases(
+            self._case_scope_wait_expiry_keeps_capacity_reason_and_no_codex_handoff,
+            self._case_late_codex_coverage_blocks_a_queued_external_request,
+            self._case_dispatcher_scope_queue_honors_explicit_wait_before_worker_start,
+        )
+
+    def test_invalid_member_task_and_range_validation(self):
+        self._run_cases(
+            self._case_invalid_task_reference_returns_to_leader_without_a_stuck_running_slice,
+            self._case_outside_source_range_is_rejected_before_slice_allocation,
+        )
+
+    def test_bounded_evidence_and_targeted_request_delivery(self):
+        self._run_cases(
+            self._case_precise_range_and_requested_reports_exclude_unrelated_recent_evidence,
+            self._case_long_summary_does_not_repeat_and_hide_findings_in_bounded_evidence,
+            self._case_request_id_only_task_delivers_the_exact_question_without_resending_source,
+        )
+
+    def _case_cached_review_can_aggregate_many_reports_without_repaying_leader(self):
         leaders = []
         def adapter(route, prompt, task, context):
             if fixtures.is_leader(task):
@@ -87,7 +157,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(len(leaders), 1)
         self.assertEqual(service.groups._unresolved_requests(job), {})
 
-    def test_last_round_resume_can_finish_already_assigned_slices(self):
+    def _case_last_round_resume_can_finish_already_assigned_slices(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False, "max_rounds": 1})
         job = GroupJob(req)
@@ -106,7 +176,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(state["round"], 1)
         self.assertEqual(job.request.max_rounds, 1)
 
-    def test_one_support_does_not_resolve_two_distinct_information_requests(self):
+    def _case_one_support_does_not_resolve_two_distinct_information_requests(self):
         def adapter(route, prompt, task, context):
             if fixtures.is_leader(task):
                 return fixtures.reply({"action": "continue_research" if fixtures.initial(task) else "submit_codex"})
@@ -124,7 +194,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         state = self.wait(service, self.submit(service, context="x" * 1000))
         self.assertEqual(state["pending_action"]["type"], "unresolved_information_requests")
 
-    def test_exploration_budget_cannot_block_a_later_primary_call(self):
+    def _case_exploration_budget_cannot_block_a_later_primary_call(self):
         candidates = fixtures.routes()
         for route in candidates:
             route.output_limit = 4096
@@ -140,7 +210,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(job.tokens_reserved, 0)
 
-    def test_control_and_merge_follow_same_lock_order(self):
+    def _case_control_and_merge_follow_same_lock_order(self):
         service = self.service()
         target = self.seed(service, workflow="default")
         one, two = self.seed(service, workflow="default"), self.seed(service, workflow="default")
@@ -164,7 +234,7 @@ class SchedulerCouplingTests(unittest.TestCase):
                 continued.result(3)
                 self.assertEqual(combined.result(3)["state"], "needs_codex")
 
-    def test_merge_cannot_seal_pending_slice_work_permanently_read_only(self):
+    def _case_merge_cannot_seal_pending_slice_work_permanently_read_only(self):
         service = self.service()
         one, two = self.seed(service), self.seed(service)
         queue = SliceQueue(one.request, [item()])
@@ -176,7 +246,7 @@ class SchedulerCouplingTests(unittest.TestCase):
             self.merge(service, one, two)
         self.assertNotEqual(service.groups.status(one.id)["state"], "merged")
 
-    def test_wrapper_headroom_failure_is_immediate_and_never_handed_to_codex(self):
+    def _case_wrapper_headroom_failure_is_immediate_and_never_handed_to_codex(self):
         routes = fixtures.routes()[::2]
         for route in routes:
             route.context_window = 600
@@ -191,7 +261,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual((calls, job.tokens_used, job.attempt_count), ([], 0, 0))
         self.assertLess(time.monotonic() - started, .5)
 
-    def test_affordable_busy_route_is_waited_for_after_expensive_route_is_rejected(self):
+    def _case_affordable_busy_route_is_waited_for_after_expensive_route_is_rejected(self):
         routes = fixtures.routes()[::2]
         routes[0].output_limit, routes[1].output_limit = 100000, 256
         service = self.service(candidates=routes)
@@ -211,7 +281,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["route"]["route_id"], routes[1].id)
 
-    def test_scope_wait_expiry_keeps_capacity_reason_and_no_codex_handoff(self):
+    def _case_scope_wait_expiry_keeps_capacity_reason_and_no_codex_handoff(self):
         service = self.service()
         scope = service.preferences("set", preferences={"max_parallel": 1})["scope_id"]
         service.sync_codex_agents("fixture-busy", [{"id": "fixture-busy", "status": "running", "workflow_id": "default", "preference_scope": scope}], 600)
@@ -222,7 +292,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertNotIn("codex_fallback", result)
         self.assertEqual(job.tokens_used, 0)
 
-    def test_permanent_budget_miss_does_not_wait_on_an_unrelated_reservation(self):
+    def _case_permanent_budget_miss_does_not_wait_on_an_unrelated_reservation(self):
         routes = fixtures.routes()[::2]
         for route in routes:
             route.profile["latency_prior_s"] = .001
@@ -234,7 +304,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "token_budget_exhausted")
         self.assertNotIn("codex_fallback", result)
 
-    def test_split_support_closes_a_request_only_after_all_subranges_are_present(self):
+    def _case_split_support_closes_a_request_only_after_all_subranges_are_present(self):
         service = self.service()
         job = GroupJob(GroupRequest.parse({"topic": "fixture", "needs_web": False}))
         source = {"worker": 1, "ok": True, "content": {"information_requests": [{"question": "Need definition", "reason": "Missing input"}]}}
@@ -246,7 +316,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         job.results.append({"worker": 3, "ok": True, "responds_to_requests": ["1:0"], "support": support, "slice": {"start": 150, "end": 200}})
         self.assertEqual(service.groups._unresolved_requests(job), {})
 
-    def test_malformed_advisory_communication_does_not_invalidate_a_valid_request(self):
+    def _case_malformed_advisory_communication_does_not_invalidate_a_valid_request(self):
         service = self.service()
         job = self.seed(service, workflow="default")
         report = job.results[0]
@@ -257,7 +327,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertNotIn("information_request_error", report)
         self.assertEqual(len(report["information_requests"]), 1)
 
-    def test_exploration_usage_is_reserved_charged_and_released_once(self):
+    def _case_exploration_usage_is_reserved_charged_and_released_once(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False, "token_budget": 100000})
         job = GroupJob(req)
@@ -270,7 +340,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual((job.tokens_reserved, job.exploration_tokens_reserved), (0, 0))
         self.assertTrue(job.attempts[0]["exploration"])
 
-    def test_successful_initial_plan_survives_restart_without_paid_replanning(self):
+    def _case_successful_initial_plan_survives_restart_without_paid_replanning(self):
         planning_calls, prompts = [], []
         def adapter(route, prompt, task, context):
             if fixtures.is_leader(task):
@@ -297,7 +367,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertTrue(any(p.startswith("Retain the paid plan") for p in prompts))
         self.assertEqual(state["tokens_used"], 40)
 
-    def test_merge_preserves_source_parallel_and_exploration_constraints(self):
+    def _case_merge_preserves_source_parallel_and_exploration_constraints(self):
         service = self.service()
         one, two = self.seed(service), self.seed(service)
         one.request.max_parallel = 1
@@ -314,7 +384,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(combined.request.output_mode, "native")
         self.assertEqual(combined.exploration_tokens_used, 30)
 
-    def test_late_codex_coverage_blocks_a_queued_external_request(self):
+    def _case_late_codex_coverage_blocks_a_queued_external_request(self):
         calls = []
         service = self.service(lambda *args: calls.append(args))
         task = Task.parse({"kind": "extract", "prompt": "short", "work_key": "same-purpose"})
@@ -324,7 +394,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "work_already_covered")
         self.assertEqual((calls, job.attempt_count, job.tokens_used), ([], 0, 0))
 
-    def test_dispatcher_scope_queue_honors_explicit_wait_before_worker_start(self):
+    def _case_dispatcher_scope_queue_honors_explicit_wait_before_worker_start(self):
         service = self.service()
         scope = service.preferences("set", preferences={"max_parallel": 1})["scope_id"]
         service.sync_codex_agents("fixture-full-scope", [{"id": "fixture-full", "status": "running", "workflow_id": "default", "preference_scope": scope}], 600)
@@ -339,7 +409,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(status["error"]["code"], "scope_capacity_full")
         self.assertEqual((status["attempt_count"], status["tokens_used"]), (0, 0))
 
-    def test_support_task_does_not_rewrite_the_persistent_collector_seat(self):
+    def _case_support_task_does_not_rewrite_the_persistent_collector_seat(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False, "context": "x" * 1000})
         job = GroupJob(req)
@@ -354,7 +424,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(job.roles[1]["role"], "collector")
         self.assertEqual(service.groups._seed_tasks(job)[0]["role"], "collector")
 
-    def test_invalid_task_reference_returns_to_leader_without_a_stuck_running_slice(self):
+    def _case_invalid_task_reference_returns_to_leader_without_a_stuck_running_slice(self):
         seen = []
         def adapter(route, prompt, task, context):
             if fixtures.is_leader(task):
@@ -375,7 +445,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(len(failed), 1)
         self.assertEqual(state["tokens_used"], 50)
 
-    def test_outside_source_range_is_rejected_before_slice_allocation(self):
+    def _case_outside_source_range_is_rejected_before_slice_allocation(self):
         def adapter(route, prompt, task, context):
             return fixtures.reply({"action": "continue_research", "next_tasks": [item(context_range=[0, 1001])]})
         service = self.service(adapter)
@@ -385,7 +455,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertIsNone(service.groups.jobs[group].slice_state)
         self.assertEqual(state["tokens_used"], 10)
 
-    def test_precise_range_and_requested_reports_exclude_unrelated_recent_evidence(self):
+    def _case_precise_range_and_requested_reports_exclude_unrelated_recent_evidence(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False, "context": "x" * 8000})
         job = GroupJob(req)
@@ -406,7 +476,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(data["slice"]["offset_unit"], "python_characters")
         self.assertNotIn("Unrelated outside-range case", task.context)
 
-    def test_long_summary_does_not_repeat_and_hide_findings_in_bounded_evidence(self):
+    def _case_long_summary_does_not_repeat_and_hide_findings_in_bounded_evidence(self):
         service = self.service()
         result = {"worker": 6, "content": {"summary": "Long summary " * 800,
             "findings": [{"case_id": "CASE_013", "used": 1521, "source_anchor": "[27836,36296)"}],
@@ -419,7 +489,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertNotIn("Long summary", excerpt["excerpt"])
         self.assertLess(len(excerpt["summary"]) + len(excerpt["excerpt"]), 875)
 
-    def test_restore_reconciles_pending_zero_timeout_once_without_duplicate_usage(self):
+    def _case_restore_reconciles_pending_zero_timeout_once_without_duplicate_usage(self):
         service = self.service()
         job = GroupJob(GroupRequest.parse({"topic": "fixture", "needs_web": False, "token_budget": 100000}))
         job.state, job.phase, job.round = "interrupted", "research_round", 1
@@ -441,7 +511,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual((again.tokens_used, again.tokens_estimated), (125000, 125000))
         self.assertEqual(service.store.conn.execute("SELECT COUNT(*) FROM usage_records").fetchone()[0], 1)
 
-    def test_journal_saturation_does_not_turn_valid_information_into_an_invalid_request(self):
+    def _case_journal_saturation_does_not_turn_valid_information_into_an_invalid_request(self):
         service = self.service()
         job = self.seed(service, workflow="default")
         report = job.results[0]
@@ -452,7 +522,7 @@ class SchedulerCouplingTests(unittest.TestCase):
         self.assertEqual(len(report["information_requests"]), 1)
         self.assertTrue(service.store.event_gap("default")["events_incomplete"])
 
-    def test_request_id_only_task_delivers_the_exact_question_without_resending_source(self):
+    def _case_request_id_only_task_delivers_the_exact_question_without_resending_source(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False, "context": "x" * 32000})
         job = GroupJob(req)

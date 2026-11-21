@@ -581,7 +581,6 @@ mod coordinator_tests {
         .unwrap();
     }
 
-    #[test]
     fn collaboration_totals_replay_upgrade_and_unpriced_exports() {
         let (_dir, c, item, e) = fixture();
         let mut unknown = record("total-only");
@@ -655,7 +654,6 @@ mod coordinator_tests {
         );
     }
 
-    #[test]
     fn estimates_and_native_aggregates_never_double_count() {
         let (_dir, c, item, e) = fixture();
         let mut estimated = record("estimate");
@@ -687,7 +685,6 @@ mod coordinator_tests {
         );
     }
 
-    #[test]
     fn complete_native_usage_upgrades_partial_row_without_another_event() {
         let (_dir, c, item, e) = fixture();
         let mut native = record("native-partial");
@@ -712,7 +709,6 @@ mod coordinator_tests {
         );
     }
 
-    #[test]
     fn cursor_and_rows_rollback_when_ledger_write_fails_then_retry() {
         let (_dir, c, item, e) = fixture();
         insert(&c, 1, &record("retry"));
@@ -739,7 +735,6 @@ mod coordinator_tests {
         );
     }
 
-    #[test]
     fn invalid_version_does_not_advance_cursor_or_partially_ingest() {
         let (_dir, c, item, e) = fixture();
         insert(&c, 1, &record("valid"));
@@ -752,6 +747,19 @@ mod coordinator_tests {
         assert_ne!(report.errors, Vec::<String>::new());
         assert_eq!(e.store.load_cursor(&item.key).unwrap().offset, 0);
         assert_eq!(e.store.totals(None, None, None, None).unwrap().events, 0);
+    }
+
+    #[test]
+    fn coordinator_ingest_and_dedup_upgrades() {
+        collaboration_totals_replay_upgrade_and_unpriced_exports();
+        estimates_and_native_aggregates_never_double_count();
+        complete_native_usage_upgrades_partial_row_without_another_event();
+    }
+
+    #[test]
+    fn coordinator_error_rollback_and_version_guard() {
+        cursor_and_rows_rollback_when_ledger_write_fails_then_retry();
+        invalid_version_does_not_advance_cursor_or_partially_ingest();
     }
 
     #[test]

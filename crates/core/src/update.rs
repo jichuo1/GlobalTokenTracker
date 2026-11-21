@@ -330,7 +330,6 @@ mod tests {
         Version::parse(s).unwrap()
     }
 
-    #[test]
     fn parse_accepts_and_rejects() {
         assert_eq!(
             v("v0.3.0"),
@@ -357,7 +356,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn ordering_and_display() {
         let order = [
             "0.3.0-alpha.1",
@@ -373,7 +371,6 @@ mod tests {
         assert_eq!(v("v0.3.0-alpha.2").to_string(), "v0.3.0-alpha.2");
     }
 
-    #[test]
     fn current_from_cases() {
         assert_eq!(current_from(Some(""), "0.3.0"), v("0.3.0"));
         assert_eq!(current_from(None, "0.3.0"), v("0.3.0"));
@@ -381,7 +378,6 @@ mod tests {
         assert_eq!(current_from(Some("v0.4.0-alpha.1"), "0.4.0").alpha, Some(1));
     }
 
-    #[test]
     fn channel_keys() {
         assert_eq!(Channel::from_key("alpha"), Channel::Alpha);
         assert_eq!(Channel::from_key(""), Channel::Stable);
@@ -412,7 +408,6 @@ mod tests {
         format!("[{}]", items.join(","))
     }
 
-    #[test]
     fn select_stable_ignores_alpha() {
         let j = fixture(&[
             rel_json("v0.4.0-alpha.1", false, true, true, true),
@@ -429,7 +424,6 @@ mod tests {
         assert_eq!(r.asset_name, asset_name("v0.3.1"));
     }
 
-    #[test]
     fn select_alpha_picks_highest_overall() {
         let j = fixture(&[
             rel_json("v0.3.1-alpha.2", false, true, true, true),
@@ -456,7 +450,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn select_skips_unusable() {
         let j = fixture(&[
             rel_json("v0.9.0", true, false, true, true),
@@ -474,7 +467,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn select_never_downgrades() {
         let j = fixture(&[rel_json("v0.3.0", false, false, true, true)]);
         assert!(
@@ -498,6 +490,26 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn version_parsing_ordering_and_channels() {
+        parse_accepts_and_rejects();
+        ordering_and_display();
+        current_from_cases();
+        channel_keys();
+    }
+
+    #[test]
+    fn select_update_respects_channel_rules() {
+        select_stable_ignores_alpha();
+        select_alpha_picks_highest_overall();
+    }
+
+    #[test]
+    fn select_update_rejects_unusable_and_downgrades() {
+        select_skips_unusable();
+        select_never_downgrades();
     }
 
     #[test]

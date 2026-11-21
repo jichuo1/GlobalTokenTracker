@@ -44,7 +44,56 @@ class ObservationTests(unittest.TestCase):
                                "CREATE TABLE quota_snapshots(id INTEGER PRIMARY KEY,app,account,captured_at,window_kind,used,limit_value,used_percent,resets_at,raw_json);")
             conn.execute("INSERT INTO usage_events VALUES('codex','p','m',?,10,1)", (now_ms()-1,))
 
-    def test_interface_preferred_and_no_implicit_refresh(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_interface_preference_and_unavailable_handling(self):
+        self._run_cases(
+            self._case_interface_preferred_and_no_implicit_refresh,
+            self._case_valid_unavailable_is_honored_without_sqlite_override,
+        )
+
+    def test_legacy_fallback_provenance_and_controls(self):
+        self._run_cases(
+            self._case_version_mismatch_falls_back_with_explicit_provenance,
+            self._case_fallback_can_be_disabled,
+            self._case_missing_cli_preserves_legacy_compatibility,
+        )
+
+    def test_envelope_integrity_redaction_and_additive_metadata(self):
+        self._run_cases(
+            self._case_expired_future_or_inconsistent_envelopes_rejected,
+            self._case_unknown_fields_and_account_original_not_exported,
+            self._case_raw_account_in_opaque_field_is_rejected,
+            self._case_partial_and_additive_metadata_are_compatible_and_bounded,
+        )
+
+    def test_quota_semantics_and_payload_type_limits(self):
+        self._run_cases(
+            self._case_quota_does_not_trust_supplied_remaining_or_invalid_age_reset_semantics,
+            self._case_bool_numbers_nonfinite_duplicate_keys_and_big_sections_rejected,
+        )
+
+    def test_transport_bounds_commands_and_identifiers(self):
+        self._run_cases(
+            self._case_transport_output_timeout_and_failure_are_bounded,
+            self._case_commands_are_argument_arrays_with_absolute_executable,
+            self._case_namespaced_provider_is_valid_but_absolute_paths_and_urls_are_not,
+        )
+
+    def test_legacy_quota_and_cached_routing_rechecks(self):
+        self._run_cases(
+            self._case_legacy_quota_rejects_future_and_out_of_range_and_redacts_labels,
+            self._case_cached_quota_is_rechecked_when_routing,
+        )
+
+    def _case_interface_preferred_and_no_implicit_refresh(self):
         with patch("gtt_router.observations.bounded_call", return_value=json.dumps(envelope())) as call:
             with patch("gtt_router.observations.snapshot") as legacy:
                 result = load_observation(self.config)
@@ -58,7 +107,7 @@ class ObservationTests(unittest.TestCase):
         self.assertNotIn("--quota", args)
         self.assertEqual(args[args.index("--db")+1], str(self.db))
 
-    def test_valid_unavailable_is_honored_without_sqlite_override(self):
+    def _case_valid_unavailable_is_honored_without_sqlite_override(self):
         body = envelope() | {"status": "unavailable", "error": {"code": "ledger_busy", "message": "private-raw-error"}}
         with patch("gtt_router.observations.bounded_call", return_value=json.dumps(body)):
             with patch("gtt_router.observations.snapshot") as legacy:
@@ -68,7 +117,7 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(result["reason"], "ledger_busy")
         self.assertNotIn("private-raw-error", json.dumps(result))
 
-    def test_version_mismatch_falls_back_with_explicit_provenance(self):
+    def _case_version_mismatch_falls_back_with_explicit_provenance(self):
         self.seed()
         before = hashlib.sha256(self.db.read_bytes()).digest()
         body = envelope() | {"protocol_version": 2}
@@ -79,7 +128,7 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(result["origin"]["fallback_reason"], "gtt_interface_version_mismatch")
         self.assertEqual(hashlib.sha256(self.db.read_bytes()).digest(), before)
 
-    def test_fallback_can_be_disabled(self):
+    def _case_fallback_can_be_disabled(self):
         self.config["gtt_interface"]["allow_legacy_fallback"] = False
         with patch("gtt_router.observations.bounded_call", side_effect=ValueError("gtt_interface_timeout")):
             result = load_observation(self.config)
@@ -87,30 +136,30 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(result["origin"]["transport"], "none")
         self.assertFalse(self.db.exists())
 
-    def test_missing_cli_preserves_legacy_compatibility(self):
+    def _case_missing_cli_preserves_legacy_compatibility(self):
         self.seed()
         with patch("gtt_router.observations.interface_command", return_value=None):
             self.assertEqual(load_observation(self.config)["origin"]["fallback_reason"], "gtt_cli_missing")
 
-    def test_expired_future_or_inconsistent_envelopes_rejected(self):
+    def _case_expired_future_or_inconsistent_envelopes_rejected(self):
         for changes in [{"captured_at": now_ms()-60000}, {"captured_at": now_ms()+60000},
                         {"observation": {"consistent": False}}, {"status": "success"}, {"protocol_version": True}]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 validate_snapshot(json.dumps(envelope() | changes))
 
-    def test_unknown_fields_and_account_original_not_exported(self):
+    def _case_unknown_fields_and_account_original_not_exported(self):
         body = envelope() | {"raw_json": "private-raw", "error": "private-error"}
         body["quotas"][0]["account"] = "private-account"
         body["models"][0]["raw_ref"] = "private-file"
         self.assertNotIn("private-", json.dumps(validate_snapshot(json.dumps(body))))
 
-    def test_raw_account_in_opaque_field_is_rejected(self):
+    def _case_raw_account_in_opaque_field_is_rejected(self):
         body = envelope()
         body["quotas"][0]["account_key"] = "private-account"
         with self.assertRaises(ValueError):
             validate_snapshot(json.dumps(body))
 
-    def test_quota_does_not_trust_supplied_remaining_or_invalid_age_reset_semantics(self):
+    def _case_quota_does_not_trust_supplied_remaining_or_invalid_age_reset_semantics(self):
         for changes in [{"captured_at": now_ms()+60000}, {"captured_at": now_ms()-600000},
                         {"resets_at": now_ms()-1}, {"used_percent": -1}, {"used_percent": 101},
                         {"window_kind": "credits", "value_semantics": "remaining_balance"},
@@ -120,7 +169,7 @@ class ObservationTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.assertIsNone(validate_snapshot(json.dumps(body))["quotas"][0]["remaining_percent"])
 
-    def test_bool_numbers_nonfinite_duplicate_keys_and_big_sections_rejected(self):
+    def _case_bool_numbers_nonfinite_duplicate_keys_and_big_sections_rejected(self):
         bad = []
         body = envelope(); body["models"][0]["samples"] = True; bad.append(json.dumps(body))
         body = envelope(); body["sources"] *= 129; bad.append(json.dumps(body))
@@ -130,7 +179,7 @@ class ObservationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_snapshot(data)
 
-    def test_partial_and_additive_metadata_are_compatible_and_bounded(self):
+    def _case_partial_and_additive_metadata_are_compatible_and_bounded(self):
         body = envelope() | {"status": "partial", "future_extension": {}, "warnings": ["models_schema_unavailable", "private error text"],
                              "truncated": ["models", {"raw": "private"}]}
         result = validate_snapshot(json.dumps(body))
@@ -138,25 +187,25 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(result["warnings"], ["models_schema_unavailable"])
         self.assertEqual(result["truncated"], ["models"])
 
-    def test_transport_output_timeout_and_failure_are_bounded(self):
+    def _case_transport_output_timeout_and_failure_are_bounded(self):
         command = [sys.executable, str(Path(__file__).with_name("observation_fixture.py"))]
         self.assertEqual(json.loads(bounded_call(command+["valid"],2)), {"ok": True})
         for case, reason in [("overflow", "output_limit"), ("timeout", "timeout"), ("error", "unsupported_or_failed")]:
             with self.subTest(case=case), self.assertRaisesRegex(ValueError, reason):
                 bounded_call(command+[case],1)
 
-    def test_commands_are_argument_arrays_with_absolute_executable(self):
+    def _case_commands_are_argument_arrays_with_absolute_executable(self):
         for command in ["shell -c command", [], ["relative.exe"], [sys.executable, None], [sys.executable, "\0"]]:
             with self.assertRaises(ValueError):
                 interface_command({"command": command})
         self.assertEqual(interface_command({"command": [sys.executable, "literal; argument"]}), [sys.executable, "literal; argument"])
 
-    def test_namespaced_provider_is_valid_but_absolute_paths_and_urls_are_not(self):
+    def _case_namespaced_provider_is_valid_but_absolute_paths_and_urls_are_not(self):
         self.assertTrue(identifier("provider:region"))
         self.assertFalse(identifier("C:/private/file"))
         self.assertFalse(identifier("https://private.invalid"))
 
-    def test_legacy_quota_rejects_future_and_out_of_range_and_redacts_labels(self):
+    def _case_legacy_quota_rejects_future_and_out_of_range_and_redacts_labels(self):
         self.seed()
         with closing(sqlite3.connect(self.db)) as conn, conn:
             for i, (captured, pct) in enumerate([(now_ms()+60000,10), (now_ms(),110)]):
@@ -166,7 +215,7 @@ class ObservationTests(unittest.TestCase):
         self.assertIsNone(result["quotas"][0]["remaining_percent"])
         self.assertNotIn("private", json.dumps(result))
 
-    def test_cached_quota_is_rechecked_when_routing(self):
+    def _case_cached_quota_is_rechecked_when_routing(self):
         r=Route(source="s",provider="p",model="m",quota_app="codex")
         body=validate_snapshot(json.dumps(envelope()))
         self.assertTrue(quota_for(r,body)["known"])

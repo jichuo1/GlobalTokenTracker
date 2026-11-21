@@ -43,7 +43,55 @@ class OperatorWorkflowTests(unittest.TestCase):
             time.sleep(.03)
         self.fail("Operator workflow did not reach expected state: " + str(run))
 
-    def test_two_level_real_files_review_requires_codex_correction_and_final_acceptance(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_review_revision_and_independent_reviewer_acceptance(self):
+        self._run_cases(
+            self._case_two_level_real_files_review_requires_codex_correction_and_final_acceptance,
+            self._case_correcting_one_independent_reviewer_does_not_clear_another_rejection,
+        )
+
+    def test_grant_scope_overlap_and_explicit_authorization(self):
+        self._run_cases(
+            self._case_revise_cannot_expand_a_child_operator_beyond_its_parent_grant,
+            self._case_parallel_operators_must_not_claim_the_same_writable_file,
+            self._case_operator_requires_explicit_grant_and_codex_does_not_self_spawn,
+        )
+
+    def test_information_requests_and_support_gates(self):
+        self._run_cases(
+            self._case_positive_review_with_unresolved_information_cannot_be_accepted,
+            self._case_information_support_uses_exact_upstream_ids_and_closes_gate,
+        )
+
+    def test_graph_edge_planes_feedback_and_deadlock_checks(self):
+        self._run_cases(
+            self._case_typed_edge_planes_and_caller_scope_are_validated,
+            self._case_bidirectional_operator_feedback_never_blocks_initial_task_dispatch,
+            self._case_review_startup_deadlock_is_rejected_before_any_model_generation,
+        )
+
+    def test_line_slice_preservation_and_bounded_file_plans(self):
+        self._run_cases(
+            self._case_line_slices_preserve_the_rest_of_file_and_reject_fragment_replacement_as_full_file,
+            self._case_child_line_scope_and_large_unsliced_files_require_a_new_bounded_plan,
+        )
+
+    def test_operation_recovery_reuse_and_estimated_usage_budget(self):
+        self._run_cases(
+            self._case_missing_operations_requires_bound_codex_revision_before_generation,
+            self._case_known_blocked_operations_can_reuse_validated_report_only_after_codex_confirmation,
+            self._case_estimated_usage_is_a_subset_and_does_not_double_reduce_remaining_budget,
+        )
+
+    def _case_two_level_real_files_review_requires_codex_correction_and_final_acceptance(self):
         workspace = self.root / "workspace"
         workspace.mkdir()
         for name in ("a.txt", "b.txt"):
@@ -121,7 +169,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         self.assertTrue(any(e["kind"] == "review" and e["target_node"] == "mother" for e in events))
         self.assertFalse(any(e.get("authority") == "approve" for e in events))
 
-    def test_correcting_one_independent_reviewer_does_not_clear_another_rejection(self):
+    def _case_correcting_one_independent_reviewer_does_not_clear_another_rejection(self):
         workspace = self.root / "parallel-workspace"
         workspace.mkdir()
         route = fixtures.route()
@@ -174,7 +222,7 @@ class OperatorWorkflowTests(unittest.TestCase):
             self.call(service, "coordinate", dispatch_id=ident, expected_revision=2, event_id="missing-index-accept",
                 decision={"type": "accept", "evidence_digest": accept["evidence_digest"]})
 
-    def test_revise_cannot_expand_a_child_operator_beyond_its_parent_grant(self):
+    def _case_revise_cannot_expand_a_child_operator_beyond_its_parent_grant(self):
         workspace = self.root / "scope-workspace"
         workspace.mkdir()
         route = fixtures.route()
@@ -201,7 +249,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         self.assertFalse((workspace / "b.txt").exists())
         self.assertEqual(self.call(service, "status", dispatch_id=ident)["detail"]["control_revision"], 1)
 
-    def test_parallel_operators_must_not_claim_the_same_writable_file(self):
+    def _case_parallel_operators_must_not_claim_the_same_writable_file(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: self.fail("overlap must be rejected before generation"))
         workspace = self.root / "overlap-workspace"
@@ -216,7 +264,7 @@ class OperatorWorkflowTests(unittest.TestCase):
                 decision={"type": "assign", "assignments": [{"node_id": name, "instruction": name, "paths": ["a.txt"]} for name in ("first", "second")]})
         self.assertEqual(service.store.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
-    def test_positive_review_with_unresolved_information_cannot_be_accepted(self):
+    def _case_positive_review_with_unresolved_information_cannot_be_accepted(self):
         route = fixtures.route()
         definition = self.definition(route)
         definition["nodes"] = [definition["nodes"][0], definition["nodes"][-1]]
@@ -238,7 +286,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unresolved_information_requests"):
             self.call(service, "coordinate", dispatch_id=ident, expected_revision=1, event_id="accept", decision={"type": "accept", "evidence_digest": accept["evidence_digest"]})
 
-    def test_information_support_uses_exact_upstream_ids_and_closes_gate(self):
+    def _case_information_support_uses_exact_upstream_ids_and_closes_gate(self):
         route = fixtures.route()
         definition = self.definition(route)
         definition["nodes"] = definition["nodes"][:3]
@@ -273,7 +321,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         final = self.call(service, "coordinate", dispatch_id=ident, expected_revision=1, event_id="accept", decision={"type": "accept", "evidence_digest": accept["evidence_digest"]})
         self.assertEqual(final["state"], "succeeded")
 
-    def test_typed_edge_planes_and_caller_scope_are_validated(self):
+    def _case_typed_edge_planes_and_caller_scope_are_validated(self):
         route = fixtures.route()
         definition = self.definition(route)
         self.assertEqual(len(graph(definition)["edges"]), 5)
@@ -290,7 +338,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "accept no task"):
             graph(wrong)
 
-    def test_bidirectional_operator_feedback_never_blocks_initial_task_dispatch(self):
+    def _case_bidirectional_operator_feedback_never_blocks_initial_task_dispatch(self):
         workspace = self.root / "duplex"
         workspace.mkdir()
         calls = []
@@ -325,7 +373,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(mother["payload"]["result"]["state"], "applied")
         self.assertEqual(mother["payload"]["result"]["after_files"][0]["content"], "second")
 
-    def test_review_startup_deadlock_is_rejected_before_any_model_generation(self):
+    def _case_review_startup_deadlock_is_rejected_before_any_model_generation(self):
         definition = self.definition(fixtures.route())
         definition["nodes"] = [n for n in definition["nodes"] if n["id"] != "second"]
         definition["edges"] = [{"from": "mother", "to": "review"}, {"from": "review", "to": "first"},
@@ -333,7 +381,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "review dependencies conflict"):
             graph(definition)
 
-    def test_line_slices_preserve_the_rest_of_file_and_reject_fragment_replacement_as_full_file(self):
+    def _case_line_slices_preserve_the_rest_of_file_and_reject_fragment_replacement_as_full_file(self):
         for malicious in (False, True):
             with self.subTest(fragment_as_full_file=malicious):
                 workspace = self.root / ("slice-bad" if malicious else "slice-good")
@@ -376,7 +424,7 @@ class OperatorWorkflowTests(unittest.TestCase):
                     self.assertEqual((workspace / "a.txt").read_text(), "prefix\nneedle = new\nsuffix\n")
                     self.assertEqual(run["nodes"]["review"]["state"], "succeeded")
 
-    def test_child_line_scope_and_large_unsliced_files_require_a_new_bounded_plan(self):
+    def _case_child_line_scope_and_large_unsliced_files_require_a_new_bounded_plan(self):
         workspace = self.root / "line-scope"
         workspace.mkdir()
         (workspace / "a.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
@@ -394,7 +442,7 @@ class OperatorWorkflowTests(unittest.TestCase):
                 {"node_id": "first", "instruction": "too large", "paths": ["b.txt"]}]})
         self.assertEqual(self.call(service, "topology", dispatch_id=receipt["dispatch_id"])["control_revision"], 0)
 
-    def test_missing_operations_requires_bound_codex_revision_before_generation(self):
+    def _case_missing_operations_requires_bound_codex_revision_before_generation(self):
         workspace = self.root / "missing-operations"
         workspace.mkdir()
         (workspace / "a.txt").write_text("before", encoding="utf-8")
@@ -449,7 +497,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(final["state"], "succeeded")
 
 
-    def test_known_blocked_operations_can_reuse_validated_report_only_after_codex_confirmation(self):
+    def _case_known_blocked_operations_can_reuse_validated_report_only_after_codex_confirmation(self):
         workspace = self.root / "cached-operations"
         workspace.mkdir()
         (workspace / "a.txt").write_text("before", encoding="utf-8")
@@ -504,7 +552,7 @@ class OperatorWorkflowTests(unittest.TestCase):
             "type": "accept", "evidence_digest": accept["evidence_digest"]})
         self.assertEqual(final["state"], "succeeded")
 
-    def test_operator_requires_explicit_grant_and_codex_does_not_self_spawn(self):
+    def _case_operator_requires_explicit_grant_and_codex_does_not_self_spawn(self):
         route = fixtures.route()
         service = self.service([route], lambda *a: self.fail("no Codex plan was supplied"))
         with self.assertRaisesRegex(ValueError, "operator_execution_grant_required"):
@@ -525,7 +573,7 @@ class OperatorWorkflowTests(unittest.TestCase):
         self.call(service, "cancel", dispatch_id=receipt["dispatch_id"])
         self.wait_for(service, receipt["dispatch_id"], lambda r: r["state"] == "cancelled")
 
-    def test_estimated_usage_is_a_subset_and_does_not_double_reduce_remaining_budget(self):
+    def _case_estimated_usage_is_a_subset_and_does_not_double_reduce_remaining_budget(self):
         first_entered, release = threading.Event(), threading.Event()
         def adapter(route, prompt, task, context):
             if task.prompt.startswith("职责：\nfirst"):

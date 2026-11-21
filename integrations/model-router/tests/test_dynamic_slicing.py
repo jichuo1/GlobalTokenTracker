@@ -21,7 +21,43 @@ class SliceContractTests(unittest.TestCase):
                                    "slice_target_chars": 2000, "slice_min_chars": 500,
                                    "slice_max_chars": 4000, **controls})
 
-    def test_unicode_ranges_cover_material_once_and_grow_after_success(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.doCleanups()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_slice_queue_coverage_splitting_and_limits(self):
+        self._run_cases(
+            self._case_unicode_ranges_cover_material_once_and_grow_after_success,
+            self._case_completed_truncation_splits_only_failed_range,
+            self._case_unknown_timeout_is_never_automatically_split_or_replayed,
+            self._case_slice_limit_cannot_hide_unassigned_source,
+        )
+
+    def test_provenance_and_explicit_range_partitioning(self):
+        self._run_cases(
+            self._case_scope_and_template_hash_are_part_of_provenance,
+            self._case_semantic_followup_uses_only_requested_range_or_report,
+            self._case_explicit_large_range_is_partitioned_without_skipping_following_task,
+        )
+
+    def test_output_budgets_and_queue_contracts(self):
+        self._run_cases(
+            self._case_512k_native_and_explicit_output_and_shared_context_headroom,
+            self._case_expanded_queue_contract_does_not_expand_role_seats,
+            self._case_native_default_budget_can_reserve_a_reported_512k_route,
+        )
+
+    def test_support_queue_ordering_depth_and_splitting(self):
+        self._run_cases(
+            self._case_support_queue_does_not_skip_unassigned_primary_tasks,
+            self._case_recursive_support_is_bounded_to_two_hops,
+            self._case_split_minimum_and_support_depth_survive_paragraph_boundaries,
+        )
+
+    def _case_unicode_ranges_cover_material_once_and_grow_after_success(self):
         text = ("甲乙🙂 line\n\n" * 3000)
         queue = SliceQueue(self.request(text), [template()])
         ranges = []
@@ -34,7 +70,7 @@ class SliceContractTests(unittest.TestCase):
         self.assertGreater(queue.state["target_chars"], 2000)
         self.assertEqual(len({r["id"] for r in queue.state["records"]}), len(ranges))
 
-    def test_completed_truncation_splits_only_failed_range(self):
+    def _case_completed_truncation_splits_only_failed_range(self):
         queue = SliceQueue(self.request("x" * 6000), [template()])
         first = queue.take()
         queue.finish(first, {"ok": False, "error": {"code": "output_truncated"}})
@@ -44,7 +80,7 @@ class SliceContractTests(unittest.TestCase):
         self.assertTrue(all(r["parent"] == first["id"] for r in children))
         self.assertEqual(queue.state["target_chars"], 1000)
 
-    def test_unknown_timeout_is_never_automatically_split_or_replayed(self):
+    def _case_unknown_timeout_is_never_automatically_split_or_replayed(self):
         queue = SliceQueue(self.request("x" * 6000), [template()])
         first = queue.take()
         queue.finish(first, {"ok": False, "error": {"code": "timeout"}})
@@ -53,14 +89,14 @@ class SliceContractTests(unittest.TestCase):
         self.assertNotEqual(queue.take()["id"], first["id"])
         self.assertTrue(queue.incomplete())
 
-    def test_slice_limit_cannot_hide_unassigned_source(self):
+    def _case_slice_limit_cannot_hide_unassigned_source(self):
         queue = SliceQueue(self.request("x" * 20000, max_slices=2), [template()])
         for i in range(2):
             queue.finish(queue.take(), {"ok": True, "worker": i})
         self.assertIsNone(queue.take())
         self.assertTrue(queue.incomplete())
 
-    def test_scope_and_template_hash_are_part_of_provenance(self):
+    def _case_scope_and_template_hash_are_part_of_provenance(self):
         req = self.request("x" * 6000)
         one = SliceQueue(req, [template()])
         two = SliceQueue(req, [template(prompt="Different analysis")])
@@ -69,7 +105,7 @@ class SliceContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SliceQueue(changed, [template()], one.state)
 
-    def test_semantic_followup_uses_only_requested_range_or_report(self):
+    def _case_semantic_followup_uses_only_requested_range_or_report(self):
         req = self.request("x" * 12000)
         queue = SliceQueue(req, [template(context_range=[500, 1500]), template(evidence_workers=[3])])
         first = queue.take()
@@ -80,7 +116,7 @@ class SliceContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SliceQueue(req, [template(context_range=[0, 20000])]).take()
 
-    def test_512k_native_and_explicit_output_and_shared_context_headroom(self):
+    def _case_512k_native_and_explicit_output_and_shared_context_headroom(self):
         route = Route("fixture", "p", "big", output_limit=512000)
         task = Task.parse({"kind": "logic_check", "prompt": "check", "max_output_tokens": MAX_OUTPUT_TOKENS})
         self.assertGreater(task.token_budget, 512000)
@@ -94,7 +130,7 @@ class SliceContractTests(unittest.TestCase):
         adaptive = Task.parse({"kind": "logic_check", "prompt": "x" * 32000})
         self.assertGreater(requested_output(adaptive), 32768)
 
-    def test_expanded_queue_contract_does_not_expand_role_seats(self):
+    def _case_expanded_queue_contract_does_not_expand_role_seats(self):
         decision = parse_leader_decision({"action": "continue_research", "next_tasks": [template(prompt=str(i)) for i in range(24)]}, max_tasks=64)
         self.assertEqual(len(decision["next_tasks"]), 24)
         for fields in ({"slice_min_chars": 3000, "slice_target_chars": 2000}, {"max_parallel": True},
@@ -104,7 +140,7 @@ class SliceContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_leader_decision({"action": "continue_research", "next_tasks": [template(context_range=[True, 10])]}, max_tasks=64)
 
-    def test_support_queue_does_not_skip_unassigned_primary_tasks(self):
+    def _case_support_queue_does_not_skip_unassigned_primary_tasks(self):
         queue = SliceQueue(self.request("x" * 1000), [template(prompt="first"), template(prompt="second")])
         first = queue.take()
         result = {"ok": True, "worker": 1, "information_requests": [
@@ -120,7 +156,7 @@ class SliceContractTests(unittest.TestCase):
         self.assertFalse(queue.incomplete())
         self.assertIsNone(queue.take())
 
-    def test_recursive_support_is_bounded_to_two_hops(self):
+    def _case_recursive_support_is_bounded_to_two_hops(self):
         queue = SliceQueue(self.request("x" * 1000), [template(context_range=[0, 100])])
         for i in range(3):
             record = queue.take()
@@ -131,7 +167,7 @@ class SliceContractTests(unittest.TestCase):
         self.assertIsNone(queue.take())
         self.assertEqual(len(queue.state["records"]), 3)
 
-    def test_split_minimum_and_support_depth_survive_paragraph_boundaries(self):
+    def _case_split_minimum_and_support_depth_survive_paragraph_boundaries(self):
         queue = SliceQueue(self.request("x" * 300 + "\n" + "x" * 1699, slice_target_chars=1000), [template(context_range=[0, 1000])])
         record = queue.take()
         record["support_depth"] = 2
@@ -140,12 +176,12 @@ class SliceContractTests(unittest.TestCase):
         self.assertEqual([r["end"] - r["start"] for r in children], [500, 500])
         self.assertTrue(all(r["support_depth"] == 2 for r in children))
 
-    def test_native_default_budget_can_reserve_a_reported_512k_route(self):
+    def _case_native_default_budget_can_reserve_a_reported_512k_route(self):
         task = Task.parse({"kind": "logic_check", "prompt": "check", "output_mode": "native"})
         self.assertGreater(task.token_budget, 512000)
         self.assertLessEqual(task.token_budget, 4000000)
 
-    def test_explicit_large_range_is_partitioned_without_skipping_following_task(self):
+    def _case_explicit_large_range_is_partitioned_without_skipping_following_task(self):
         req = self.request("x" * 20000)
         queue = SliceQueue(req, [template(context_range=[3000, 12000]), template(context_range=[15000, 16000])])
         ranges = []
@@ -167,7 +203,56 @@ class DynamicSchedulingTests(unittest.TestCase):
     submit = fixtures.GroupTests.submit
     wait = fixtures.GroupTests.wait
 
-    def test_large_work_is_partitioned_and_completed_without_full_context_replication(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_dynamic_slicing_dispatch_and_refill(self):
+        self._run_cases(
+            self._case_large_work_is_partitioned_and_completed_without_full_context_replication,
+            self._case_completing_one_slice_immediately_refills_while_other_slice_is_slow,
+            self._case_empty_dispatch_queue_does_not_rescan_routes_while_waiting,
+        )
+
+    def test_slice_headroom_explicit_ranges_and_route_budget_fallback(self):
+        self._run_cases(
+            self._case_logical_slice_retains_reasoning_wait_headroom,
+            self._case_explicit_material_range_is_respected_when_automatic_slicing_is_off,
+            self._case_budget_too_large_on_first_route_tries_a_smaller_qualified_route,
+        )
+
+    def test_truncation_and_recovery_metering(self):
+        self._run_cases(
+            self._case_truncation_is_metered_and_subranges_replace_parent,
+            self._case_restart_retains_completed_slices_and_requires_opt_in_for_unknown,
+            self._case_caller_handoff_updates_slice_state_without_duplicate_metering,
+        )
+
+    def test_information_requests_and_targeted_support(self):
+        self._run_cases(
+            self._case_information_request_receives_targeted_support_before_acceptance,
+            self._case_unresolved_request_blocks_unsupported_submit,
+        )
+
+    def test_concurrent_support_and_deadline_resume(self):
+        self._run_cases(
+            self._case_support_starts_while_another_member_is_still_waiting,
+            self._case_deadline_retains_new_support_for_resume_without_replaying_success,
+        )
+
+    def test_exploration_modes_and_budget_bounds(self):
+        self._run_cases(
+            self._case_exploration_off_is_enforced_even_for_initial_plan,
+            self._case_exploration_reservations_cannot_exceed_its_budget_fraction,
+            self._case_guided_exploration_runs_bounded_followup_and_reports_lead,
+        )
+
+    def _case_large_work_is_partitioned_and_completed_without_full_context_replication(self):
         seen = []
         def adapter(route, prompt, task, ctx):
             if fixtures.is_leader(task):
@@ -187,7 +272,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertTrue(all(len(d["supplied_context"]) <= 4000 for d in seen))
         self.assertEqual(state["tokens_reserved"], 0)
 
-    def test_completing_one_slice_immediately_refills_while_other_slice_is_slow(self):
+    def _case_completing_one_slice_immediately_refills_while_other_slice_is_slow(self):
         slow = threading.Event()
         refilled = threading.Event()
         def adapter(route, prompt, task, ctx):
@@ -206,7 +291,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertTrue(refilled.wait(1.5))
         self.assertEqual(self.wait(service, group)["pending_action"]["type"], "submit_codex")
 
-    def test_empty_dispatch_queue_does_not_rescan_routes_while_waiting(self):
+    def _case_empty_dispatch_queue_does_not_rescan_routes_while_waiting(self):
         gate, entered = threading.Event(), threading.Event()
         count = [0]
         lock = threading.Lock()
@@ -229,7 +314,7 @@ class DynamicSchedulingTests(unittest.TestCase):
             gate.set()
             self.wait(service, group)
 
-    def test_logical_slice_retains_reasoning_wait_headroom(self):
+    def _case_logical_slice_retains_reasoning_wait_headroom(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False, "context": "x" * 32000})
         job = GroupJob(req)
@@ -240,7 +325,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertGreaterEqual(task.ttft_s, 600)
         self.assertLessEqual(task.ttft_s, 3600)
 
-    def test_explicit_material_range_is_respected_when_automatic_slicing_is_off(self):
+    def _case_explicit_material_range_is_respected_when_automatic_slicing_is_off(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False, "context": "x" * 8000, "slice_mode": "off"})
         job = GroupJob(req)
@@ -250,7 +335,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertEqual(len(context["supplied_context"]), 500)
         self.assertEqual(context["material_range"]["start"], 500)
 
-    def test_truncation_is_metered_and_subranges_replace_parent(self):
+    def _case_truncation_is_metered_and_subranges_replace_parent(self):
         failed = []
         def adapter(route, prompt, task, ctx):
             if fixtures.is_leader(task):
@@ -270,7 +355,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertEqual(sum(a["tokens_charged"] for a in attempts), state["tokens_used"])
         self.assertTrue(any(a["tokens_charged"] == 23 for a in attempts))
 
-    def test_budget_too_large_on_first_route_tries_a_smaller_qualified_route(self):
+    def _case_budget_too_large_on_first_route_tries_a_smaller_qualified_route(self):
         candidates = fixtures.routes()[::2]
         candidates[0].output_limit = 512000
         candidates[1].output_limit = 256
@@ -284,7 +369,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertEqual(service.status(job["job_id"])["state"], "succeeded")
         self.assertEqual(seen, [256])
 
-    def test_information_request_receives_targeted_support_before_acceptance(self):
+    def _case_information_request_receives_targeted_support_before_acceptance(self):
         requested = []
         supported = []
         def adapter(route, prompt, task, ctx):
@@ -326,7 +411,7 @@ class DynamicSchedulingTests(unittest.TestCase):
             cursor = page["next_cursor"]
         self.assertTrue(any(e["type"] == "information_request" for e in events))
 
-    def test_unresolved_request_blocks_unsupported_submit(self):
+    def _case_unresolved_request_blocks_unsupported_submit(self):
         def adapter(route, prompt, task, ctx):
             if fixtures.is_leader(task):
                 return fixtures.reply({"action": "continue_research" if fixtures.initial(task) else "submit_codex"})
@@ -339,7 +424,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         state = self.wait(service, self.submit(service))
         self.assertEqual(state["pending_action"]["type"], "unresolved_information_requests")
 
-    def test_support_starts_while_another_member_is_still_waiting(self):
+    def _case_support_starts_while_another_member_is_still_waiting(self):
         support = threading.Event()
         def adapter(route, prompt, task, ctx):
             if fixtures.is_leader(task):
@@ -361,7 +446,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertTrue(support.wait(1))
         self.assertEqual(self.wait(service, group)["pending_action"]["type"], "submit_codex")
 
-    def test_deadline_retains_new_support_for_resume_without_replaying_success(self):
+    def _case_deadline_retains_new_support_for_resume_without_replaying_success(self):
         entered = threading.Event()
         expired = threading.Event()
         calls = []
@@ -396,7 +481,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertEqual(after["pending_action"]["type"], "submit_codex")
         self.assertEqual(sorted(calls), [1, 2, 3])
 
-    def test_exploration_off_is_enforced_even_for_initial_plan(self):
+    def _case_exploration_off_is_enforced_even_for_initial_plan(self):
         calls = []
         lead = {"question": "Explore blind spot", "rationale": "Potential failure", "priority": "normal", "expected_value": "Resolve uncertainty"}
         def adapter(route, prompt, task, ctx):
@@ -409,7 +494,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertEqual(state["pending_action"]["type"], "exploration_limit")
         self.assertEqual(calls, [])
 
-    def test_exploration_reservations_cannot_exceed_its_budget_fraction(self):
+    def _case_exploration_reservations_cannot_exceed_its_budget_fraction(self):
         lead = {"question": "Explore blind spot", "rationale": "Potential failure", "priority": "normal", "expected_value": "Resolve uncertainty"}
         calls = []
         def adapter(route, prompt, task, ctx):
@@ -430,7 +515,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertEqual(state["exploration_accounting"]["tokens_used"], 0)
         self.assertEqual(state["tokens_reserved"], 0)
 
-    def test_guided_exploration_runs_bounded_followup_and_reports_lead(self):
+    def _case_guided_exploration_runs_bounded_followup_and_reports_lead(self):
         def adapter(route, prompt, task, ctx):
             if not fixtures.is_leader(task):
                 return fixtures.reply()
@@ -450,7 +535,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         self.assertEqual(state["research_leads"][0]["priority"], "high")
         self.assertEqual(state["pending_action"]["type"], "submit_codex")
 
-    def test_restart_retains_completed_slices_and_requires_opt_in_for_unknown(self):
+    def _case_restart_retains_completed_slices_and_requires_opt_in_for_unknown(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "context": "x" * 24000, "needs_web": False})
         job = GroupJob(req)
@@ -473,7 +558,7 @@ class DynamicSchedulingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown paid"):
             service.groups.resume(job.id, "Inspect pending source")
 
-    def test_caller_handoff_updates_slice_state_without_duplicate_metering(self):
+    def _case_caller_handoff_updates_slice_state_without_duplicate_metering(self):
         service = self.service()
         req = GroupRequest.parse({"topic": "fixture", "needs_web": False})
         job = GroupJob(req)

@@ -24,7 +24,49 @@ class PricingUpdatesTest(unittest.TestCase):
         return Route(source, provider, name, auth_hint=True, pricing=normalize_pricing(cost, 'test'),
                      profile={'quality_prior': prior, 'latency_prior_s': 10})
 
-    def test_unknown_and_name_free_are_not_free(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_free_and_paid_price_ranking_respects_quality(self):
+        self._run_cases(
+            self._case_unknown_and_name_free_are_not_free,
+            self._case_explicit_free_wins_same_quality_and_cheaper_wins_paid,
+            self._case_free_cannot_bypass_quality,
+        )
+
+    def test_price_normalization_tiers_and_overflow_bounds(self):
+        self._run_cases(
+            self._case_stale_price_negative_price_and_currency_are_unknown,
+            self._case_uncached_estimate_and_large_context_tier,
+            self._case_cached_fees_and_overflow_never_appear_as_free,
+            self._case_huge_json_integer_is_unknown_price_and_bounded_validation_error,
+        )
+
+    def test_task_price_inputs_and_scope_preservation(self):
+        self._run_cases(
+            self._case_task_window_and_price_inputs,
+            self._case_source_only_scope_preserves_explicit_task_price_controls,
+        )
+
+    def test_model_version_families_and_false_upgrade_prevention(self):
+        self._run_cases(
+            self._case_exact_new_version_separate_providers_and_editions,
+            self._case_broad_native_family_and_equivalent_version_do_not_create_false_upgrade,
+        )
+
+    def test_new_model_preference_boost_and_round_overrides(self):
+        self._run_cases(
+            self._case_verified_new_version_boost_and_round_disable,
+            self._case_round_can_reenable_new_model_preference,
+        )
+
+    def _case_unknown_and_name_free_are_not_free(self):
         route = self.route('model-free')
         result = price_preference(self.task, route, 2000, 100000)
         self.assertFalse(result['known'])
@@ -32,7 +74,7 @@ class PricingUpdatesTest(unittest.TestCase):
         self.assertIsNone(result['estimated_request_usd'])
         self.assertEqual(result['score_boost'], 0)
 
-    def test_explicit_free_wins_same_quality_and_cheaper_wins_paid(self):
+    def _case_explicit_free_wins_same_quality_and_cheaper_wins_paid(self):
         free = self.route('free', {'input': 0, 'output': 0})
         cheap = self.route('cheap', {'input': .1, 'output': .2})
         expensive = self.route('expensive', {'input': 5, 'output': 20})
@@ -40,27 +82,27 @@ class PricingUpdatesTest(unittest.TestCase):
         self.assertEqual([p['route'].model for p in plans], ['free', 'cheap', 'expensive'])
         self.assertGreater(plans[0]['reasons']['free_parallel_boost'], 0)
 
-    def test_free_cannot_bypass_quality(self):
+    def _case_free_cannot_bypass_quality(self):
         task = Task.parse({'kind': 'logic_check', 'prompt': 'review'})
         free = self.route('free', {'input': 0, 'output': 0}, prior=20)
         plans, rejected = rank_routes(task, [free], {}, self.store)
         self.assertFalse(plans)
         self.assertIn('quality_floor_not_met', rejected[0]['reasons'])
 
-    def test_stale_price_negative_price_and_currency_are_unknown(self):
+    def _case_stale_price_negative_price_and_currency_are_unknown(self):
         r = self.route('r', {'input': 0, 'output': 0})
         r.pricing['captured_at'] = now_ms() - 86400001
         self.assertFalse(price_preference(self.task, r, 1, 1)['known'])
         for bad in [{'input': -1, 'output': 0}, {'input': 0, 'output': 0, 'currency': 'EUR'}, {'input': True, 'output': 0}]:
             self.assertEqual(normalize_pricing(bad, 'test'), {})
 
-    def test_uncached_estimate_and_large_context_tier(self):
+    def _case_uncached_estimate_and_large_context_tier(self):
         r = self.route('r', {'input': 1, 'output': 2, 'cache_read': 0,
                              'context_over_200k': {'input': 3, 'output': 4}})
         p = price_preference(self.task, r, 1_000_000, 1_000_000)
         self.assertEqual(p['estimated_request_usd'], 7)
 
-    def test_exact_new_version_separate_providers_and_editions(self):
+    def _case_exact_new_version_separate_providers_and_editions(self):
         old = self.route('muse-spark-1.2-contributor')
         new = self.route('muse-spark-1.3-contributor')
         other_provider = self.route('muse-spark-1.9-contributor', provider='other')
@@ -72,7 +114,7 @@ class PricingUpdatesTest(unittest.TestCase):
         self.assertEqual(new_model_preference(self.task, other_provider, self.store), 0)
         self.assertNotIn('intelligence', new.profile)
 
-    def test_verified_new_version_boost_and_round_disable(self):
+    def _case_verified_new_version_boost_and_round_disable(self):
         old = self.route('muse-spark-1.2-contributor')
         new = self.route('muse-spark-1.3-contributor')
         annotate_updates([old, new])
@@ -82,13 +124,13 @@ class PricingUpdatesTest(unittest.TestCase):
         plans, _ = rank_routes(self.task, [old, new], {}, self.store, preferences={'prefer_new_models': False})
         self.assertTrue(all(p['reasons']['newer_model_boost'] == 0 for p in plans))
 
-    def test_task_window_and_price_inputs(self):
+    def _case_task_window_and_price_inputs(self):
         self.assertEqual(self.task.timeout_mode, 'activity')
         for fields in [{'timeout_mode': 'wrong'}, {'price_weight': float('nan')}, {'prefer_free': 1}, {'hard_deadline_s': 5, 'deadline_s': 600}]:
             with self.assertRaises(ValueError):
                 Task.parse({'kind': 'extract', 'prompt': 'x', **fields})
 
-    def test_source_only_scope_preserves_explicit_task_price_controls(self):
+    def _case_source_only_scope_preserves_explicit_task_price_controls(self):
         self.task.price_weight = 0
         self.task.prefer_free = False
         route = self.route('r', {'input': 0, 'output': 0})
@@ -98,14 +140,14 @@ class PricingUpdatesTest(unittest.TestCase):
         plans, _ = rank_routes(self.task, [route], {}, self.store, preferences=scope)
         self.assertEqual(plans[0]['reasons']['free_parallel_boost'], 0)
 
-    def test_cached_fees_and_overflow_never_appear_as_free(self):
+    def _case_cached_fees_and_overflow_never_appear_as_free(self):
         for rates in [{'input': 0, 'output': 0, 'cache_read': 1}, {'input': 1e308, 'output': 1e308}]:
             route = self.route('r', rates)
             price = price_preference(self.task, route, 1000000, 1000000)
             self.assertFalse(price['free'])
             self.assertTrue(price['estimated_request_usd'] is None or price['estimated_request_usd'] < float('inf'))
 
-    def test_broad_native_family_and_equivalent_version_do_not_create_false_upgrade(self):
+    def _case_broad_native_family_and_equivalent_version_do_not_create_false_upgrade(self):
         routes = [self.route(x) for x in ['muse-spark-1.3', 'muse-spark-1.3.0', 'muse-bloom-9.0']]
         for route in routes:
             route.catalog_metadata['family'] = 'muse'
@@ -115,12 +157,12 @@ class PricingUpdatesTest(unittest.TestCase):
         self.assertEqual(routes[2].catalog_metadata['cohort_size'], 1)
         self.assertTrue(all(new_model_preference(self.task, r, self.store) == 0 for r in routes))
 
-    def test_huge_json_integer_is_unknown_price_and_bounded_validation_error(self):
+    def _case_huge_json_integer_is_unknown_price_and_bounded_validation_error(self):
         self.assertEqual(normalize_pricing({'input': 10**1000, 'output': 1}, 'test'), {})
         with self.assertRaises(ValueError):
             Task.parse({'kind': 'extract', 'prompt': 'x', 'price_weight': 10**1000})
 
-    def test_round_can_reenable_new_model_preference(self):
+    def _case_round_can_reenable_new_model_preference(self):
         self.task.prefer_new_models = False
         routes = [self.route(x) for x in ['muse-spark-1.2', 'muse-spark-1.3']]
         annotate_updates(routes)

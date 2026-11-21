@@ -369,7 +369,6 @@ mod tests {
         dir
     }
 
-    #[test]
     fn message_level_events_per_model_and_day() {
         let dir = tmpdir("msglvl");
         let src = dir.join("opencode.db");
@@ -434,7 +433,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn legacy_session_events_purged_on_migration() {
         let dir = tmpdir("mig");
         let src = dir.join("opencode.db");
@@ -501,7 +499,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn output_includes_reasoning_as_a_subset() {
         let dir = tmpdir("reason");
         let src = dir.join("opencode.db");
@@ -527,7 +524,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn updated_message_rescans() {
         let dir = tmpdir("upd");
         let src = dir.join("opencode.db");
@@ -572,7 +568,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn missing_message_table_is_error() {
         let dir = tmpdir("bad");
         let src = dir.join("opencode.db");
@@ -599,7 +594,6 @@ mod tests {
         .to_string()
     }
 
-    #[test]
     fn modern_schema_counts_cache_and_reasoning_once() {
         let dir = tmpdir("modern");
         let path = dir.join("opencode.db");
@@ -630,7 +624,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn coexisting_schema_and_new_database_preserve_message_records() {
         let dir = tmpdir("coexisting");
         let path = dir.join("one.db");
@@ -699,7 +692,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn modern_pending_row_is_revisited_after_late_finalization() {
         let dir = tmpdir("pending");
         let path = dir.join("opencode.db");
@@ -728,7 +720,6 @@ mod tests {
         assert_eq!(store.load_cursor(&item(&path).key).unwrap().offset, 10000);
     }
 
-    #[test]
     fn compaction_watermark_follows_status_without_completed_timestamp() {
         let dir = tmpdir("compaction-watermark");
         let path = dir.join("opencode.db");
@@ -778,7 +769,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn read_only_filename_with_space_and_hash_is_literal() {
         let dir = tmpdir("literal");
         let path = dir.join("source # one.db");
@@ -793,5 +783,31 @@ mod tests {
             42
         );
         assert!(db.execute("INSERT INTO marker VALUES(7)", []).is_err());
+    }
+
+    #[test]
+    fn legacy_message_parsing_and_updates() {
+        message_level_events_per_model_and_day();
+        output_includes_reasoning_as_a_subset();
+        updated_message_rescans();
+    }
+
+    #[test]
+    fn migration_and_coexisting_schemas() {
+        legacy_session_events_purged_on_migration();
+        modern_schema_counts_cache_and_reasoning_once();
+        coexisting_schema_and_new_database_preserve_message_records();
+    }
+
+    #[test]
+    fn modern_watermarks_and_late_finalization() {
+        modern_pending_row_is_revisited_after_late_finalization();
+        compaction_watermark_follows_status_without_completed_timestamp();
+    }
+
+    #[test]
+    fn schema_validation_and_readonly_filenames() {
+        missing_message_table_is_error();
+        read_only_filename_with_space_and_hash_is_literal();
     }
 }

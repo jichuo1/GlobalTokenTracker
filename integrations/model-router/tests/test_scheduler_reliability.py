@@ -29,7 +29,55 @@ class SchedulerReliabilityTests(unittest.TestCase):
     service = fixtures.RouterTests.service
     wait = fixtures.RouterTests.wait
 
-    def test_auth_requires_verified_recovery_after_clock_and_penalty_decay(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_auth_and_connection_quarantine_recovery(self):
+        self._run_cases(
+            self._case_auth_requires_verified_recovery_after_clock_and_penalty_decay,
+            self._case_later_transient_error_does_not_clear_auth_quarantine,
+            self._case_repeated_connection_failures_need_generation_recovery,
+        )
+
+    def test_source_quarantine_streaks_and_upgrade_migration(self):
+        self._run_cases(
+            self._case_success_breaks_failure_streak_and_source_timeouts_do_not_quarantine,
+            self._case_source_contract_failure_blocks_other_routes_and_recovers,
+            self._case_upgrade_quarantines_existing_failures_without_replay,
+        )
+
+    def test_native_error_classification_and_precedence(self):
+        self._run_cases(
+            self._case_human_native_errors_and_timeout_diagnostics_are_safe,
+            self._case_explicit_quota_and_rate_signals_outrank_native_auth_wrapper,
+        )
+
+    def test_deadline_scaling_and_latency_history(self):
+        self._run_cases(
+            self._case_large_input_is_rejected_by_scaled_deadline_before_generation,
+            self._case_long_report_history_does_not_block_a_bounded_short_extraction,
+        )
+
+    def test_caller_constraints_retry_budget_and_timeout_replacement(self):
+        self._run_cases(
+            self._case_caller_constraints_are_preserved_and_explained,
+            self._case_default_retry_room_preserves_explicit_budget,
+            self._case_timeout_keeps_time_and_budget_for_a_qualified_replacement,
+        )
+
+    def test_manual_recheck_quarantine_and_gating(self):
+        self._run_cases(
+            self._case_manual_recheck_clears_quarantine_without_resetting_lifetime_counts,
+            self._case_manual_recheck_respects_busy_disabled_but_not_automatic_probe_budget,
+        )
+
+    def _case_auth_requires_verified_recovery_after_clock_and_penalty_decay(self):
         r = route()
         self.store.failure("provider:" + r.failure_domain, "auth_failed", 0)
         future = now_ms() + 24 * 3600000
@@ -40,14 +88,14 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.store.recovered(["provider:" + r.failure_domain])
         self.assertTrue(rank_routes(Task("extract", "small"), [r], {}, self.store)[0])
 
-    def test_later_transient_error_does_not_clear_auth_quarantine(self):
+    def _case_later_transient_error_does_not_clear_auth_quarantine(self):
         self.store.failure("route:test", "auth_failed", 0)
         self.store.failure("route:test", "timeout", 0)
         self.assertTrue(self.store.health("route:test")["verification_required"])
         self.store.success("route:test", 20)
         self.assertFalse(self.store.health("route:test")["verification_required"])
 
-    def test_repeated_connection_failures_need_generation_recovery(self):
+    def _case_repeated_connection_failures_need_generation_recovery(self):
         r, other = route(), route(provider="healthy", model="other")
         key = "route:" + r.id
         for code in ["timeout", "provider_request_failed", "adapter_error"]:
@@ -61,7 +109,7 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertFalse(self.store.health(key)["verification_required"])
         self.assertEqual(self.store.health(key)["failures"], 3)
 
-    def test_success_breaks_failure_streak_and_source_timeouts_do_not_quarantine(self):
+    def _case_success_breaks_failure_streak_and_source_timeouts_do_not_quarantine(self):
         r = route()
         service = self.service([r], lambda *a: response())
         for _ in range(2):
@@ -71,7 +119,7 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertFalse(service.store.health("route:" + r.id)["verification_required"])
         self.assertFalse(service.store.health("source:" + r.source)["verification_required"])
 
-    def test_source_contract_failure_blocks_other_routes_and_recovers(self):
+    def _case_source_contract_failure_blocks_other_routes_and_recovers(self):
         bad, peer, other = route(), route(provider="peer"), route(source="other")
         service = self.service([bad, peer, other], lambda *a: response("GTT_RECOVERY_OK"))
         service.record_failure(bad, WorkerFailure("native_configuration_error", scope="source", retry_after_s=0))
@@ -83,7 +131,7 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertTrue(service.recovery.recheck(peer.id)["success"])
         self.assertFalse(service.store.health("source:" + peer.source)["verification_required"])
 
-    def test_upgrade_quarantines_existing_failures_without_replay(self):
+    def _case_upgrade_quarantines_existing_failures_without_replay(self):
         for key, code, streak in [("route:legacy", "provider_request_failed", 7), ("source:shared", "timeout", 7), ("source:cli", "native_configuration_error", 1)]:
             self.store.failure(key, code, 0)
             self.store.conn.execute("UPDATE health SET failure_streak=?,verification_required=0,next_probe_at=0 WHERE key=?", (streak, key))
@@ -97,14 +145,14 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertFalse(self.store.health("source:shared")["verification_required"])
         self.assertEqual(self.store.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
-    def test_human_native_errors_and_timeout_diagnostics_are_safe(self):
+    def _case_human_native_errors_and_timeout_diagnostics_are_safe(self):
         for message, code in [("You've hit your limit · resets 8pm", "quota_exhausted"), ("Credit balance is too low", "quota_exhausted"),
                               ("Not logged in · Please run /login", "auth_failed"), ("error: unknown option '--fixture'", "native_configuration_error")]:
             self.assertEqual(classify_error(message).code, code)
         failure = WorkerFailure("timeout", details={"timeout_reason": "first_activity_timeout", "stderr": "private", "native_exit_code": 2})
         self.assertEqual(failure.public()["details"], {"timeout_reason": "first_activity_timeout", "native_exit_code": 2})
 
-    def test_explicit_quota_and_rate_signals_outrank_native_auth_wrapper(self):
+    def _case_explicit_quota_and_rate_signals_outrank_native_auth_wrapper(self):
         for code in ["quota_exhausted", "insufficient_quota", "credit_balance_exhausted"]:
             self.assertEqual(classify_error({"code": "provider_not_configured", "data": {"reason": code}}).code, "quota_exhausted")
         self.assertEqual(classify_error({"code": "provider_not_configured", "statusCode": 429}).code, "rate_limited")
@@ -113,7 +161,7 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertEqual(classify_error({"headers": {"x-note": "quota exhausted"}, "statusCode": 403}).code, "auth_failed")
         self.assertEqual(classify_error("authentication failed: 余额不足").code, "quota_exhausted")
 
-    def test_large_input_is_rejected_by_scaled_deadline_before_generation(self):
+    def _case_large_input_is_rejected_by_scaled_deadline_before_generation(self):
         r = route()
         self.store.success("route:" + r.id + ":kind:code_review", 40000, input_chars=1000)
         short = Task("code_review", "x" * 1000, deadline_s=600, timeout_mode="hard")
@@ -124,12 +172,12 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertIn("unlikely_to_meet_deadline", rejected[0]["reasons"])
         self.assertTrue(rank_routes(Task("code_review", "x" * 31000, deadline_s=2000, timeout_mode="hard"), [r], {}, self.store)[0])
 
-    def test_caller_constraints_are_preserved_and_explained(self):
+    def _case_caller_constraints_are_preserved_and_explained(self):
         task = Task.parse({"kind": "code_review", "prompt": "x" * 9000, "allow_fallback": False, "max_attempts": 1})
         self.assertFalse(task.allow_fallback)
         self.assertEqual(set(routing_warnings(task)), {"failover_disabled_by_caller", "no_replacement_attempt_reserved", "large_excerpt_consider_split_or_research_group"})
 
-    def test_long_report_history_does_not_block_a_bounded_short_extraction(self):
+    def _case_long_report_history_does_not_block_a_bounded_short_extraction(self):
         r = route()
         key = "route:" + r.id + ":kind:extract"
         self.store.success(key, 260000, tokens=65000, input_chars=600, measured_tokens=65000)
@@ -146,13 +194,13 @@ class SchedulerReliabilityTests(unittest.TestCase):
         unmeasured = Task("summarize", "x" * 9000, max_output_tokens=8192, hard_deadline_s=1200)
         self.assertFalse(rank_routes(unmeasured, [r], {}, self.store)[0])
 
-    def test_default_retry_room_preserves_explicit_budget(self):
+    def _case_default_retry_room_preserves_explicit_budget(self):
         normal = Task.parse({"kind": "code_review", "prompt": "small"})
         single = Task.parse({"kind": "code_review", "prompt": "small", "max_attempts": 1})
         self.assertGreater(normal.token_budget, single.token_budget)
         self.assertEqual(Task.parse({"kind": "code_review", "prompt": "small", "token_budget": 3000}).token_budget, 3000)
 
-    def test_manual_recheck_clears_quarantine_without_resetting_lifetime_counts(self):
+    def _case_manual_recheck_clears_quarantine_without_resetting_lifetime_counts(self):
         r = route()
         service = self.service([r], lambda *a: response("GTT_RECOVERY_OK"))
         service.store.failure("route:" + r.id, "auth_failed", 900)
@@ -162,7 +210,7 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertFalse(health["verification_required"])
         self.assertEqual(health["failures"], 1)
 
-    def test_manual_recheck_respects_busy_disabled_but_not_automatic_probe_budget(self):
+    def _case_manual_recheck_respects_busy_disabled_but_not_automatic_probe_budget(self):
         r = route()
         service = self.service([r], lambda *a: self.fail("must not generate"))
         service.total_inflight = 1
@@ -176,7 +224,7 @@ class SchedulerReliabilityTests(unittest.TestCase):
         self.assertTrue(service.recovery.recheck(r.id)["success"])
         self.assertEqual(service.store.probe_budget(0)["count"], 1)
 
-    def test_timeout_keeps_time_and_budget_for_a_qualified_replacement(self):
+    def _case_timeout_keeps_time_and_budget_for_a_qualified_replacement(self):
         bad, good = route(model="bad", quality=90), route(provider="other", model="good", latency=.1)
         calls = []
         def adapter(r, prompt, task, context):
@@ -202,7 +250,29 @@ class ProcessOwnershipTests(unittest.TestCase):
         return ProcessChannel([sys.executable, str(fixture), mode, *args],
                               ExecutionContext(threading.Event(), time.monotonic() + 10, self.root), env)
 
-    def test_nonreading_stdin_respects_deadline_and_cleanup(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_input_deadlines_and_adapter_cleanup(self):
+        self._run_cases(
+            self._case_nonreading_stdin_respects_deadline_and_cleanup,
+            self._case_native_adapters_cannot_bypass_input_deadline_during_cleanup,
+        )
+
+    def test_process_tree_cleanup_isolation_and_unicode_io(self):
+        self._run_cases(
+            self._case_exited_parent_cannot_leave_pipe_owning_descendant,
+            self._case_cancel_cleanup_preserves_an_unrelated_process,
+            self._case_large_unicode_input_arguments_environment_and_hidden_console,
+        )
+
+    def _case_nonreading_stdin_respects_deadline_and_cleanup(self):
         channel = self.channel("wait")
         child = channel.read()["child_pid"]
         channel.context.deadline = time.monotonic() + .15
@@ -218,7 +288,7 @@ class ProcessOwnershipTests(unittest.TestCase):
         self.assertFalse(self.running(child))
         self.assertLess(time.monotonic() - started, 4)
 
-    def test_native_adapters_cannot_bypass_input_deadline_during_cleanup(self):
+    def _case_native_adapters_cannot_bypass_input_deadline_during_cleanup(self):
         fixture = Path(__file__).with_name("inherited_pipe_fixture.py")
         for adapter in [zcode, print_agent, dsh]:
             with self.subTest(adapter=adapter.__name__):
@@ -256,7 +326,7 @@ class ProcessOwnershipTests(unittest.TestCase):
         except ProcessLookupError:
             return False
 
-    def test_exited_parent_cannot_leave_pipe_owning_descendant(self):
+    def _case_exited_parent_cannot_leave_pipe_owning_descendant(self):
         channel = self.channel("orphan")
         try:
             child = channel.read()["child_pid"]
@@ -268,7 +338,7 @@ class ProcessOwnershipTests(unittest.TestCase):
             if channel.process.poll() is None:
                 channel.close()
 
-    def test_cancel_cleanup_preserves_an_unrelated_process(self):
+    def _case_cancel_cleanup_preserves_an_unrelated_process(self):
         unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **background_options())
         channel = self.channel("wait")
         try:
@@ -282,7 +352,7 @@ class ProcessOwnershipTests(unittest.TestCase):
             if channel.process.poll() is None:
                 channel.close()
 
-    def test_large_unicode_input_arguments_environment_and_hidden_console(self):
+    def _case_large_unicode_input_arguments_environment_and_hidden_console(self):
         env = os.environ.copy()
         env["GTT_FIXTURE_VALUE"] = "kept"
         channel = self.channel("echo", "参数 with spaces", env=env)

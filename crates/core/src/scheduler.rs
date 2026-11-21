@@ -983,7 +983,6 @@ fn verify_dispatch_runtime(operator_workflow: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
     fn restore_only_observes_an_active_run_in_the_current_workflow() {
         let snapshot = Snapshot {
             runs: vec![
@@ -1010,7 +1009,6 @@ mod tests {
         }
         g
     }
-    #[test]
     fn legacy_workflow_calls_use_dispatch_v1_payloads_and_require_submit_id() {
         let definition = json!({"id":"wf","nodes":[],"edges":[]});
         let (method, plan, unwrap_plan) = adapt_legacy_workflow_call(
@@ -1047,7 +1045,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn graph_order_rejects_cycles_and_keeps_previous_edges() {
         let mut g = sample();
         g.connect(2, 0).unwrap();
@@ -1056,7 +1053,6 @@ mod tests {
         assert!(g.connect(1, 2).is_err());
         assert_eq!(g.edges.len(), 2);
     }
-    #[test]
     fn report_plane_allows_reciprocal_links_but_rejects_its_own_cycles() {
         let mut graph = sample();
         graph.connect(0, 1).unwrap();
@@ -1068,7 +1064,6 @@ mod tests {
         assert!(graph.connect(1, 0).is_err());
     }
 
-    #[test]
     fn a_reviewer_must_not_wait_for_a_report_from_its_unstarted_task_child() {
         let mut graph = sample();
         graph.nodes[0].node_type = "reviewer".into();
@@ -1088,7 +1083,6 @@ mod tests {
         assert!(graph.order().is_err());
     }
 
-    #[test]
     fn an_operator_task_chain_does_not_wait_for_feedback_before_first_dispatch() {
         let mut graph = sample();
         graph.nodes[0].node_type = "operator".into();
@@ -1100,7 +1094,6 @@ mod tests {
         assert_eq!(graph.order().unwrap(), vec![0, 1, 2]);
     }
 
-    #[test]
     fn codex_accepts_report_chains_and_bidirectional_changes_are_atomic() {
         let mut graph = sample();
         let master = graph.add_master(10.0, 10.0).unwrap();
@@ -1116,7 +1109,6 @@ mod tests {
         assert_eq!(incompatible.edges, before);
     }
 
-    #[test]
     fn legacy_graphs_omit_default_fields_and_chain_keeps_report_edges() {
         let mut graph = sample();
         graph.connect_kind(2, 0, EdgeKind::Report).unwrap();
@@ -1140,7 +1132,6 @@ mod tests {
         assert!(graph.order().is_err());
     }
 
-    #[test]
     fn operator_templates_keep_exact_model_bindings() {
         let mut graph = sample();
         for kind in ["operator", "reviewer"] {
@@ -1158,7 +1149,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn chain_promotes_a_late_unique_mother_without_choosing_among_multiple_mothers() {
         let mut graph = sample();
         let master = graph.add_master(500.0, 10.0).unwrap();
@@ -1190,7 +1180,6 @@ mod tests {
         assert_eq!(legacy.order().unwrap(), vec![input, 0, 1, 2]);
     }
 
-    #[test]
     fn advanced_graphs_and_coordination_require_the_operator_feature() {
         for definition in [
             json!({"nodes":[{"node_type":"codex"}]}),
@@ -1217,7 +1206,6 @@ mod tests {
             &json!({"action":"submit","request":{"definition":{"nodes":[{"node_type":"model"}]}}})
         ));
     }
-    #[test]
     fn removal_prunes_edges_and_hit_testing_matches_geometry() {
         let mut g = sample();
         g.chain();
@@ -1227,7 +1215,6 @@ mod tests {
         assert_eq!(g.order().unwrap().len(), 2);
         assert_eq!(g.hit(-1.0, 10.0), None);
     }
-    #[test]
     fn graph_json_round_trip_preserves_custom_parameters_and_tags() {
         let mut g = sample();
         g.nodes[0].tags.push("资料核查".into());
@@ -1237,7 +1224,6 @@ mod tests {
         assert_eq!(copy.nodes[0].tags, vec!["资料核查"]);
     }
 
-    #[test]
     fn optional_monitor_templates_and_legacy_graph_defaults_stay_compatible() {
         let mut g = sample();
         let templates = templates().unwrap();
@@ -1260,7 +1246,6 @@ mod tests {
                 .luna_supervision
         );
     }
-    #[test]
     fn applying_a_template_replaces_the_advanced_settings_wholesale() {
         let mut g = sample();
         // A heavy role's leftovers (and a custom key) must not survive applying
@@ -1289,7 +1274,6 @@ mod tests {
         // Model template on a model node keeps the route binding untouched.
         assert_eq!(g.nodes[0].route_id, "route");
     }
-    #[test]
     fn applying_a_local_template_clears_route_and_effort() {
         let mut g = sample();
         g.nodes[0].effort = "high".into();
@@ -1310,7 +1294,6 @@ mod tests {
         );
         assert_eq!(g.nodes[0].task["max_output_tokens"], 65536);
     }
-    #[test]
     fn new_master_nodes_inherit_the_codex_template_task() {
         let mut g = sample();
         let before = g.nodes.len();
@@ -1328,7 +1311,6 @@ mod tests {
             "the mother is no longer born with a bare placeholder task"
         );
     }
-    #[test]
     fn opening_optional_editors_preserves_defaults_and_clearing_an_override_inherits() {
         let mut task = json!({"kind":"extract","prompt":"evidence","max_output_tokens":8192});
         let prior = task.clone();
@@ -1341,7 +1323,6 @@ mod tests {
         assert!(edit_parameter(&mut task, "output_mode", ""));
         assert_eq!(task, prior);
     }
-    #[test]
     fn fit_keeps_nodes_visible_and_hit_testing_correct_after_pan_and_zoom() {
         let mut graph = sample();
         for node in &mut graph.nodes {
@@ -1365,7 +1346,6 @@ mod tests {
             }
         }
     }
-    #[test]
     fn connection_preview_rejects_cycles_and_duplicates_without_mutating_the_graph() {
         let mut g = sample();
         g.connect(0, 1).unwrap();
@@ -1401,7 +1381,6 @@ mod tests {
         assert!(!timed.is_permanent());
         assert!(!timed.is_live(2));
     }
-    #[test]
     fn node_effort_roundtrips_and_legacy_nodes_default_to_unset() {
         let node = Node {
             id: "n".into(),
@@ -1433,5 +1412,58 @@ mod tests {
         })
         .unwrap();
         assert!(unset.get("effort").is_none());
+    }
+
+    #[test]
+    fn run_restore_dispatch_and_feature_gates() {
+        restore_only_observes_an_active_run_in_the_current_workflow();
+        legacy_workflow_calls_use_dispatch_v1_payloads_and_require_submit_id();
+        advanced_graphs_and_coordination_require_the_operator_feature();
+    }
+
+    #[test]
+    fn task_and_report_plane_ordering_and_cycles() {
+        graph_order_rejects_cycles_and_keeps_previous_edges();
+        report_plane_allows_reciprocal_links_but_rejects_its_own_cycles();
+        connection_preview_rejects_cycles_and_duplicates_without_mutating_the_graph();
+    }
+
+    #[test]
+    fn feedback_and_bidirectional_report_rules() {
+        a_reviewer_must_not_wait_for_a_report_from_its_unstarted_task_child();
+        an_operator_task_chain_does_not_wait_for_feedback_before_first_dispatch();
+        codex_accepts_report_chains_and_bidirectional_changes_are_atomic();
+    }
+
+    #[test]
+    fn chaining_and_mother_node_promotion() {
+        legacy_graphs_omit_default_fields_and_chain_keeps_report_edges();
+        chain_promotes_a_late_unique_mother_without_choosing_among_multiple_mothers();
+    }
+
+    #[test]
+    fn template_application_and_master_defaults() {
+        operator_templates_keep_exact_model_bindings();
+        applying_a_template_replaces_the_advanced_settings_wholesale();
+        applying_a_local_template_clears_route_and_effort();
+        new_master_nodes_inherit_the_codex_template_task();
+    }
+
+    #[test]
+    fn optional_editors_and_monitor_template_compat() {
+        optional_monitor_templates_and_legacy_graph_defaults_stay_compatible();
+        opening_optional_editors_preserves_defaults_and_clearing_an_override_inherits();
+    }
+
+    #[test]
+    fn canvas_geometry_removal_and_fit_view() {
+        removal_prunes_edges_and_hit_testing_matches_geometry();
+        fit_keeps_nodes_visible_and_hit_testing_correct_after_pan_and_zoom();
+    }
+
+    #[test]
+    fn serialization_roundtrips_for_graph_and_node_effort() {
+        graph_json_round_trip_preserves_custom_parameters_and_tags();
+        node_effort_roundtrips_and_legacy_nodes_default_to_unset();
     }
 }

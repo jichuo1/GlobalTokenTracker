@@ -68,7 +68,28 @@ class RuntimeInstallTests(unittest.TestCase):
                 installer.activate(self.plan)
         return stop
 
-    def test_install_preserves_other_settings_and_restores_absent_guard(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_install_activation_and_disabled_interface_preservation(self):
+        self._run_cases(
+            self._case_install_preserves_other_settings_and_restores_absent_guard,
+            self._case_disabled_interface_remains_disabled_and_does_not_refresh_sources,
+        )
+
+    def test_failed_start_and_active_work_rollback_safeguards(self):
+        self._run_cases(
+            self._case_failed_start_restores_configuration_and_keeps_durable_database,
+            self._case_active_work_prevents_replacement_and_restores_switch,
+        )
+
+    def _case_install_preserves_other_settings_and_restores_absent_guard(self):
         stop = self.execute()
         self.assertEqual(stop.call_count, 1)
         config = json.loads(self.config.read_text())
@@ -80,7 +101,7 @@ class RuntimeInstallTests(unittest.TestCase):
         self.assertFalse(self.guard.exists())
         self.assertEqual(self.actions, ["refresh"])
 
-    def test_failed_start_restores_configuration_and_keeps_durable_database(self):
+    def _case_failed_start_restores_configuration_and_keeps_durable_database(self):
         original = self.config.read_bytes(), self.mcp.read_bytes()
         self.execute(fail_start=True)
         self.assertEqual((self.config.read_bytes(), self.mcp.read_bytes()), original)
@@ -93,14 +114,14 @@ class RuntimeInstallTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_disabled_interface_remains_disabled_and_does_not_refresh_sources(self):
+    def _case_disabled_interface_remains_disabled_and_does_not_refresh_sources(self):
         original = b'{"schema_version":1,"enabled":false}'
         self.guard.write_bytes(original)
         self.execute()
         self.assertEqual(self.guard.read_bytes(), original)
         self.assertEqual(self.actions, ["get"])
 
-    def test_active_work_prevents_replacement_and_restores_switch(self):
+    def _case_active_work_prevents_replacement_and_restores_switch(self):
         self.record["active_jobs"] = 1
         before = self.config.read_bytes()
         with patch.object(installer, "counts", return_value=self.record), patch.object(installer, "stop_daemon") as stop, self.assertRaises(RuntimeError):

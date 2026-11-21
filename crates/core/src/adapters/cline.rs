@@ -661,7 +661,6 @@ mod tests {
         Cline.scan_sqlite(&item, store).unwrap()
     }
 
-    #[test]
     fn sdk_sessions_count_each_completed_turn_with_uncached_input() {
         // Messages contract v1: metrics on each turn's terminal assistant
         // message; a retried turn keeps the failed attempt's metrics.
@@ -700,7 +699,6 @@ mod tests {
         assert!(scan_file(&file, &store).events.is_empty());
     }
 
-    #[test]
     fn sdk_sessions_fall_back_to_manifest_totals_and_accept_bare_arrays() {
         let manifest = r#"{"version":1,"session_id":"sess_2","cwd":"/w","model":"m-1","provider":"p",
           "started_at":"2026-10-01T08:00:00Z","ended_at":"2026-10-01T09:00:00Z",
@@ -739,7 +737,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn metrics_rows_paired_and_counted() {
         let (_root, task, _data) = task_fixture("pair");
         // legacy pair: started(metrics) + finished(metrics) → count finished only
@@ -823,7 +820,6 @@ mod tests {
         assert!(out2.events.is_empty());
     }
 
-    #[test]
     fn deleted_api_reqs_skipped_after_first_scan() {
         let (_root, task, _data) = task_fixture("warm");
         std::fs::write(task.join("ui_messages.json"), "[]").unwrap();
@@ -856,7 +852,6 @@ mod tests {
         assert_eq!(keys, vec!["cline:t-1:1779256800500:started"]);
     }
 
-    #[test]
     fn missing_usage_fields_tolerated() {
         let (_root, task, _data) = task_fixture("sparse");
         let msgs = format!(
@@ -874,7 +869,6 @@ mod tests {
         let out = Cline.scan_sqlite(&item, &store).unwrap();
         assert!(out.events.is_empty());
     }
-    #[test]
     fn sdk_request_receipts_replace_only_the_matching_session_fallback() {
         let root =
             std::env::temp_dir().join(format!("gtt-cline-transition-{}", std::process::id()));
@@ -910,7 +904,6 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    #[test]
     fn sdk_fallback_removal_refreshes_its_day_and_preserves_archived_days() {
         const DAY: i64 = 86_400_000;
         const OLD_TS: i64 = 1_792_796_400_000;
@@ -968,5 +961,24 @@ mod tests {
             .unwrap();
         assert_eq!(other_input, 7);
         assert!(scan_file(&file, &store).events.is_empty());
+    }
+
+    #[test]
+    fn sdk_session_turns_and_manifest_fallbacks() {
+        sdk_sessions_count_each_completed_turn_with_uncached_input();
+        sdk_sessions_fall_back_to_manifest_totals_and_accept_bare_arrays();
+    }
+
+    #[test]
+    fn task_ui_message_metrics_and_deletions() {
+        metrics_rows_paired_and_counted();
+        deleted_api_reqs_skipped_after_first_scan();
+        missing_usage_fields_tolerated();
+    }
+
+    #[test]
+    fn sdk_fallback_replacement_and_rollup_refresh() {
+        sdk_request_receipts_replace_only_the_matching_session_fallback();
+        sdk_fallback_removal_refreshes_its_day_and_preserves_archived_days();
     }
 }

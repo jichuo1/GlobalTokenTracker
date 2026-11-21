@@ -353,7 +353,6 @@ mod tests {
         Store::open(Path::new(":memory:")).unwrap()
     }
 
-    #[test]
     fn manual_refresh_bypasses_fresh_cache_and_preserves_ledger() {
         let store = mem();
         let old = Rates {
@@ -390,7 +389,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn failed_or_invalid_refresh_keeps_previous_cache() {
         let store = mem();
         let old = Rates {
@@ -419,7 +417,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn display_currency_defaults_and_round_trips() {
         let s = mem();
         assert_eq!(display_currency(&s), "USD");
@@ -427,7 +424,6 @@ mod tests {
         assert_eq!(display_currency(&s), "CNY");
     }
 
-    #[test]
     fn status_without_cache_is_identity() {
         let st = status(&mem());
         assert_eq!(st.display, "USD");
@@ -454,7 +450,6 @@ mod tests {
         assert!(st.stale);
     }
 
-    #[test]
     fn unknown_display_code_falls_back_to_identity() {
         let s = mem();
         let rates = Rates {
@@ -472,13 +467,11 @@ mod tests {
         assert!(st.fetched_at_ms.is_none());
     }
 
-    #[test]
     fn ensure_fresh_skips_in_memory_stores() {
         ensure_fresh(&mem());
         assert!(!IN_FLIGHT.load(Ordering::SeqCst));
     }
 
-    #[test]
     fn selected_currency_missing_from_first_source_uses_fallback() {
         let sources: Vec<Source<'static>> = vec![
             (
@@ -495,7 +488,6 @@ mod tests {
         assert_eq!(rates.rates["TWD"], 31.0);
     }
 
-    #[test]
     fn pick_prefers_first_non_empty_source() {
         let sources: Vec<Source<'static>> = vec![
             (
@@ -512,7 +504,6 @@ mod tests {
         assert_eq!(r.rates["CNY"], 7.1);
     }
 
-    #[test]
     fn pick_falls_through_errors_and_empty_maps() {
         let sources: Vec<Source<'static>> = vec![
             ("down", Box::new(|| anyhow::bail!("connect refused"))),
@@ -526,7 +517,6 @@ mod tests {
         assert_eq!(r.source, "third");
     }
 
-    #[test]
     fn pick_all_failing_reports_last_error() {
         let sources: Vec<Source<'static>> = vec![
             ("a", Box::new(|| anyhow::bail!("boom a"))),
@@ -536,7 +526,6 @@ mod tests {
         assert!(format!("{e:#}").contains("boom b"));
     }
 
-    #[test]
     fn frankfurter_payload_parses() {
         let v: serde_json::Value = serde_json::from_str(
             r#"{"amount":1.0,"base":"USD","date":"2026-10-16","rates":{"CNY":7.08,"JPY":152.3}}"#,
@@ -547,7 +536,6 @@ mod tests {
         assert_eq!(m["JPY"], 152.3);
     }
 
-    #[test]
     fn er_api_payload_requires_success() {
         let bad: serde_json::Value =
             serde_json::from_str(r#"{"result":"error","rates":{"CNY":7.0}}"#).unwrap();
@@ -557,7 +545,6 @@ mod tests {
         assert_eq!(er_api_rates(&good).unwrap()["CNY"], 7.0);
     }
 
-    #[test]
     fn ecb_xml_cross_computes_from_eur() {
         let xml = "<gesmes:Envelope><Cube><Cube time='2026-10-16'><Cube currency='USD' rate='1.16'/><Cube currency='CNY' rate='8.236'/><Cube currency='JPY' rate='176.7'/></Cube></Cube></gesmes:Envelope>";
         let eur = parse_ecb_cubes(xml);
@@ -576,11 +563,44 @@ mod tests {
         assert!((out["CNY"] - 7.1).abs() < 1e-9);
     }
 
-    #[test]
     fn ecb_parser_ignores_malformed_cubes() {
         let xml = "<Cube currency='USD' rate='abc'/><Cube currency='GBP' rate='0.86'/><Cube currency='XX' rate='-2'/>";
         let eur = parse_ecb_cubes(xml);
         assert_eq!(eur.len(), 1);
         assert_eq!(eur["GBP"], 0.86);
+    }
+
+    #[test]
+    fn refresh_preserves_ledger_and_previous_cache_on_error() {
+        manual_refresh_bypasses_fresh_cache_and_preserves_ledger();
+        failed_or_invalid_refresh_keeps_previous_cache();
+    }
+
+    #[test]
+    fn display_currency_and_identity_fallbacks() {
+        display_currency_defaults_and_round_trips();
+        status_without_cache_is_identity();
+        unknown_display_code_falls_back_to_identity();
+        ensure_fresh_skips_in_memory_stores();
+    }
+
+    #[test]
+    fn source_picker_priority_and_fallback() {
+        selected_currency_missing_from_first_source_uses_fallback();
+        pick_prefers_first_non_empty_source();
+        pick_falls_through_errors_and_empty_maps();
+        pick_all_failing_reports_last_error();
+    }
+
+    #[test]
+    fn json_rate_payload_parsers() {
+        frankfurter_payload_parses();
+        er_api_payload_requires_success();
+    }
+
+    #[test]
+    fn ecb_xml_cross_rate_and_error_handling() {
+        ecb_xml_cross_computes_from_eur();
+        ecb_parser_ignores_malformed_cubes();
     }
 }

@@ -18,7 +18,35 @@ class LongReportTests(unittest.TestCase):
     tearDown = fixtures.GroupTests.tearDown
     service = fixtures.GroupTests.service
 
-    def test_large_complete_report_requires_explicit_capacity_and_keeps_strict_json(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_report_capacity_validation_and_stop_classification(self):
+        self._run_cases(
+            self._case_large_complete_report_requires_explicit_capacity_and_keeps_strict_json,
+            self._case_report_capacity_schema_bounds_and_prompt_are_consistent,
+            self._case_stop_with_incomplete_json_is_not_misreported_as_native_length,
+        )
+
+    def test_large_report_storage_collection_and_progress_snapshots(self):
+        self._run_cases(
+            self._case_large_report_survives_worker_storage_and_bounded_collection,
+            self._case_final_snapshot_includes_output_arriving_inside_progress_throttle,
+        )
+
+    def test_additive_feature_gating_and_explicit_queue_wait(self):
+        self._run_cases(
+            self._case_additive_feature_does_not_break_old_tasks_or_dispatch_to_old_runtime,
+            self._case_explicit_queue_wait_survives_legacy_short_grace,
+        )
+
+    def _case_large_complete_report_requires_explicit_capacity_and_keeps_strict_json(self):
         body = {"summary": "long evidence", "findings": [{"payload": "x" * 140000}],
                 "sources": [], "uncertainties": [], "complete": True}
         text = json.dumps(body)
@@ -29,7 +57,7 @@ class LongReportTests(unittest.TestCase):
         with self.assertRaises(WorkerFailure):
             validate_result({"text": text[:-1]}, False, 180000)
 
-    def test_report_capacity_schema_bounds_and_prompt_are_consistent(self):
+    def _case_report_capacity_schema_bounds_and_prompt_are_consistent(self):
         self.assertEqual(TASK_SCHEMA["properties"]["report_max_chars"]["maximum"], ABS_LIMITS["max_report_chars"])
         task = Task.parse({"kind": "extract", "prompt": "long evidence", "report_max_chars": 180000})
         self.assertIn("under 180000 characters", make_prompt(task))
@@ -41,7 +69,7 @@ class LongReportTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 Task.parse({"kind": "extract", "prompt": "x", "report_max_chars": value})
 
-    def test_large_report_survives_worker_storage_and_bounded_collection(self):
+    def _case_large_report_survives_worker_storage_and_bounded_collection(self):
         body = {"summary": "long evidence", "findings": [{"payload": "x" * 140000}],
                 "sources": [], "uncertainties": [], "complete": True}
         def adapter(route, prompt, task, context):
@@ -64,7 +92,7 @@ class LongReportTests(unittest.TestCase):
         self.assertTrue(collected["results"][0]["content"]["complete"])
         self.assertEqual((job.tokens_used, job.tokens_reserved), (100, 0))
 
-    def test_final_snapshot_includes_output_arriving_inside_progress_throttle(self):
+    def _case_final_snapshot_includes_output_arriving_inside_progress_throttle(self):
         def adapter(route, prompt, task, context):
             context.report_content("reasoning", "fixture", "reasoning")
             response = fixtures.reply()
@@ -77,7 +105,7 @@ class LongReportTests(unittest.TestCase):
         self.assertGreater(job.progress["0"]["activity"]["output_chars"], 0)
         self.assertEqual(job.progress["0"]["activity"]["reasoning_chars"], 9)
 
-    def test_additive_feature_does_not_break_old_tasks_or_dispatch_to_old_runtime(self):
+    def _case_additive_feature_does_not_break_old_tasks_or_dispatch_to_old_runtime(self):
         client = object.__new__(LocalClient)
         old = {"runtime_contract_version": RUNTIME_CONTRACT_VERSION}
         with patch.object(client, "_request", side_effect=[old, {"candidates": []}]) as request:
@@ -88,7 +116,7 @@ class LongReportTests(unittest.TestCase):
                 client.call("router_submit", {"task": {"report_max_chars": 180000}})
             self.assertEqual(request.call_count, 1)
 
-    def test_explicit_queue_wait_survives_legacy_short_grace(self):
+    def _case_explicit_queue_wait_survives_legacy_short_grace(self):
         service = self.service()
         service.limits["external_queue_grace_s"] = .02
         service.total_inflight = service.limits.get("global_parallel", 4)
@@ -109,7 +137,7 @@ class LongReportTests(unittest.TestCase):
         finally:
             timer.join()
 
-    def test_stop_with_incomplete_json_is_not_misreported_as_native_length(self):
+    def _case_stop_with_incomplete_json_is_not_misreported_as_native_length(self):
         text = '{"summary":"long","findings":[{"records":[1,2,'
         with self.assertRaises(WorkerFailure) as failed:
             validate_result({"text": text, "finish_reason": "stop"}, False)

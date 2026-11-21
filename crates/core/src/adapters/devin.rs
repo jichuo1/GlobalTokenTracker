@@ -411,7 +411,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn devin_sqlite_parses_assistant_metrics_and_dedups_request() {
         let dir = test_dir("metrics");
         let src = dir.join("sessions.db");
@@ -458,7 +457,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
     fn discovers_native_unix_and_xdg_databases_without_duplicate_paths() {
         let dir = test_dir("discovery");
         let home = dir.join("home");
@@ -488,7 +486,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
     fn legacy_cursor_backfills_spaced_json_without_double_counting() {
         let dir = test_dir("backfill");
         let src = item(dir.join("sessions.db"));
@@ -536,7 +533,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
     fn skips_invalid_and_non_assistant_rows_but_advances_past_them() {
         let dir = test_dir("roles");
         let src = item(dir.join("sessions.db"));
@@ -558,7 +554,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
     fn copies_in_multiple_locations_share_request_identity() {
         let dir = test_dir("copies");
         let store = Store::open_memory().unwrap();
@@ -575,7 +570,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
     fn compactor_usage_does_not_borrow_the_main_agents_price() {
         let dir = test_dir("compactor");
         let src = item(dir.join("sessions.db"));
@@ -632,7 +626,6 @@ mod tests {
         serde_json::json!({"kind":"node","at":1792900000i64,"node":{"id":id,"parent_id":null,"message":{"message_id":"same-message","role":"assistant","content":"synthetic fixture","metadata":{"request_id":request,"generation_model":"actual-model","created_at":"2026-10-26T00:00:01Z","metrics":{"input_tokens":50,"output_tokens":20,"cache_read_tokens":100,"cache_creation_tokens":5,"ttft_ms":100,"total_time_ms":1000}}}}}).to_string()
     }
 
-    #[test]
     fn folder_store_uses_vendor_request_metrics_and_identity() {
         let (_dir, item) = folder_fixture("folder-fields");
         let input = format!(
@@ -665,7 +658,6 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    #[test]
     fn folder_store_and_sqlite_share_legacy_fallback_identity() {
         let (dir, item) = folder_fixture("folder-fallback");
         let db = rusqlite::Connection::open(dir.join("cli/sessions.db")).unwrap();
@@ -683,7 +675,6 @@ mod tests {
         assert_eq!(out.events[0].dedup_key, "devin:sid:44");
     }
 
-    #[test]
     fn folder_store_request_key_matches_sqlite_receipt() {
         let (_dir, item) = folder_fixture("folder-cross");
         let store = Store::open_memory().unwrap();
@@ -716,7 +707,6 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    #[test]
     fn folder_store_keeps_partial_tail_for_the_next_append() {
         let (_dir, item) = folder_fixture("folder-tail");
         let line = folder_row(2, serde_json::json!("first"));
@@ -726,7 +716,6 @@ mod tests {
         assert_eq!(out.consumed, line.len() as u64 + 1);
     }
 
-    #[test]
     fn discover_folder_logs_without_import_markers_or_duplicates() {
         let (dir, item) = folder_fixture("folder-discovery");
         std::fs::write(dir.join("cli/sessions/.imported-from-sqlite.json"), "{}").unwrap();
@@ -737,7 +726,6 @@ mod tests {
         assert_eq!(found[0].kind, SourceKind::Jsonl);
     }
 
-    #[test]
     fn unknown_folder_metadata_version_is_explicitly_rejected() {
         let (_dir, item) = folder_fixture("folder-version");
         std::fs::write(
@@ -755,5 +743,33 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn sqlite_parsing_cursors_and_filtering() {
+        devin_sqlite_parses_assistant_metrics_and_dedups_request();
+        legacy_cursor_backfills_spaced_json_without_double_counting();
+        skips_invalid_and_non_assistant_rows_but_advances_past_them();
+    }
+
+    #[test]
+    fn sqlite_identity_and_compactor_pricing() {
+        copies_in_multiple_locations_share_request_identity();
+        compactor_usage_does_not_borrow_the_main_agents_price();
+    }
+
+    #[test]
+    fn database_and_folder_discovery() {
+        discovers_native_unix_and_xdg_databases_without_duplicate_paths();
+        discover_folder_logs_without_import_markers_or_duplicates();
+    }
+
+    #[test]
+    fn folder_store_metrics_identity_and_validation() {
+        folder_store_uses_vendor_request_metrics_and_identity();
+        folder_store_and_sqlite_share_legacy_fallback_identity();
+        folder_store_request_key_matches_sqlite_receipt();
+        folder_store_keeps_partial_tail_for_the_next_append();
+        unknown_folder_metadata_version_is_explicitly_rejected();
     }
 }

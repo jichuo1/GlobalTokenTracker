@@ -4825,7 +4825,6 @@ mod gesture_tests {
         segment_crosses_card,
     };
 
-    #[test]
     fn winui_capture_loss_before_release_preserves_exactly_one_model_drop() {
         let mut gesture = Gesture::default();
         gesture.begin(Drag::Model(4));
@@ -4833,7 +4832,6 @@ mod gesture_tests {
         assert!(matches!(gesture.release(), Some(Drag::Model(4))));
         assert!(gesture.release().is_none());
     }
-    #[test]
     fn pointer_cancellation_or_movement_after_capture_loss_prevents_a_stale_drop() {
         let mut gesture = Gesture::default();
         gesture.begin(Drag::Model(4));
@@ -4844,7 +4842,6 @@ mod gesture_tests {
         gesture.cancel();
         assert!(gesture.release().is_none());
     }
-    #[test]
     fn fresh_press_after_capture_loss_replaces_old_drag_and_edges_survive_normal_release() {
         let mut gesture = Gesture::default();
         gesture.begin(Drag::Model(4));
@@ -4860,7 +4857,6 @@ mod gesture_tests {
             Some(Drag::Edge(1, LinkMode::Task))
         ));
     }
-    #[test]
     fn primary_run_explains_empty_unsaved_and_unsupervised_workflows() {
         let mut state = super::State {
             loaded: true,
@@ -4900,7 +4896,6 @@ mod gesture_tests {
         state.detail = Some(serde_json::json!({"state":"running"}));
         assert!(state.run_disabled_reason().unwrap().contains("运行"));
     }
-    #[test]
     fn route_status_covers_the_router_vocabulary() {
         use super::{Tone, route_status};
         let route = |c: &str| globaltokentracker_core::scheduler::Route {
@@ -4924,7 +4919,6 @@ mod gesture_tests {
         assert_eq!(route_status(None), (Tone::Warn, "未绑定模型"));
     }
 
-    #[test]
     fn check_feedback_reads_the_three_router_answers() {
         use super::check_feedback;
         use serde_json::json;
@@ -4948,7 +4942,6 @@ mod gesture_tests {
         assert!(skipped.1.contains("预算"));
     }
 
-    #[test]
     fn check_failure_shows_the_bounded_provider_detail() {
         use super::check_feedback;
         use serde_json::json;
@@ -4974,7 +4967,6 @@ mod gesture_tests {
         assert!(bare.1.ends_with("。"), "{bare:?}");
     }
 
-    #[test]
     fn effort_not_set_refusal_reads_as_canvas_guidance() {
         use super::{readable_error, refusal_text};
         assert!(refusal_text("effort_not_set").is_some());
@@ -4985,7 +4977,6 @@ mod gesture_tests {
         );
     }
 
-    #[test]
     fn clicking_away_settles_waiting_fields_without_losing_work() {
         use super::NumericField;
         let mut state = super::State {
@@ -5066,7 +5057,6 @@ mod gesture_tests {
         );
     }
 
-    #[test]
     fn refusal_codes_become_actionable_chinese() {
         use super::{check_feedback, readable_error, refusal_text};
         use serde_json::json;
@@ -5103,7 +5093,6 @@ mod gesture_tests {
         assert_eq!(readable_error("connection refused"), "connection refused");
     }
 
-    #[test]
     fn numeric_fields_accept_only_their_range_and_explain_otherwise() {
         use super::{NumericField, numeric_field};
         assert_eq!(numeric_field("4", NumericField::Rounds), Ok(4));
@@ -5120,7 +5109,6 @@ mod gesture_tests {
         assert_eq!(numeric_field(" 200000 ", NumericField::Budget), Ok(200_000));
     }
 
-    #[test]
     fn pool_rows_switch_between_permanent_and_timed_leases() {
         use globaltokentracker_core::scheduler::{PERMANENT_EXPIRES_AT, PoolEntry};
         let mut state = super::State::default();
@@ -5144,7 +5132,6 @@ mod gesture_tests {
         assert!((29 * 60_000..=30 * 60_000).contains(&left), "{left}");
     }
 
-    #[test]
     fn connect_mode_locks_panning() {
         let mut state = super::State::default();
         assert!(state.can_pan());
@@ -5154,7 +5141,6 @@ mod gesture_tests {
         assert!(state.can_pan());
     }
 
-    #[test]
     fn double_click_needs_two_close_presses_in_time() {
         use std::time::{Duration, Instant};
         let t0 = Instant::now();
@@ -5178,7 +5164,6 @@ mod gesture_tests {
         assert!(!super::is_double_click(None, t0, (300.0, 200.0)));
     }
 
-    #[test]
     fn ellipsize_keeps_short_text_and_trims_long_ids() {
         assert_eq!(super::ellipsize("deepseek-flash", 31.0), "deepseek-flash");
         let long = super::ellipsize("deepseek-ai/DeepSeek-V4.1-Flash-1017", 31.0);
@@ -5188,7 +5173,6 @@ mod gesture_tests {
         assert_eq!(super::ellipsize("一二三四五六七八九十", 10.0), "一二三四…");
     }
 
-    #[test]
     fn palette_page_size_tracks_canvas_height_within_bounds() {
         let state = super::State::default();
         // Before the first canvas frame the viewport reports 0 — the floor
@@ -5207,7 +5191,6 @@ mod gesture_tests {
         state.viewport.set((1900.0, 300.0));
         assert_eq!(state.palette_page_size(), 10);
     }
-    #[test]
     fn master_node_accepts_reports_but_never_task_dependencies() {
         let mut workflow = globaltokentracker_core::scheduler::Workflow::new("fixture".into());
         let master = workflow.add_master(10.0, 10.0).unwrap();
@@ -5238,7 +5221,6 @@ mod gesture_tests {
         assert_eq!(workflow.nodes.len(), 1);
     }
 
-    #[test]
     fn link_kind_is_frozen_in_a_drag_and_switching_it_cancels_the_drag() {
         let mut state = State::default();
         state.set_link_mode(LinkMode::Report);
@@ -5254,7 +5236,6 @@ mod gesture_tests {
         assert!(!state.can_pan());
     }
 
-    #[test]
     fn reciprocal_edge_paths_use_different_ports_and_return_bends() {
         let cards = [(10.0, 10.0), (300.0, 10.0)];
         let task = edge_path((10.0, 10.0), (300.0, 10.0), EdgeKind::Task, &cards);
@@ -5266,7 +5247,6 @@ mod gesture_tests {
         assert!(outward.iter().any(|p| p.1 < 10.0 || p.1 > 122.0));
     }
 
-    #[test]
     fn execution_access_is_explicit_and_not_a_directory_or_parent_grant() {
         assert!(execution_grant("D:/workspace", "src/main.rs\nREADME.md").is_ok());
         for paths in [
@@ -5289,7 +5269,6 @@ mod gesture_tests {
         assert_eq!(run_tone("executing").1, "操作执行中");
     }
 
-    #[test]
     fn report_paths_leave_and_enter_horizontally_without_crossing_either_card() {
         for (from, to) in [
             ((20.0, 20.0), (340.0, 20.0)),
@@ -5323,5 +5302,54 @@ mod gesture_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pointer_drag_and_capture_loss_gestures() {
+        winui_capture_loss_before_release_preserves_exactly_one_model_drop();
+        pointer_cancellation_or_movement_after_capture_loss_prevents_a_stale_drop();
+        fresh_press_after_capture_loss_replaces_old_drag_and_edges_survive_normal_release();
+    }
+
+    #[test]
+    fn router_status_and_check_feedback() {
+        route_status_covers_the_router_vocabulary();
+        check_feedback_reads_the_three_router_answers();
+        check_failure_shows_the_bounded_provider_detail();
+    }
+
+    #[test]
+    fn refusal_guidance_and_run_gates() {
+        primary_run_explains_empty_unsaved_and_unsupervised_workflows();
+        effort_not_set_refusal_reads_as_canvas_guidance();
+        refusal_codes_become_actionable_chinese();
+    }
+
+    #[test]
+    fn draft_fields_validation_and_pool_leases() {
+        clicking_away_settles_waiting_fields_without_losing_work();
+        numeric_fields_accept_only_their_range_and_explain_otherwise();
+        pool_rows_switch_between_permanent_and_timed_leases();
+    }
+
+    #[test]
+    fn canvas_interaction_and_layout_metrics() {
+        connect_mode_locks_panning();
+        double_click_needs_two_close_presses_in_time();
+        ellipsize_keeps_short_text_and_trims_long_ids();
+        palette_page_size_tracks_canvas_height_within_bounds();
+    }
+
+    #[test]
+    fn graph_topology_link_mode_and_execution_grants() {
+        master_node_accepts_reports_but_never_task_dependencies();
+        link_kind_is_frozen_in_a_drag_and_switching_it_cancels_the_drag();
+        execution_access_is_explicit_and_not_a_directory_or_parent_grant();
+    }
+
+    #[test]
+    fn edge_and_report_path_geometry() {
+        reciprocal_edge_paths_use_different_ports_and_return_bends();
+        report_paths_leave_and_enter_horizontally_without_crossing_either_card();
     }
 }

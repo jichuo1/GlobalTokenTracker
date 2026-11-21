@@ -18,7 +18,36 @@ class ActivityWatchTests(unittest.TestCase):
         return ActivityWatch(10, mode="activity", hard_deadline=40, idle_s=3,
                              stall_grace_s=1, clock=lambda: self.current, **values)
 
-    def test_new_output_and_reasoning_extend_soft_deadline_with_finite_horizon(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_deadline_extensions_and_first_response_windows(self):
+        self._run_cases(
+            self._case_new_output_and_reasoning_extend_soft_deadline_with_finite_horizon,
+            self._case_heartbeat_empty_and_same_phase_cannot_extend,
+            self._case_phase_only_does_not_shorten_first_response_window,
+        )
+
+    def test_window_distinctions_hard_mode_and_event_deduplication(self):
+        self._run_cases(
+            self._case_first_activity_window_idle_grace_and_hard_are_distinct,
+            self._case_hard_mode_and_replayed_content_do_not_extend,
+            self._case_tool_result_and_actual_phase_change_count_once,
+        )
+
+    def test_deadline_validation_and_long_stream_scalability(self):
+        self._run_cases(
+            self._case_invalid_or_unbounded_deadline_is_rejected,
+            self._case_long_sequenced_stream_has_no_artificial_event_count_ceiling,
+        )
+
+    def _case_new_output_and_reasoning_extend_soft_deadline_with_finite_horizon(self):
         watch = self.watch()
         for current in [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 39]:
             self.current = current
@@ -28,7 +57,7 @@ class ActivityWatchTests(unittest.TestCase):
         self.assertEqual(watch.expiry_reason(), "hard_deadline")
         self.assertFalse(watch.content("output", "late", "cannot resurrect"))
 
-    def test_heartbeat_empty_and_same_phase_cannot_extend(self):
+    def _case_heartbeat_empty_and_same_phase_cannot_extend(self):
         watch = self.watch()
         self.assertTrue(watch.record("native_phase", key="m", version="thinking"))
         for current in [3, 7, 9]:
@@ -39,7 +68,7 @@ class ActivityWatchTests(unittest.TestCase):
         self.current = 10
         self.assertEqual(watch.expiry_reason(), "first_activity_timeout")
 
-    def test_phase_only_does_not_shorten_first_response_window(self):
+    def _case_phase_only_does_not_shorten_first_response_window(self):
         self.current = 0
         watch = ActivityWatch(600, mode="activity", hard_deadline=900, ttft_s=600,
             idle_s=30, stall_grace_s=5, clock=lambda: self.current)
@@ -66,7 +95,7 @@ class ActivityWatchTests(unittest.TestCase):
         self.current = 250
         self.assertEqual(bounded.expiry_reason(), "hard_deadline")
 
-    def test_first_activity_window_idle_grace_and_hard_are_distinct(self):
+    def _case_first_activity_window_idle_grace_and_hard_are_distinct(self):
         watch = self.watch(ttft_s=4)
         self.current = 4
         self.assertEqual(watch.expiry_reason(), "first_activity_timeout")
@@ -83,7 +112,7 @@ class ActivityWatchTests(unittest.TestCase):
         self.current = 5
         self.assertEqual(watch.expiry_reason(), "inactivity_timeout")
 
-    def test_hard_mode_and_replayed_content_do_not_extend(self):
+    def _case_hard_mode_and_replayed_content_do_not_extend(self):
         self.current = 0
         watch = ActivityWatch(10, mode="hard", hard_deadline=40, clock=lambda: self.current)
         self.current = 9
@@ -93,7 +122,7 @@ class ActivityWatchTests(unittest.TestCase):
         self.current = 10
         self.assertEqual(watch.expiry_reason(), "hard_deadline")
 
-    def test_tool_result_and_actual_phase_change_count_once(self):
+    def _case_tool_result_and_actual_phase_change_count_once(self):
         watch = self.watch()
         for kind, value in [("tool_start", "running"), ("tool_complete", "done"),
                             ("tool_result", {"hits": [1, 2]}), ("native_phase", "reviewing")]:
@@ -101,13 +130,13 @@ class ActivityWatchTests(unittest.TestCase):
             self.assertFalse(watch.record(kind, key="search", version=value))
         self.assertEqual(watch.snapshot()["activity_count"], 4)
 
-    def test_invalid_or_unbounded_deadline_is_rejected(self):
+    def _case_invalid_or_unbounded_deadline_is_rejected(self):
         for values in [{"deadline": float("inf")}, {"deadline": 10, "hard_deadline": float("nan")},
                        {"deadline": 10, "idle_s": -1}, {"deadline": 10, "mode": "forever"}]:
             with self.assertRaises(ValueError):
                 ActivityWatch(**values)
 
-    def test_long_sequenced_stream_has_no_artificial_event_count_ceiling(self):
+    def _case_long_sequenced_stream_has_no_artificial_event_count_ceiling(self):
         watch = self.watch()
         for sequence in range(20000):
             self.current = sequence / 1000
@@ -146,7 +175,36 @@ class ActivityAdapterTests(unittest.TestCase):
             self.assertIsNotNone(channel.process.poll())
             self.assertTrue(all(not r.is_alive() for r in channel.readers))
 
-    def test_real_streaming_output_and_thinking_survive_soft_deadline(self):
+    def _run_cases(self, *cases):
+        for idx, case in enumerate(cases):
+            if idx:
+                self.tearDown()
+                self.doCleanups()
+                self.setUp()
+            with self.subTest(case=case.__name__):
+                case()
+
+    def test_streaming_channel_activity_and_timeout_semantics(self):
+        self._run_cases(
+            self._case_real_streaming_output_and_thinking_survive_soft_deadline,
+            self._case_silent_empty_repeated_phase_and_timestamp_heartbeat_timeout,
+        )
+
+    def test_hard_mode_cancellation_blocked_input_and_native_slot(self):
+        self._run_cases(
+            self._case_hard_mode_and_cancellation_are_not_overridden_by_streaming,
+            self._case_blocked_input_still_times_out_and_writer_is_cleaned,
+            self._case_native_slot_shares_watch_and_counters,
+        )
+
+    def test_native_http_and_claude_adapter_activity_observation(self):
+        self._run_cases(
+            self._case_native_fixed_timeouts_use_safety_horizon_not_soft_expectation,
+            self._case_http_message_growth_is_activity_and_poll_timestamps_are_not,
+            self._case_claude_partial_flag_thinking_and_usage_are_observed,
+        )
+
+    def _case_real_streaming_output_and_thinking_survive_soft_deadline(self):
         for mode in ["output", "thinking"]:
             with self.subTest(mode=mode):
                 context = self.context()
@@ -154,7 +212,7 @@ class ActivityAdapterTests(unittest.TestCase):
                 self.assertGreater(time.monotonic(), context.soft_deadline)
                 self.assertGreater(context.public_activity()["activity_count"], 10)
 
-    def test_silent_empty_repeated_phase_and_timestamp_heartbeat_timeout(self):
+    def _case_silent_empty_repeated_phase_and_timestamp_heartbeat_timeout(self):
         for mode in ["silence", "empty", "repeat", "heartbeat"]:
             with self.subTest(mode=mode):
                 context = self.context(soft=.35, idle=.12, grace=.04)
@@ -164,7 +222,7 @@ class ActivityAdapterTests(unittest.TestCase):
                 self.assertEqual(failed.exception.code, "timeout")
                 self.assertLess(time.monotonic() - started, 3)
 
-    def test_hard_mode_and_cancellation_are_not_overridden_by_streaming(self):
+    def _case_hard_mode_and_cancellation_are_not_overridden_by_streaming(self):
         context = self.context(soft=.45, mode="hard")
         with self.assertRaises(WorkerFailure) as failed:
             self.consume("output", context)
@@ -179,7 +237,7 @@ class ActivityAdapterTests(unittest.TestCase):
         finally:
             timer.join()
 
-    def test_blocked_input_still_times_out_and_writer_is_cleaned(self):
+    def _case_blocked_input_still_times_out_and_writer_is_cleaned(self):
         context = self.context(soft=.35)
         channel = ProcessChannel([sys.executable, self.fixture, "heartbeat"], context)
         try:
@@ -190,7 +248,7 @@ class ActivityAdapterTests(unittest.TestCase):
             channel.close()
         self.assertFalse(channel.writer.is_alive())
 
-    def test_native_slot_shares_watch_and_counters(self):
+    def _case_native_slot_shares_watch_and_counters(self):
         context = self.context()
         route = self.route("output")
         with native_slot(route, context) as slot:
@@ -200,7 +258,7 @@ class ActivityAdapterTests(unittest.TestCase):
         self.assertEqual(public["reasoning_chars"], 25)
         self.assertNotIn("private", json.dumps(public))
 
-    def test_native_fixed_timeouts_use_safety_horizon_not_soft_expectation(self):
+    def _case_native_fixed_timeouts_use_safety_horizon_not_soft_expectation(self):
         for mode, adapter in [("zcode", zcode), ("agy", antigravity)]:
             with self.subTest(mode=mode):
                 context = self.context()
@@ -212,7 +270,7 @@ class ActivityAdapterTests(unittest.TestCase):
                 self.assertGreater(timeout.get("timeout_ms", timeout.get("timeout_s", 0) * 1000), 2000)
                 timeout_file.unlink()
 
-    def test_http_message_growth_is_activity_and_poll_timestamps_are_not(self):
+    def _case_http_message_growth_is_activity_and_poll_timestamps_are_not(self):
         context = self.context(soft=.85, hard=5)
         result = opencode(self.route("http_active"), "fixture", Task("extract", "fixture"), context)
         self.assertGreater(time.monotonic(), context.soft_deadline)
@@ -225,7 +283,7 @@ class ActivityAdapterTests(unittest.TestCase):
         self.assertEqual(failed.exception.usage["total_tokens"], 15)
         self.assertEqual(failed.exception.metering["native_dedup_key"], "opencode:msg:msg_activity")
 
-    def test_claude_partial_flag_thinking_and_usage_are_observed(self):
+    def _case_claude_partial_flag_thinking_and_usage_are_observed(self):
         route = self.route("print_active")
         route.adapter = "claude_cli"
         context = self.context()

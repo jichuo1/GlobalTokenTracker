@@ -989,7 +989,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
 
-    #[test]
     fn firewall_rules_are_private_only_and_scoped_to_our_programs() {
         let script = firewall_add_script(Path::new(r"C:\Users\o'neil\GTT"));
         assert_eq!(script.matches("New-NetFirewallRule").count(), 4);
@@ -1005,7 +1004,6 @@ mod tests {
         assert!(firewall_remove_script().contains("-Group 'GlobalTokenTracker LAN sharing'"));
     }
 
-    #[test]
     fn encoded_commands_are_utf16le_base64() {
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
@@ -1028,7 +1026,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn human_size_units() {
         assert_eq!(human_size(0), "0 B");
         assert_eq!(human_size(1023), "1023 B");
@@ -1047,7 +1044,6 @@ mod tests {
         d
     }
 
-    #[test]
     fn dir_size_sums_nested_files() {
         let d = scratch_dir("size");
         fs::create_dir_all(d.join("a/b")).unwrap();
@@ -1059,7 +1055,6 @@ mod tests {
         fs::remove_dir_all(&d).unwrap();
     }
 
-    #[test]
     fn purge_only_touches_the_data_dir() {
         let profile = scratch_dir("purge");
         let data = user_data_dir_in(&profile);
@@ -1083,7 +1078,6 @@ mod tests {
         fs::remove_dir_all(&profile).unwrap();
     }
 
-    #[test]
     fn with_cases() {
         assert_eq!(path_with("", DIR).as_deref(), Some(DIR));
         assert_eq!(path_with("a;b", DIR).as_deref(), Some(r"a;b;C:\Apps\GTT"));
@@ -1092,7 +1086,6 @@ mod tests {
         assert_eq!(path_with(r"a; C:\APPS\GTT ", DIR), None);
     }
 
-    #[test]
     fn without_cases() {
         assert_eq!(
             path_without(r"C:\x;%USERPROFILE%\bin;c:\apps\gtt\;;C:\y", DIR).as_deref(),
@@ -1116,7 +1109,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn expand_env_follows_windows_rules() {
         let local = env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set");
         assert_eq!(expand_env(r"%LOCALAPPDATA%\x"), format!(r"{local}\x"));
@@ -1134,7 +1126,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn eq_expands_env_before_comparing() {
         let (var, abs) = env_spellings();
         assert!(path_eq(&var, &abs));
@@ -1152,7 +1143,6 @@ mod tests {
         assert!(!path_eq(r"%GTT_NO_SUCH_VAR%\x", &abs));
     }
 
-    #[test]
     fn with_recognises_env_spelling() {
         let (var, abs) = env_spellings();
         // Already present as %LOCALAPPDATA%\… → adding the absolute path is a no-op.
@@ -1167,7 +1157,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn without_removes_both_spellings() {
         let (var, abs) = env_spellings();
         let cur = format!(r"C:\x;{var};%USERPROFILE%\bin;{abs}\;C:\y");
@@ -1221,7 +1210,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn registry_roundtrip_preserves_expand_sz() {
         let (_g, key) = Scratch::new();
         let orig = r"C:\x;%USERPROFILE%\bin";
@@ -1239,7 +1227,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn registry_absent_value() {
         let (_g, key) = Scratch::new();
         assert!(!remove_dir_from_path(&key, DIR, &no_backup).unwrap());
@@ -1250,7 +1237,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn write_only_handle_errors_without_change() {
         let (g, key) = Scratch::new();
         let orig = format!(r"C:\x;{DIR};%USERPROFILE%\bin");
@@ -1265,7 +1251,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn backup_failure_blocks_write() {
         let (_g, key) = Scratch::new();
         write_path_value(&key, "a", RegType::REG_SZ).unwrap();
@@ -1275,5 +1260,40 @@ mod tests {
             read_path_value(&key).unwrap(),
             Some(("a".to_string(), RegType::REG_SZ))
         );
+    }
+
+    #[test]
+    fn firewall_and_encoded_command_scripts() {
+        firewall_rules_are_private_only_and_scoped_to_our_programs();
+        encoded_commands_are_utf16le_base64();
+    }
+
+    #[test]
+    fn size_formatting_and_user_data_purge() {
+        human_size_units();
+        dir_size_sums_nested_files();
+        purge_only_touches_the_data_dir();
+    }
+
+    #[test]
+    fn path_entry_addition_and_removal() {
+        with_cases();
+        without_cases();
+    }
+
+    #[test]
+    fn windows_env_expansion_in_path_matching() {
+        expand_env_follows_windows_rules();
+        eq_expands_env_before_comparing();
+        with_recognises_env_spelling();
+        without_removes_both_spellings();
+    }
+
+    #[test]
+    fn registry_path_roundtrip_and_guards() {
+        registry_roundtrip_preserves_expand_sz();
+        registry_absent_value();
+        write_only_handle_errors_without_change();
+        backup_failure_blocks_write();
     }
 }

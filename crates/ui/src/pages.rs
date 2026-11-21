@@ -4554,7 +4554,6 @@ mod tests {
         plan.iter().filter_map(|(_, w)| *w).sum()
     }
 
-    #[test]
     fn detail_table_sheds_columns_as_the_row_narrows() {
         // Not measured yet → the widest plan (the ruler arrives a frame later).
         assert_eq!(
@@ -4589,7 +4588,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_picked_plan_always_leaves_the_star_column_its_minimum() {
         for plans in [&DETAIL_PLANS[..], &PRICE_PLANS[..]] {
             let narrowest = plans[plans.len() - 1];
@@ -4669,7 +4667,6 @@ mod tests {
         assert!(row.disputed());
     }
 
-    #[test]
     fn plan_layout_maps_logical_columns_to_grid_columns() {
         let (cols, at) = plan_layout::<9>(DETAIL_PLANS[1], 1.0);
         assert_eq!(cols.len(), 8);
@@ -4694,7 +4691,6 @@ mod tests {
         assert_eq!(wide[2], GridLength::STAR);
     }
 
-    #[test]
     fn high_res_wide_table_plans_expand_columns() {
         let (wide_cols, wide_at) = plan_layout::<9>(DETAIL_PLAN_WIDE, 1.0);
         assert_eq!(wide_cols.len(), 9);
@@ -4711,5 +4707,13 @@ mod tests {
         assert_eq!(price_cols[0], GridLength::STAR);
         assert_eq!(price_cols[1], GridLength::Pixel(112.0));
         assert_eq!(price_cols[5], GridLength::Pixel(136.0));
+    }
+
+    #[test]
+    fn responsive_table_plan_selection_and_layout() {
+        detail_table_sheds_columns_as_the_row_narrows();
+        a_picked_plan_always_leaves_the_star_column_its_minimum();
+        plan_layout_maps_logical_columns_to_grid_columns();
+        high_res_wide_table_plans_expand_columns();
     }
 }
