@@ -25,6 +25,15 @@ pub struct FileCursor {
     pub state: Option<String>,
 }
 
+/// Lightweight cursor header without `adapter_state`, used for idle-scan
+/// fast-paths so megabytes of serialized adapter state are not read from
+/// SQLite when a file or directory has not changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CursorMeta {
+    pub offset: u64,
+    pub fingerprint: Option<String>,
+}
+
 /// What the caller must do for this file on this scan.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CursorAction {
@@ -81,10 +90,64 @@ impl super::Store {
         }
     }
 
-    /// Decide how to scan `path` this round. `len`/`mtime_ms` are the caller's
-    /// `fs::metadata` (kept outside so tests can fabricate them).
-    pub fn cursor_action(&self, path: &Path, file_key: &str, len: u64) -> Result<CursorAction> {
-        let cur = self.load_cursor(file_key)?;
+    /// Lightweight single-cursor lookup omitting `adapter_state`.
+    pub fn load_cursor_meta(&self, file_path: &str) -> Result<Option<CursorMeta>> {
+        let row = self.conn().query_row(
+            "SELECT last_byte_offset, last_tail_fingerprint FROM sync_cursors WHERE file_path=?1",
+            params![file_path],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+        );
+        Ok(row.optional()?.map(|(off, fp)| CursorMeta {
+            offset: off.max(0) as u64,
+            fingerprint: fp,
+        }))
+    }
+
+    /// Batch-load `(file_path -> CursorMeta)` for one adapter in a single query,
+    /// omitting `adapter_state`. Avoids N+1 cursor lookups on idle scans.
+    pub fn load_source_cursor_meta(
+        &self,
+        source: &str,
+    ) -> Result<std::collections::HashMap<String, CursorMeta>> {
+        let mut st = self.conn().prepare(
+            "SELECT file_path, last_byte_offset, last_tail_fingerprint
+             FROM sync_cursors WHERE source=?1",
+        )?;
+        let mut out = std::collections::HashMap::new();
+        let rows = st.query_map(params![source], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (path, off, fp) = row?;
+            out.insert(
+                path,
+                CursorMeta {
+                    offset: off.max(0) as u64,
+                    fingerprint: fp,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Decide how to scan `path` using a preloaded `CursorMeta`.
+    pub fn cursor_action_with(
+        &self,
+        path: &Path,
+        cur: Option<&CursorMeta>,
+        len: u64,
+    ) -> Result<CursorAction> {
+        let Some(cur) = cur else {
+            return Ok(if len == 0 {
+                CursorAction::Unchanged
+            } else {
+                CursorAction::Full
+            });
+        };
         if cur.offset == 0 && cur.fingerprint.is_none() {
             return Ok(if len == 0 {
                 CursorAction::Unchanged
@@ -108,6 +171,37 @@ impl super::Store {
         }
     }
 
+    /// Decide how to scan `path` this round. `len`/`mtime_ms` are the caller's
+    /// `fs::metadata` (kept outside so tests can fabricate them).
+    pub fn cursor_action(&self, path: &Path, file_key: &str, len: u64) -> Result<CursorAction> {
+        let cur = self.load_cursor_meta(file_key)?;
+        self.cursor_action_with(path, cur.as_ref(), len)
+    }
+
+    /// Persist a cursor with a caller-supplied fingerprint (no file open/tail hash).
+    /// Used by SQLite and directory-snapshot adapters to store cheap freshness tokens.
+    pub fn save_cursor_opaque(
+        &self,
+        source: &str,
+        file_key: &str,
+        offset: u64,
+        fingerprint: Option<&str>,
+        mtime_ms: i64,
+        state: Option<&str>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO sync_cursors(source, file_path, last_byte_offset, last_tail_fingerprint, last_modified, last_synced_at, adapter_state)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(file_path) DO UPDATE SET
+               source=excluded.source, last_byte_offset=excluded.last_byte_offset,
+               last_tail_fingerprint=excluded.last_tail_fingerprint,
+               last_modified=excluded.last_modified, last_synced_at=excluded.last_synced_at,
+               adapter_state=excluded.adapter_state",
+            params![source, file_key, offset as i64, fingerprint, mtime_ms, super::now_ms(), state],
+        )?;
+        Ok(())
+    }
+
     /// Persist a cursor after a successful parse (`offset` = new EOF position
     /// actually consumed; callers pass file len after read).
     pub fn save_cursor(
@@ -120,17 +214,7 @@ impl super::Store {
         state: Option<&str>,
     ) -> Result<()> {
         let fp = tail_fingerprint(path, offset)?;
-        self.conn().execute(
-            "INSERT INTO sync_cursors(source, file_path, last_byte_offset, last_tail_fingerprint, last_modified, last_synced_at, adapter_state)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(file_path) DO UPDATE SET
-               source=excluded.source, last_byte_offset=excluded.last_byte_offset,
-               last_tail_fingerprint=excluded.last_tail_fingerprint,
-               last_modified=excluded.last_modified, last_synced_at=excluded.last_synced_at,
-               adapter_state=excluded.adapter_state",
-            params![source, file_key, offset as i64, fp, mtime_ms, super::now_ms(), state],
-        )?;
-        Ok(())
+        self.save_cursor_opaque(source, file_key, offset, fp.as_deref(), mtime_ms, state)
     }
 
     /// Pin a cursor to EOF without parsing (SkipPinned path) — keeps prior
@@ -230,6 +314,31 @@ mod tests {
             s.cursor_action(&p, &key, v.len() as u64)?,
             CursorAction::SkipPinned { .. }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn batch_source_cursor_meta_and_opaque_cursor_round_trip() -> Result<()> {
+        let s = Store::open_memory()?;
+        let (_g, p) = tmpfile(b"hello world line 1\n");
+        let key = p.to_string_lossy().to_string();
+        s.save_cursor("alpha", &key, &p, 19, 123, Some("big-state-payload"))?;
+        s.save_cursor_opaque("beta", "opaque-dir", 7, Some("v2:empty"), 0, Some("{}"))?;
+
+        let batch = s.load_source_cursor_meta("alpha")?;
+        assert_eq!(batch.len(), 1);
+        assert_eq!(
+            s.cursor_action_with(&p, batch.get(&key), 19)?,
+            CursorAction::Unchanged
+        );
+        assert_eq!(
+            s.cursor_action_with(&p, batch.get("missing"), 10)?,
+            CursorAction::Full
+        );
+
+        let beta = s.load_cursor_meta("opaque-dir")?.unwrap();
+        assert_eq!(beta.offset, 7);
+        assert_eq!(beta.fingerprint.as_deref(), Some("v2:empty"));
         Ok(())
     }
 }

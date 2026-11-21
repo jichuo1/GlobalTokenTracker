@@ -52,6 +52,7 @@ pub struct Sharing {
     thread: Option<std::thread::JoinHandle<()>>,
     advert: Option<Advertisement>,
     peer_dir: PathBuf,
+    lan_cache: std::sync::Mutex<Option<(Instant, Vec<String>)>>,
 }
 
 impl std::fmt::Debug for Sharing {
@@ -100,6 +101,7 @@ impl Sharing {
             thread: Some(thread),
             advert,
             peer_dir: dir,
+            lan_cache: std::sync::Mutex::new(None),
         };
         sharing.new_code()?;
         Ok(sharing)
@@ -115,19 +117,30 @@ impl Sharing {
     }
 
     pub fn status(&self) -> ShareStatus {
-        let current = self
-            .state
-            .pairing
-            .lock()
-            .ok()
-            .and_then(|p| p.current(Instant::now()));
+        const LAN_CACHE_TTL: Duration = Duration::from_secs(30);
+        let now = Instant::now();
+        let current = self.state.pairing.lock().ok().and_then(|p| p.current(now));
+        let addresses = {
+            let mut g = self
+                .lan_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match g.as_ref() {
+                Some((at, addrs)) if now.duration_since(*at) < LAN_CACHE_TTL => addrs.clone(),
+                _ => {
+                    let fresh = lan_addresses(self.local);
+                    *g = Some((now, fresh.clone()));
+                    fresh
+                }
+            }
+        };
         ShareStatus {
             device_id: self.state.identity.device_id.clone(),
             device_name: self.state.identity.device_name.clone(),
             fingerprint: self.state.identity.fingerprint.clone().unwrap_or_default(),
             bind: self.local.to_string(),
             port: self.local.port(),
-            addresses: lan_addresses(self.local),
+            addresses,
             advertised: self.advert.is_some(),
             code_expires_in: current.as_ref().map(|(_, left)| left.as_secs()),
             code: current.map(|(code, _)| code),

@@ -127,6 +127,9 @@ fn task_dirs() -> Vec<(PathBuf, PathBuf)> {
         && let Ok(rd) = std::fs::read_dir(&cfg)
     {
         for prod in rd.flatten() {
+            if !prod.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
             let gs = prod
                 .path()
                 .join("User/globalStorage/saoudrizwan.claude-dev");

@@ -100,7 +100,16 @@ impl SourceAdapter for OpenCode {
     }
 
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        let fp = super::sqlite_change_token(&item.path);
         let cur = store.load_cursor(&item.key)?;
+        if cur
+            .state
+            .as_deref()
+            .is_some_and(|s| s == "msg-v3" || s == MSG_SCHEMA_STATE)
+            && cur.fingerprint.as_deref() == Some(fp.as_str())
+        {
+            return Ok(ScanOutcome::default());
+        }
         let conn = open_ro(&item.path)?;
         let mut out = ScanOutcome::default();
 
@@ -262,12 +271,13 @@ impl SourceAdapter for OpenCode {
         if let Some(pending) = first_pending {
             max_updated = max_updated.min(pending.saturating_sub(1).max(0));
         }
-        if (max_updated as u64) != cur.offset || migrated {
-            store.save_cursor(
+        let next_fp = first_pending.is_none().then_some(fp.as_str());
+        if (max_updated as u64) != cur.offset || migrated || cur.fingerprint.as_deref() != next_fp {
+            store.save_cursor_opaque(
                 self.id(),
                 &item.key,
-                &item.path,
                 max_updated.max(0) as u64,
+                next_fp,
                 0,
                 Some(schema_state),
             )?;
@@ -479,8 +489,12 @@ mod tests {
             store.load_cursor(&item(&src).key).unwrap().state.as_deref(),
             Some(MSG_SCHEMA_STATE)
         );
-        // Incremental: the 1 s watermark overlap refetches the newest row,
-        // but the same dedup_key merges in place — no double counting.
+        // Unchanged DB skips reopening SQLite on idle scans.
+        let idle = OpenCode.scan_sqlite(&item(&src), &store).unwrap();
+        assert!(idle.events.is_empty());
+        // Manual refresh / DB change: the 1 s watermark overlap refetches the
+        // newest row, and the same dedup_key merges in place — no double counting.
+        super::super::forget_scan_memos();
         let again = OpenCode.scan_sqlite(&item(&src), &store).unwrap();
         assert_eq!(again.events.len(), 1);
         assert_eq!(again.events[0].dedup_key, "opencode:msg:m1");

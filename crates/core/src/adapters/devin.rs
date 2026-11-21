@@ -253,7 +253,13 @@ impl SourceAdapter for Devin {
     }
 
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        let fp = super::sqlite_change_token(&item.path);
         let cur = store.load_cursor(&item.key)?;
+        if cur.state.as_deref() == Some(METRICS_STATE)
+            && cur.fingerprint.as_deref() == Some(fp.as_str())
+        {
+            return Ok(ScanOutcome::default());
+        }
         let since = if cur.state.as_deref() == Some(METRICS_STATE) {
             cur.offset as i64
         } else {
@@ -331,12 +337,15 @@ impl SourceAdapter for Devin {
                 ..Default::default()
             });
         }
-        if (max_row as u64) > cur.offset || cur.state.as_deref() != Some(METRICS_STATE) {
-            store.save_cursor(
+        if (max_row as u64) > cur.offset
+            || cur.state.as_deref() != Some(METRICS_STATE)
+            || cur.fingerprint.as_deref() != Some(fp.as_str())
+        {
+            store.save_cursor_opaque(
                 self.id(),
                 &item.key,
-                &item.path,
                 max_row as u64,
+                Some(&fp),
                 0,
                 Some(METRICS_STATE),
             )?;

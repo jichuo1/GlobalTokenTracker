@@ -2,9 +2,9 @@
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
-PRAGMA mmap_size = 67108864;
+PRAGMA mmap_size = 0;
 PRAGMA temp_store = MEMORY;
-PRAGMA cache_size = -64000;
+PRAGMA cache_size = -8000;
 PRAGMA busy_timeout = 5000;
 
 -- 明细表：所有工具所有通道的唯一落点
@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
   last_synced_at INTEGER,
   adapter_state TEXT                        -- 适配器私有续扫状态（如 codex 累计计数器）
 );
+CREATE INDEX IF NOT EXISTS idx_cursors_source ON sync_cursors(source);
 
 -- 配额时序（窗口百分比/credits余额/reset时间）；与 API 美元分列
 CREATE TABLE IF NOT EXISTS quota_snapshots (

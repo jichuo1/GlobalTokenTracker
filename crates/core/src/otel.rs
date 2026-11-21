@@ -37,6 +37,7 @@ pub fn spawn(db: PathBuf) -> Option<std::thread::JoinHandle<()>> {
     };
     tracing::info!("otel: OTLP/HTTP+JSON receiver on http://{DEFAULT_ADDR}/v1/metrics");
     Some(std::thread::spawn(move || {
+        crate::power::worker("gtt-otel");
         for stream in listener.incoming().flatten() {
             let db = db.clone();
             std::thread::spawn(move || {

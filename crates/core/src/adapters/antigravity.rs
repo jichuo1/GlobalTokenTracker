@@ -5,43 +5,59 @@
 //! ## Where the data is
 //!
 //! Every conversation is its own SQLite database, `<uuid>.db`, in any of
-//! `<base>/antigravity-cli/conversations/`, `<base>/antigravity/conversations/`
-//! and `<base>/antigravity/`, where `<base>` is `~/.gemini` (or
-//! `$GEMINI_CLI_HOME/.gemini`). Older IDE builds stored opaque `.pb` files
-//! instead; those carry no readable usage and are ignored. The
-//! `conversation_summaries.db` that 1.2.x drops beside them is an index, not a
-//! conversation (it has no `gen_metadata`) and is skipped.
+//! `<base>/antigravity-cli/conversations/`, `<base>/antigravity/conversations/`,
+//! `<base>/antigravity-ide/conversations/` and `<base>/antigravity/`, where
+//! `<base>` is `~/.gemini` (or `$GEMINI_CLI_HOME/.gemini`). Older IDE builds
+//! stored opaque `.pb` files instead; those carry no readable usage and are
+//! ignored. The `conversation_summaries.db` that 1.2.x drops beside them is an
+//! index, not a conversation (it has no `gen_metadata`) and is skipped.
 //!
 //! ## What is in a conversation database
 //!
 //! Not documented by Google — the layout below was reverse-engineered by the
 //! community (tokscale `antigravity_cli.rs`, CodexBar `docs/antigravity.md`,
-//! tokscale issue #1184 / PR #1327) against real databases; field numbers are
-//! protobuf tags.
+//! tokscale issue #1184 / PR #1327 / issue #1610) and verified directly against
+//! real local Antigravity 2.0 / CLI databases and `transcript.jsonl`; field
+//! numbers are protobuf tags.
 //!
 //! - `gen_metadata(idx, data, size)` — one row per model generation, `data` is
 //!   a protobuf. `#1` = chat model message:
-//!   - `#4` usage: `#1` fixed system-prompt tokens (~1132) and `#2` newly
-//!     processed (non-cached) input tokens — both billed as input; `#5` cache
-//!     read; `#9` text output; `#10` thinking output (`#9 + #10 == #3`);
-//!     `#11` the response id.
-//!   - `#19` machine model id (`gemini-3-flash-a`, `gemini-pro-default`, …;
-//!     sometimes absent or the routing label `gemini-default`), `#21` display
-//!     label (`Gemini 3.5 Flash (High)`).
+//!   - `#3` protobuf `Model` enum integer (same integer repeated in `#4.#1`).
+//!   - `#4` usage: `#1` protobuf `Model` enum integer (NOT tokens — e.g. `1318`
+//!     for `MODEL_PLACEHOLDER_M318`, `1535` for `MODEL_PLACEHOLDER_M535`; early
+//!     community notes mistook `1132` = `M132` for fixed system-prompt tokens);
+//!     `#2` newly processed (non-cached) input tokens; `#3` total output tokens
+//!     (`#9 + #10`); `#5` cache read; `#9` thinking/reasoning tokens; `#10`
+//!     visible response / tool-call output tokens; `#11` the response id.
+//!   - `#11` `time_to_first_token` (`google.protobuf.Duration` `{seconds, nanos}`):
+//!     client-measured TTFT from request start to first streamed chunk.
+//!   - `#12` `streaming_duration` (`google.protobuf.Duration` `{seconds, nanos}`):
+//!     client-measured streaming duration from first chunk to completion;
+//!     `#11 + #12` equals the total call duration (`steps.#7 - steps.#1`).
+//!   - `#19` machine model id (`gemini-3-flash-a`, `gemini-4-neon`, …;
+//!     sometimes absent or the routing label `gemini-default`), `#20` key-value
+//!     metadata map (repeated `{#1 key, #2 value}`, including `model_enum`),
+//!     `#21` display label (`Gemini 3.5 Flash (High)`).
 //!   - `#9.#4` a `{seconds, nanos}` timestamp — agy ≤ 1.1.17 only.
 //! - `steps(idx, step_type, metadata)` — for `step_type = 15` (model turns)
-//!   `metadata.#1` is the wall-clock `{seconds, nanos}`; `#9.#11` repeats the
-//!   response id and `#20.#3` is the `gen_metadata.idx`. agy ≥ 1.1.18 dates
-//!   generations *only* here.
+//!   `metadata.#1` is the wall-clock `created_at` `{seconds, nanos}`, `#6` is
+//!   `first_token_at`, `#7` (echoed in `#8`/`#32`) is `completed_at`; `#9.#11`
+//!   repeats the response id and `#20.#3` is the `gen_metadata.idx`. agy ≥
+//!   1.1.18 dates generations *only* here.
 //! - `trajectory_metadata_blob(id, data)` — `#2` session created-at,
 //!   `#1.#1` the workspace as a `file://` URI.
 //!
 //! ## Mapping
 //!
-//! `input = #1 + #2` (already excludes cache); `output = #9 + #10` because the
-//! provider bills thinking as output and the price maths only multiplies
-//! `output_tokens`; `reasoning = #10` is the informational subset (same
-//! convention as Codex/Claude). Antigravity records no cache-write figure.
+//! `input = #2` (already excludes cache); `output = #3` (falling back to
+//! `#9 + #10` when `#3` is absent) because the provider bills thinking as
+//! output and the price maths only multiplies `output_tokens`;
+//! `reasoning = #9` is the informational subset (same convention as
+//! Codex/Claude). Antigravity records no cache-write figure.
+//! `duration_ms = #11 + #12` and `ttft_ms = #11` come directly from
+//! `gen_metadata` (measured); when those duration fields are absent, `ts_end`
+//! from `steps.#7` (and `ttft_ms` from `steps.#6 - steps.#1`) let the store
+//! derive bounded timestamp-estimated speed instead.
 //!
 //! Events are deduplicated on the response id alone, not per file: `/fork`
 //! and importing an IDE conversation into the CLI copy the earlier
@@ -73,6 +89,9 @@ const ROUTING_LABEL: &str = "gemini-default";
 const MIN_TS_MS: i64 = 1_577_836_800_000; // 2020-01-01
 /// Tolerated clock skew for a time read from disk.
 const SKEW_MS: i64 = 60 * 60 * 1000;
+/// Maximum plausible measured duration for a single model call (24 hours),
+/// guarding against negative twos-complement varints or corrupt blobs.
+const MAX_DURATION_SECS: u64 = 24 * 60 * 60;
 
 impl SourceAdapter for Antigravity {
     fn id(&self) -> &'static str {
@@ -86,7 +105,7 @@ impl SourceAdapter for Antigravity {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        roots_under(&base_dir())
+        watch_roots_under(&base_dir())
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
@@ -94,18 +113,40 @@ impl SourceAdapter for Antigravity {
     }
 
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
-        let fp = fingerprint(&item.path);
-        let cur = store.load_cursor(&item.key)?;
-        if cur.state.as_deref() == Some(fp.as_str()) {
+        let fp = super::sqlite_change_token(&item.path);
+        if let Some(meta) = store.load_cursor_meta(&item.key)?
+            && meta.fingerprint.as_deref() == Some(fp.as_str())
+        {
             return Ok(ScanOutcome::default());
         }
+        let cur = store.load_cursor(&item.key)?;
+        let scan_gen = super::scan_generation();
+        let resume = cur
+            .state
+            .as_deref()
+            .and_then(|s| parse_cursor_state(s, scan_gen));
         let conn = open_db(&item.path)?;
-        let (out, rows) = read_conversation(&conn, item, store)?;
+        let (out, rows, max_gen_idx, max_step_idx) = read_conversation(&conn, item, store, resume)?;
         // Fingerprint taken BEFORE the read: a write racing the read moves the
         // file past it, so the next pass simply reads again.
-        store.save_cursor(self.id(), &item.key, &item.path, rows, 0, Some(&fp))?;
+        let state = format!("v2:{scan_gen}:{max_gen_idx}:{max_step_idx}");
+        store.save_cursor_opaque(self.id(), &item.key, rows, Some(&fp), 0, Some(&state))?;
         Ok(out)
     }
+}
+
+fn parse_cursor_state(s: &str, expected_gen: u64) -> Option<(i64, i64)> {
+    let mut parts = s.split(':');
+    if parts.next()? != "v2" {
+        return None;
+    }
+    let gen_id: u64 = parts.next()?.parse().ok()?;
+    if gen_id != expected_gen {
+        return None;
+    }
+    let max_gen: i64 = parts.next()?.parse().ok()?;
+    let max_step: i64 = parts.next()?.parse().ok()?;
+    (max_gen >= 0).then_some((max_gen, max_step.max(0)))
 }
 
 // ------------------------------------------------------------------ discovery
@@ -128,8 +169,35 @@ fn roots_under(base: &Path) -> Vec<PathBuf> {
     vec![
         base.join("antigravity-cli").join("conversations"),
         base.join("antigravity").join("conversations"),
+        base.join("antigravity-ide").join("conversations"),
         base.join("antigravity"),
     ]
+}
+
+/// Live-watch directories: subscribe only to `conversations/` subdirectories
+/// unless legacy direct `<uuid>.db` files actually live at `<base>/antigravity`.
+/// Watching `<base>/antigravity` recursively when unused floods the watcher
+/// with `brain/`, `presence/`, `daemon/`, `persistent_terminals/`, and
+/// `conversation_summaries.db-wal` chatter.
+fn watch_roots_under(base: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![
+        base.join("antigravity-cli").join("conversations"),
+        base.join("antigravity").join("conversations"),
+        base.join("antigravity-ide").join("conversations"),
+    ];
+    let legacy = base.join("antigravity");
+    let has_legacy_db = std::fs::read_dir(&legacy).is_ok_and(|rd| {
+        rd.flatten().any(|e| {
+            let p = e.path();
+            p.extension().is_some_and(|x| x.eq_ignore_ascii_case("db"))
+                && p.file_name().is_none_or(|n| n != SUMMARIES_DB)
+                && p.is_file()
+        })
+    });
+    if has_legacy_db {
+        roots.push(legacy);
+    }
+    roots
 }
 
 /// Immediate `*.db` entries of every root, deduplicated and sorted.
@@ -159,27 +227,6 @@ fn discover_in(base: &Path) -> Vec<SourceItem> {
     }
     items.sort_by(|a, b| a.key.cmp(&b.key));
     items
-}
-
-/// `len:mtime` of the database and its `-wal` — a WAL database takes writes
-/// there long before a checkpoint touches the main file.
-fn fingerprint(db: &Path) -> String {
-    let stamp = |p: &Path| {
-        std::fs::metadata(p)
-            .ok()
-            .map(|m| {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_millis());
-                format!("{}:{}", m.len(), mtime)
-            })
-            .unwrap_or_default()
-    };
-    let mut wal = db.as_os_str().to_os_string();
-    wal.push("-wal");
-    format!("{}|{}", stamp(db), stamp(Path::new(&wal)))
 }
 
 // -------------------------------------------------------------------- opening
@@ -351,6 +398,50 @@ fn timestamp_ms(buf: &[u8]) -> Option<i64> {
     secs.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }
 
+/// `google.protobuf.Duration` (`{#1 seconds, #2 nanos}`) → nanoseconds.
+/// Proto3 omits zero fields, so an empty buffer encodes 0 ns. Malformed wire
+/// bytes, out-of-range nanos, or implausible seconds return `None`.
+fn duration_ns(buf: &[u8]) -> Option<u64> {
+    let mut secs = 0u64;
+    let mut nanos = 0u64;
+    let mut r = Reader::new(buf);
+    while r.pos < r.buf.len() {
+        let (f, w) = r.next_field()?;
+        match (f, w) {
+            (1, Wire::Varint(v)) => secs = v,
+            (2, Wire::Varint(v)) => nanos = v,
+            _ => {}
+        }
+    }
+    if secs > MAX_DURATION_SECS || nanos >= 1_000_000_000 {
+        return None;
+    }
+    secs.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
+/// Convert a positive nanosecond duration to rounded milliseconds (at least 1 ms
+/// when non-zero; `None` when zero).
+fn ns_to_ms(ns: u64) -> Option<i64> {
+    if ns == 0 {
+        return None;
+    }
+    let ms = (ns.saturating_add(500_000) / 1_000_000).max(1);
+    i64::try_from(ms).ok()
+}
+
+/// Look up `key` inside a repeated protobuf map field `{#1 key, #2 value}`.
+fn kv_text<'a>(buf: &'a [u8], field: u64, key: &str) -> Option<&'a str> {
+    let mut r = Reader::new(buf);
+    while let Some((f, w)) = r.next_field() {
+        if let (true, Wire::Len(entry)) = (f == field, w)
+            && string(entry, 1) == Some(key)
+        {
+            return text(entry, 2);
+        }
+    }
+    None
+}
+
 // --------------------------------------------------------------------- models
 
 /// Antigravity machine id → the price-book key of the model it serves.
@@ -370,13 +461,34 @@ fn canonical_model(raw: &str) -> Option<&'static str> {
         | "model_placeholder_m36"
         | "model_placeholder_m37" => "gemini-3.1-pro",
         "gemini-3-pro-high" | "gemini-3-pro-low" => "gemini-3-pro",
+        // The 4.x family:
+        "gemini-4-neon"
+        | "gemini-4-neon-xhigh"
+        | "gemini-4-neon-high"
+        | "gemini-4-neon-medium"
+        | "gemini-4-neon-low"
+        | "model_placeholder_m535" => "gemini-4-neon",
+        "gemini-4-carbon"
+        | "gemini-4-carbon-xhigh"
+        | "gemini-4-carbon-high"
+        | "gemini-4-carbon-medium"
+        | "gemini-4-carbon-low"
+        | "model_placeholder_m427" => "gemini-4-carbon",
+        "gemini-4-hydrogen"
+        | "gemini-4-hydrogen-xhigh"
+        | "gemini-4-hydrogen-high"
+        | "gemini-4-hydrogen-medium"
+        | "gemini-4-hydrogen-low"
+        | "model_placeholder_m528" => "gemini-4-hydrogen",
         // The 3.8 Flash family:
         "gemini-3.8-flash"
         | "gemini-3.8-flash-n"
         | "gemini-3.8-flash-high"
         | "gemini-3.8-flash-medium"
         | "gemini-3.8-flash-low"
-        | "model_placeholder_m318" => "gemini-3.8-flash",
+        | "model_placeholder_m318"
+        | "model_placeholder_m319"
+        | "model_placeholder_m320" => "gemini-3.8-flash",
         // The 3.7 Flash family:
         "gemini-3.7-flash"
         | "gemini-3.7-flash-high"
@@ -417,7 +529,7 @@ fn canonical_model(raw: &str) -> Option<&'static str> {
         "claude-sonnet-4-6-thinking" | "claude-sonnet-4.6-thinking" | "model_placeholder_m35" => {
             "claude-sonnet-4-6"
         }
-        "model_openai_gpt_oss_120b_medium" => "gpt-oss-120b",
+        "gpt-oss-120b-medium" | "model_openai_gpt_oss_120b_medium" => "gpt-oss-120b",
         _ => return None,
     })
 }
@@ -426,6 +538,18 @@ fn canonical_model(raw: &str) -> Option<&'static str> {
 /// sibling to borrow one from. Only labels seen in real databases.
 fn label_model(label: &str) -> Option<&'static str> {
     match label.trim() {
+        "Gemini 4 Neon (Low)"
+        | "Gemini 4 Neon (Medium)"
+        | "Gemini 4 Neon (High)"
+        | "Gemini 4 Neon (XHigh)" => Some("gemini-4-neon"),
+        "Gemini 4 Carbon (Low)"
+        | "Gemini 4 Carbon (Medium)"
+        | "Gemini 4 Carbon (High)"
+        | "Gemini 4 Carbon (XHigh)" => Some("gemini-4-carbon"),
+        "Gemini 4 Hydrogen (Low)"
+        | "Gemini 4 Hydrogen (Medium)"
+        | "Gemini 4 Hydrogen (High)"
+        | "Gemini 4 Hydrogen (XHigh)" => Some("gemini-4-hydrogen"),
         "Gemini 3.8 Flash (Low)" | "Gemini 3.8 Flash (Medium)" | "Gemini 3.8 Flash (High)" => {
             Some("gemini-3.8-flash")
         }
@@ -559,39 +683,84 @@ fn read_trajectory(conn: &Connection) -> Trajectory {
     }
 }
 
+/// Wall-clock timestamps of a model turn from `steps(step_type = 15)`:
+/// `#1` created_at, `#6` first_token_at, `#7` (or `#8`/`#32`) completed_at.
+#[derive(Clone, Copy)]
+struct StepTiming {
+    start_ms: i64,
+    first_token_ms: Option<i64>,
+    end_ms: Option<i64>,
+}
+
 /// Wall-clock times of model turns, keyed by response id and by generation
 /// index. agy ≥ 1.1.18 keeps them nowhere else.
 #[derive(Default)]
 struct StepTimes {
-    by_response: HashMap<String, i64>,
-    by_gen_idx: HashMap<i64, i64>,
+    by_response: HashMap<String, StepTiming>,
+    by_gen_idx: HashMap<i64, StepTiming>,
+    max_idx: i64,
 }
 
-fn read_step_times(conn: &Connection) -> StepTimes {
+fn read_step_times(conn: &Connection, min_idx: Option<i64>) -> StepTimes {
     let mut out = StepTimes::default();
     if !has_table(conn, "steps") {
         return out;
     }
-    let Ok(mut st) =
-        conn.prepare("SELECT metadata FROM steps WHERE step_type = 15 AND metadata IS NOT NULL")
-    else {
+    let sql = if min_idx.is_some() {
+        "SELECT idx, metadata FROM steps WHERE step_type = 15 AND metadata IS NOT NULL AND idx >= ?1"
+    } else {
+        "SELECT idx, metadata FROM steps WHERE step_type = 15 AND metadata IS NOT NULL"
+    };
+    let Ok(mut st) = conn.prepare(sql) else {
         return out;
     };
-    let Ok(rows) = st.query_map([], |r| Ok(bytes_of(r.get_ref(0)?))) else {
-        return out;
+    let parsed: Vec<(Option<i64>, Option<Vec<u8>>)> = match min_idx {
+        Some(m) => st
+            .query_map([m], |r| {
+                Ok((r.get::<_, Option<i64>>(0)?, bytes_of(r.get_ref(1)?)))
+            })
+            .ok()
+            .into_iter()
+            .flat_map(|it| it.flatten())
+            .collect(),
+        None => st
+            .query_map([], |r| {
+                Ok((r.get::<_, Option<i64>>(0)?, bytes_of(r.get_ref(1)?)))
+            })
+            .ok()
+            .into_iter()
+            .flat_map(|it| it.flatten())
+            .collect(),
     };
-    for blob in rows.flatten().flatten() {
-        let Some(ms) = msg(&blob, 1).and_then(timestamp_ms).filter(|&m| m > 0) else {
+    for (step_idx, blob) in parsed {
+        if let Some(i) = step_idx {
+            out.max_idx = out.max_idx.max(i);
+        }
+        let Some(blob) = blob else { continue };
+        let Some(start_ms) = msg(&blob, 1).and_then(timestamp_ms).filter(|&m| m > 0) else {
             continue;
         };
+        let first_token_ms = msg(&blob, 6)
+            .and_then(timestamp_ms)
+            .filter(|&m| m >= start_ms);
+        let end_ms = msg(&blob, 7)
+            .or_else(|| msg(&blob, 8))
+            .or_else(|| msg(&blob, 32))
+            .and_then(timestamp_ms)
+            .filter(|&m| m >= start_ms);
+        let timing = StepTiming {
+            start_ms,
+            first_token_ms,
+            end_ms,
+        };
         if let Some(id) = msg(&blob, 9).and_then(|m| text(m, 11)) {
-            out.by_response.entry(id.to_string()).or_insert(ms);
+            out.by_response.entry(id.to_string()).or_insert(timing);
         }
         if let Some(idx) = msg(&blob, 20)
             .and_then(|m| varint(m, 3))
             .and_then(|i| i64::try_from(i).ok())
         {
-            out.by_gen_idx.entry(idx).or_insert(ms);
+            out.by_gen_idx.entry(idx).or_insert(timing);
         }
     }
     out
@@ -657,41 +826,68 @@ fn hex(c: u8) -> Option<u8> {
     }
 }
 
-/// Read one conversation database into events. Returns the outcome and the
-/// number of `gen_metadata` rows seen (kept as the cursor's informational
-/// offset). A database without `gen_metadata` is not a conversation: empty.
+/// Read one conversation database into events. Returns `(outcome, total_rows,
+/// max_gen_idx, max_step_idx)`. When `resume = Some((prev_gen_idx, prev_step_idx))`
+/// and the database only grew, only `idx >= prev_gen_idx` rows and recent steps
+/// are fetched instead of re-reading megabytes of historical blobs.
 fn read_conversation(
     conn: &Connection,
     item: &SourceItem,
     store: &Store,
-) -> Result<(ScanOutcome, u64)> {
+    resume: Option<(i64, i64)>,
+) -> Result<(ScanOutcome, u64, i64, i64)> {
     let mut out = ScanOutcome::default();
     if !has_table(conn, "gen_metadata") {
-        return Ok((out, 0));
+        return Ok((out, 0, -1, 0));
     }
     let session_id = item.path.file_stem().map_or_else(
         || "unknown".to_string(),
         |s| s.to_string_lossy().to_string(),
     );
 
+    let (total_rows, db_max_idx): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(idx), -1) FROM gen_metadata",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let incremental = resume.filter(|&(prev_gen, _)| prev_gen >= 0 && db_max_idx >= prev_gen);
+
     let mut rows: Vec<(Option<i64>, Vec<u8>)> = Vec::new();
     {
-        let mut st = conn.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx")?;
-        let it = st.query_map([], |r| {
-            Ok((r.get::<_, Option<i64>>(0)?, bytes_of(r.get_ref(1)?)))
-        })?;
-        for row in it {
-            // A damaged row must not sink the rest of the conversation.
-            if let Ok((idx, Some(data))) = row {
-                rows.push((idx, data));
+        if let Some((prev_gen, _)) = incremental {
+            let mut st =
+                conn.prepare("SELECT idx, data FROM gen_metadata WHERE idx >= ?1 ORDER BY idx")?;
+            let it = st.query_map([prev_gen], |r| {
+                Ok((r.get::<_, Option<i64>>(0)?, bytes_of(r.get_ref(1)?)))
+            })?;
+            for row in it {
+                if let Ok((idx, Some(data))) = row {
+                    rows.push((idx, data));
+                }
+            }
+        } else {
+            let mut st = conn.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx")?;
+            let it = st.query_map([], |r| {
+                Ok((r.get::<_, Option<i64>>(0)?, bytes_of(r.get_ref(1)?)))
+            })?;
+            for row in it {
+                // A damaged row must not sink the rest of the conversation.
+                if let Ok((idx, Some(data))) = row {
+                    rows.push((idx, data));
+                }
             }
         }
     }
-    let n_rows = rows.len() as u64;
+    let n_rows = total_rows.max(0) as u64;
 
     let traj = read_trajectory(conn);
-    let steps = read_step_times(conn);
-    let models = SessionModels::from_rows(rows.iter().map(|(_, d)| d.as_slice()));
+    let mut steps = read_step_times(
+        conn,
+        incremental.map(|(_, prev_step)| prev_step.saturating_sub(2)),
+    );
+    let mut models = SessionModels::from_rows(rows.iter().map(|(_, d)| d.as_slice()));
+    let mut loaded_full_models = incremental.is_none();
+    let mut loaded_full_steps = incremental.is_none();
     let fallback_ts = traj.created_ms.unwrap_or_else(|| file_mtime_ms(&item.path));
     let now = crate::store::now_ms();
     let believable = |ms: i64| ms >= MIN_TS_MS && ms <= now + SKEW_MS;
@@ -701,16 +897,34 @@ fn read_conversation(
         let Some(chat) = msg(blob, 1) else { continue };
         let Some(usage) = msg(chat, 4) else { continue };
 
-        let input = varint(usage, 1)
-            .unwrap_or(0)
-            .saturating_add(varint(usage, 2).unwrap_or(0));
+        // `usage.#1` is the protobuf `Model` enum integer (equals `chat.#3`),
+        // NOT input tokens. `#2` is non-cached input, `#5` cache read, `#3`
+        // total output, `#9` thinking (reasoning) output, `#10` visible
+        // response / tool-call output (`#9 + #10 == #3`).
+        let input = varint(usage, 2).unwrap_or(0);
         let cache_read = varint(usage, 5).unwrap_or(0);
-        let text_out = varint(usage, 9).unwrap_or(0);
-        let thinking = varint(usage, 10).unwrap_or(0);
-        if input == 0 && cache_read == 0 && text_out == 0 && thinking == 0 {
+        let thinking = varint(usage, 9).unwrap_or(0);
+        let response_out = varint(usage, 10).unwrap_or(0);
+        let sum_out = thinking.saturating_add(response_out);
+        let output = varint(usage, 3).filter(|&v| v > 0).unwrap_or(sum_out);
+        let reasoning = thinking.min(output);
+        let response_id = text(usage, 11).map(str::to_string);
+        if input == 0 && cache_read == 0 && output == 0 {
+            // Clean up legacy phantom rows that earlier versions ingested by
+            // counting `usage.#1` (the Model enum integer) as input tokens.
+            if let Some(key) = response_id
+                .as_deref()
+                .map(|id| format!("agy:{id}"))
+                .or_else(|| idx.map(|i| format!("agy:{session_id}:{i}")))
+            {
+                let _ = store.conn().execute(
+                    "DELETE FROM usage_events WHERE app = ?1 AND dedup_key = ?2 \
+                     AND output_tokens = 0 AND cache_read_tokens = 0 AND duration_ms IS NULL",
+                    rusqlite::params![apps::GEMINI_ANTIGRAVITY, key],
+                );
+            }
             continue;
         }
-        let response_id = text(usage, 11).map(str::to_string);
         if let Some(id) = &response_id {
             if !seen.insert(id.clone()) {
                 out.skipped += 1;
@@ -737,12 +951,28 @@ fn read_conversation(
             }
         }
 
-        // Model: own concrete id → sibling-derived → label → (routing label).
+        // Model: own concrete id → known `model_enum` (#20) → sibling-derived →
+        // label → raw `model_enum` → (routing label).
         let own = text(chat, 19);
-        let raw = own
+        let model_enum = kv_text(chat, 20, "model_enum").filter(|m| !is_routing(m));
+        let direct = own
             .filter(|m| !is_routing(m))
+            .or_else(|| model_enum.filter(|m| canonical_model(m).is_some()));
+        if direct.is_none() && models.recover(chat).is_none() && !loaded_full_models {
+            // Lazy fallback: load sibling rows only when an incremental turn
+            // carries a routing placeholder without a direct model id.
+            loaded_full_models = true;
+            if let Ok(mut st) = conn.prepare("SELECT data FROM gen_metadata")
+                && let Ok(it) = st.query_map([], |r| Ok(bytes_of(r.get_ref(0)?)))
+            {
+                let all_blobs: Vec<Vec<u8>> = it.flatten().flatten().collect();
+                models = SessionModels::from_rows(all_blobs.iter().map(Vec::as_slice));
+            }
+        }
+        let raw = direct
             .or_else(|| models.recover(chat))
             .or_else(|| text(chat, 21).and_then(label_model))
+            .or(model_enum)
             .or(own);
         let canonical = raw.and_then(canonical_model);
         let model = canonical.or(raw).map(str::to_string);
@@ -750,25 +980,75 @@ fn read_conversation(
             .filter(|r| canonical.is_some_and(|c| !c.eq_ignore_ascii_case(r)))
             .map(str::to_string);
 
-        // Time: per-generation stamp (agy ≤ 1.1.17) → the matching model-turn
+        let lookup_step = |st: &StepTimes| {
+            response_id
+                .as_deref()
+                .and_then(|id| st.by_response.get(id))
+                .copied()
+                .filter(|s| believable(s.start_ms))
+                .or_else(|| {
+                    idx.and_then(|i| st.by_gen_idx.get(&i))
+                        .copied()
+                        .filter(|s| believable(s.start_ms))
+                })
+        };
+        let mut step = lookup_step(&steps);
+        if step.is_none() && !loaded_full_steps {
+            loaded_full_steps = true;
+            steps = read_step_times(conn, None);
+            step = lookup_step(&steps);
+        }
+
+        // Start time: per-generation stamp (agy ≤ 1.1.17) → matching model-turn
         // step (agy ≥ 1.1.18) → conversation start → file mtime.
         let ts = msg(chat, 9)
             .and_then(|g| msg(g, 4))
             .and_then(timestamp_ms)
             .filter(|&ms| believable(ms))
-            .or_else(|| {
-                response_id
-                    .as_deref()
-                    .and_then(|id| steps.by_response.get(id))
-                    .copied()
-                    .filter(|&ms| believable(ms))
-            })
-            .or_else(|| {
-                idx.and_then(|i| steps.by_gen_idx.get(&i))
-                    .copied()
-                    .filter(|&ms| believable(ms))
-            })
+            .or_else(|| step.map(|s| s.start_ms))
             .unwrap_or(fallback_ts);
+
+        // Direct client-measured durations on `gen_metadata.#1`:
+        // `#11` = time_to_first_token (TTFT), `#12` = streaming_duration;
+        // `#11 + #12` is total call duration (agrees with `steps.#7 - steps.#1`
+        // to sub-millisecond precision on real databases).
+        let ttft_ns = msg(chat, 11).and_then(duration_ns);
+        let stream_ns = msg(chat, 12).and_then(duration_ns);
+        let (duration_ms, mut ttft_ms) = match (ttft_ns, stream_ns) {
+            (Some(t), Some(s)) => {
+                let total = t.checked_add(s).and_then(ns_to_ms);
+                let ttft = total.and_then(|dur| ns_to_ms(t).map(|v| v.min(dur)));
+                (total, ttft)
+            }
+            // Only `#11` present (`#12` absent): keep TTFT without pretending
+            // it is the total duration; `steps.#7` may still provide `ts_end`.
+            (Some(t), None) => (None, ns_to_ms(t)),
+            _ => (None, None),
+        };
+
+        let step_end_ms = step
+            .and_then(|s| s.end_ms)
+            .filter(|&ms| believable(ms) && ms >= ts);
+
+        if ttft_ms.is_none()
+            && let Some(s) = step
+            && let Some(ft) = s.first_token_ms.filter(|&m| believable(m))
+            && let Some(d) = crate::normalize::derived_duration(Some(s.start_ms), Some(ft))
+        {
+            let within_end = duration_ms
+                .map(|dur| d <= dur)
+                .or_else(|| step_end_ms.map(|end| ft <= end))
+                .unwrap_or(true);
+            if within_end {
+                ttft_ms = Some(d);
+            }
+        }
+
+        // End time: step completed_at (#7/#8/#32), else ts_start + measured
+        // duration. When `duration_ms` is absent (legacy DB without #11/#12)
+        // but `steps` gives both start and end, `Store`/`EventRow` use the
+        // bounded `ts_end - ts_start` span and flag it as timestamp-estimated.
+        let ts_end = step_end_ms.or_else(|| duration_ms.and_then(|d| ts.checked_add(d)));
 
         let dedup_key = match &response_id {
             Some(id) => format!("agy:{id}"),
@@ -786,12 +1066,15 @@ fn read_conversation(
             model,
             request_model,
             ts_start: Some(ts),
+            ts_end,
             input_tokens: input,
             // Thinking is billed as output; `reasoning_tokens` is the subset.
-            output_tokens: text_out.saturating_add(thinking),
-            reasoning_tokens: thinking,
+            output_tokens: output,
+            reasoning_tokens: reasoning,
             cache_read_tokens: cache_read,
             provenance: Provenance::LocalSqlite,
+            duration_ms,
+            ttft_ms,
             raw_ref: Some(format!(
                 "{}#gen:{}",
                 item.path.display(),
@@ -800,7 +1083,10 @@ fn read_conversation(
             ..Default::default()
         });
     }
-    Ok((out, n_rows))
+    let next_step = steps
+        .max_idx
+        .max(incremental.map_or(0, |(_, prev_step)| prev_step));
+    Ok((out, n_rows, db_max_idx, next_step))
 }
 
 #[cfg(test)]
@@ -839,6 +1125,21 @@ mod tests {
         t.extend(f_varint(2, 500_000_000));
         f_len(field, &t)
     }
+    fn f_dur(field: u64, secs: u64, nanos: u64) -> Vec<u8> {
+        let mut d = Vec::new();
+        if secs > 0 {
+            d.extend(f_varint(1, secs));
+        }
+        if nanos > 0 {
+            d.extend(f_varint(2, nanos));
+        }
+        f_len(field, &d)
+    }
+    fn f_kv(field: u64, key: &str, val: &str) -> Vec<u8> {
+        let mut kv = f_len(1, key.as_bytes());
+        kv.extend(f_len(2, val.as_bytes()));
+        f_len(field, &kv)
+    }
 
     /// Recent enough to pass the plausibility window whenever the tests run.
     fn recent_secs(back: i64) -> i64 {
@@ -847,35 +1148,62 @@ mod tests {
 
     struct Gen<'a> {
         rid: &'a str,
+        /// Protobuf `Model` enum integer (`usage.#1` / `chat.#3`), never tokens.
+        model_enum_id: u64,
+        /// Non-cached input tokens (`usage.#2`).
         input: u64,
-        new_input: u64,
         cache: u64,
-        out: u64,
+        /// Thinking/reasoning output tokens (`usage.#9`).
         think: u64,
+        /// Visible response / tool-call output tokens (`usage.#10`).
+        response: u64,
+        /// Explicit total output (`usage.#3`); when `None`, encoded as `think + response`.
+        total_out: Option<u64>,
         model: Option<&'a str>,
+        model_enum: Option<&'a str>,
         label: Option<&'a str>,
         /// agy ≤ 1.1.17 per-generation stamp (`#9.#4`), seconds.
         stamp: Option<i64>,
+        /// Client-measured TTFT (`chat.#11`) as `(secs, nanos)`.
+        ttft: Option<(u64, u64)>,
+        /// Client-measured streaming duration (`chat.#12`) as `(secs, nanos)`.
+        stream: Option<(u64, u64)>,
     }
 
     impl Gen<'_> {
         fn blob(&self) -> Vec<u8> {
-            let mut usage = f_varint(1, self.input);
-            usage.extend(f_varint(2, self.new_input));
+            let mut usage = f_varint(1, self.model_enum_id);
+            usage.extend(f_varint(2, self.input));
+            let tot = self
+                .total_out
+                .unwrap_or_else(|| self.think.saturating_add(self.response));
+            if tot > 0 {
+                usage.extend(f_varint(3, tot));
+            }
             usage.extend(f_varint(5, self.cache));
-            usage.extend(f_varint(9, self.out));
-            usage.extend(f_varint(10, self.think));
+            usage.extend(f_varint(9, self.think));
+            usage.extend(f_varint(10, self.response));
             if !self.rid.is_empty() {
                 usage.extend(f_len(11, self.rid.as_bytes()));
             }
-            let mut chat = f_len(4, &usage);
+            let mut chat = f_varint(3, self.model_enum_id);
+            chat.extend(f_len(4, &usage));
             match self.stamp {
                 Some(s) => chat.extend(f_len(9, &f_ts(4, s))),
                 // modern agy: #9 carries prompt-cache metadata, no timestamp
                 None => chat.extend(f_len(9, &f_len(10, b"cache metadata, not a time"))),
             }
+            if let Some((s, ns)) = self.ttft {
+                chat.extend(f_dur(11, s, ns));
+            }
+            if let Some((s, ns)) = self.stream {
+                chat.extend(f_dur(12, s, ns));
+            }
             if let Some(m) = self.model {
                 chat.extend(f_len(19, m.as_bytes()));
+            }
+            if let Some(me) = self.model_enum {
+                chat.extend(f_kv(20, "model_enum", me));
             }
             if let Some(l) = self.label {
                 chat.extend(f_len(21, l.as_bytes()));
@@ -887,14 +1215,18 @@ mod tests {
     fn turn<'a>(rid: &'a str, model: Option<&'a str>) -> Gen<'a> {
         Gen {
             rid,
-            input: 1132,
-            new_input: 900,
+            model_enum_id: 1318,
+            input: 900,
             cache: 5000,
-            out: 300,
             think: 200,
+            response: 300,
+            total_out: None,
             model,
+            model_enum: None,
             label: None,
             stamp: None,
+            ttft: None,
+            stream: None,
         }
     }
 
@@ -956,18 +1288,14 @@ mod tests {
         put_traj(&c, recent_secs(3600), "file:///C:/Users/me/My%20Proj");
         let mut g1 = turn("resp-1", Some("gemini-pro-default"));
         g1.stamp = Some(recent_secs(600));
+        g1.ttft = Some((3, 585_277_600));
+        g1.stream = Some((7, 580_841_500));
         put_gen(&c, 0, &g1.blob());
         // Same response id again (a retried write) — counted once.
         put_gen(&c, 1, &g1.blob());
-        // Zero-usage row (no tokens at all) — dropped.
+        // Zero-usage row (only model enum `#1` set, no real tokens) — dropped.
         let mut empty = turn("resp-empty", Some("gemini-pro-default"));
-        (
-            empty.input,
-            empty.new_input,
-            empty.cache,
-            empty.out,
-            empty.think,
-        ) = (0, 0, 0, 0, 0);
+        (empty.input, empty.cache, empty.think, empty.response) = (0, 0, 0, 0);
         put_gen(&c, 2, &empty.blob());
         let mut g3 = turn("resp-2", Some("claude-opus-4-6-thinking"));
         (g3.think, g3.cache) = (0, 0);
@@ -988,23 +1316,31 @@ mod tests {
             Some("11111111-2222-3333-4444-555555555555")
         );
         assert_eq!(e.project.as_deref(), Some(r"C:\Users\me\My Proj"));
-        // input = fixed prompt (#1) + new input (#2); cache excluded.
-        assert_eq!(e.input_tokens, 1132 + 900);
+        // input = #2 only (`#1` is the Model enum integer, never tokens).
+        assert_eq!(e.input_tokens, 900);
         assert_eq!(e.cache_read_tokens, 5000);
-        // thinking is billed as output, and stays visible as the subset.
-        assert_eq!(e.output_tokens, 300 + 200);
+        // thinking (#9) is billed as output (#3 = #9 + #10), and stays visible as the subset.
+        assert_eq!(e.output_tokens, 500);
         assert_eq!(e.reasoning_tokens, 200);
         // machine id → price-book model, raw id kept for audit.
         assert_eq!(e.model.as_deref(), Some("gemini-3.1-pro"));
         assert_eq!(e.request_model.as_deref(), Some("gemini-pro-default"));
         assert_eq!(e.provider_id.as_deref(), Some("google"));
-        assert_eq!(e.ts_start, Some(g1.stamp.unwrap() * 1000 + 500));
+        let start = g1.stamp.unwrap() * 1000 + 500;
+        assert_eq!(e.ts_start, Some(start));
+        assert_eq!(e.ttft_ms, Some(3_585));
+        assert_eq!(e.duration_ms, Some(11_166));
+        assert_eq!(e.ts_end, Some(start + 11_166));
         assert_eq!(e.provenance, Provenance::LocalSqlite);
 
         let e2 = &out.events[1];
         assert_eq!(e2.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(e2.provider_id.as_deref(), Some("anthropic"));
         assert_eq!(e2.reasoning_tokens, 0);
+        assert_eq!(e2.output_tokens, 300);
+        assert_eq!(e2.duration_ms, None);
+        assert_eq!(e2.ttft_ms, None);
+        assert_eq!(e2.ts_end, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1290,7 +1626,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_covers_the_three_roots_and_skips_the_index() {
+    fn discovery_covers_all_roots_and_skips_the_index() {
         let base = temp_dir("disc");
         let mk = |rel: &str, name: &str| {
             let d = base.join(rel);
@@ -1299,6 +1635,7 @@ mod tests {
         };
         mk("antigravity-cli/conversations", "a.db");
         mk("antigravity/conversations", "b.db");
+        mk("antigravity-ide/conversations", "d.db");
         mk("antigravity", "c.db");
         mk("antigravity", SUMMARIES_DB);
         mk("antigravity", "notes.txt");
@@ -1308,8 +1645,8 @@ mod tests {
             .iter()
             .map(|i| i.path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names.len(), 3, "{names:?}");
-        for n in ["a.db", "b.db", "c.db"] {
+        assert_eq!(names.len(), 4, "{names:?}");
+        for n in ["a.db", "b.db", "c.db", "d.db"] {
             assert!(names.contains(&n.to_string()), "{n} in {names:?}");
         }
         assert!(discover_in(&base.join("nothing-here")).is_empty());
@@ -1377,10 +1714,13 @@ mod tests {
             "claude-opus-4-6-thinking",
             "claude-sonnet-4-6-thinking",
             "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+            "gpt-oss-120b-medium",
             "gemini-3.8-flash",
             "gemini-3.8-flash-n",
             "gemini-3.8-flash-high",
             "MODEL_PLACEHOLDER_M318",
+            "MODEL_PLACEHOLDER_M319",
+            "MODEL_PLACEHOLDER_M320",
             "gemini-3.7-flash",
             "gemini-3.6-flash",
         ];
@@ -1397,5 +1737,384 @@ mod tests {
             book.resolve("gemini-default", None, None),
             Resolution::Unpriced
         ));
+    }
+
+    #[test]
+    fn measured_durations_power_all_five_speed_metrics() {
+        let dir = temp_dir("speed");
+        let db = dir.join("speed.db");
+        let t0 = recent_secs(120);
+        let c = new_db(&db, true);
+        put_traj(&c, recent_secs(3600), "file:///C:/proj");
+
+        // Turn 0: 4000 input, 600 output (400 think + 200 response), TTFT 2s, stream 3s → total 5s.
+        let mut g0 = turn("sp-0", Some("gemini-4-neon"));
+        g0.input = 4000;
+        g0.think = 400;
+        g0.response = 200;
+        g0.ttft = Some((2, 0));
+        g0.stream = Some((3, 0));
+        put_gen(&c, 0, &g0.blob());
+
+        // Turn 1: single-chunk call (TTFT 1s, stream 0s) → duration == ttft, excluded from decode.
+        let mut g1 = turn("sp-1", Some("gemini-4-neon"));
+        g1.input = 1000;
+        g1.think = 50;
+        g1.response = 50;
+        g1.ttft = Some((1, 0));
+        g1.stream = Some((0, 0));
+        put_gen(&c, 1, &g1.blob());
+
+        let step = |start: i64, first: i64, end: i64, rid: &str, gen_idx: u64| {
+            let mut m = f_ts(1, start);
+            m.extend(f_ts(6, first));
+            m.extend(f_ts(7, end));
+            m.extend(f_len(9, &f_len(11, rid.as_bytes())));
+            m.extend(f_len(20, &f_varint(3, gen_idx)));
+            m
+        };
+        for (i, meta) in [
+            (1, step(t0, t0 + 2, t0 + 5, "sp-0", 0)),
+            (2, step(t0 + 10, t0 + 11, t0 + 11, "sp-1", 1)),
+        ] {
+            c.execute(
+                "INSERT INTO steps (idx, step_type, metadata) VALUES (?1, 15, ?2)",
+                rusqlite::params![i, meta],
+            )
+            .unwrap();
+        }
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        assert_eq!(out.events.len(), 2);
+        assert_eq!(out.events[0].duration_ms, Some(5_000));
+        assert_eq!(out.events[0].ttft_ms, Some(2_000));
+        assert_eq!(out.events[0].ts_start, Some(t0 * 1000 + 500));
+        assert_eq!(out.events[0].ts_end, Some((t0 + 5) * 1000 + 500));
+        assert_eq!(out.events[1].duration_ms, Some(1_000));
+        assert_eq!(out.events[1].ttft_ms, Some(1_000));
+
+        for ev in &out.events {
+            store.upsert_event(ev).unwrap();
+        }
+        let by_app = store.speed_by_app(None, None, None, None).unwrap();
+        let agy = by_app
+            .iter()
+            .find(|r| r.name == apps::GEMINI_ANTIGRAVITY)
+            .unwrap();
+        assert_eq!(agy.speed_ms, 6_000);
+        assert_eq!(agy.speed_est_ms, 0);
+        // Output: (600 + 100) / 6s
+        assert!((agy.output_tps().unwrap() - (700.0 / 6.0)).abs() < 1e-6);
+        // Input: (4000 + 1000) / 6s
+        assert!((agy.input_tps().unwrap() - (5000.0 / 6.0)).abs() < 1e-6);
+        // Total: (5000 + 700) / 6s
+        assert!((agy.total_tps().unwrap() - (5700.0 / 6.0)).abs() < 1e-6);
+        // Prefill: (4000 + 1000) / (2s + 1s)
+        assert!((agy.prefill_tps().unwrap() - (5000.0 / 3.0)).abs() < 1e-6);
+        // Decode: only sp-0 has eff > ttft (600 / 3s = 200 tok/s)
+        assert!((agy.decode_tps().unwrap() - 200.0).abs() < 1e-6);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn step_timestamps_provide_estimated_speed_fallback_when_gen_durations_absent() {
+        let dir = temp_dir("step_est");
+        let db = dir.join("legacy.db");
+        let t0 = recent_secs(300);
+        let c = new_db(&db, true);
+        put_traj(&c, recent_secs(3600), "file:///proj");
+
+        // No #11/#12 on gen_metadata → steps provide ts_start/ts_end/ttft_ms.
+        put_gen(&c, 0, &turn("est-0", Some("gemini-3.8-flash-n")).blob());
+        // Only #11 without #12 → keeps ttft_ms, leaves duration_ms None so step end supplies estimated span.
+        let mut partial = turn("est-1", Some("gemini-3.8-flash-n"));
+        partial.ttft = Some((1, 500_000_000));
+        put_gen(&c, 1, &partial.blob());
+
+        let step = |start: i64, first: i64, end: i64, rid: &str, gen_idx: u64| {
+            let mut m = f_ts(1, start);
+            m.extend(f_ts(6, first));
+            m.extend(f_ts(7, end));
+            m.extend(f_len(9, &f_len(11, rid.as_bytes())));
+            m.extend(f_len(20, &f_varint(3, gen_idx)));
+            m
+        };
+        for (i, meta) in [
+            (1, step(t0, t0 + 2, t0 + 6, "est-0", 0)),
+            (2, step(t0 + 20, t0 + 22, t0 + 25, "est-1", 1)),
+        ] {
+            c.execute(
+                "INSERT INTO steps (idx, step_type, metadata) VALUES (?1, 15, ?2)",
+                rusqlite::params![i, meta],
+            )
+            .unwrap();
+        }
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        assert_eq!(out.events.len(), 2);
+        assert_eq!(out.events[0].duration_ms, None);
+        assert_eq!(out.events[0].ttft_ms, Some(2_000));
+        assert_eq!(out.events[0].ts_start, Some(t0 * 1000 + 500));
+        assert_eq!(out.events[0].ts_end, Some((t0 + 6) * 1000 + 500));
+        // Partial #11 preserves #11 TTFT (1500ms) and still uses step ts_end.
+        assert_eq!(out.events[1].duration_ms, None);
+        assert_eq!(out.events[1].ttft_ms, Some(1_500));
+        assert_eq!(out.events[1].ts_end, Some((t0 + 25) * 1000 + 500));
+
+        for ev in &out.events {
+            store.upsert_event(ev).unwrap();
+        }
+        let rows = store.by_model(None, None, None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        // Both spans are timestamp-estimated: 6s + 5s = 11s.
+        assert_eq!(rows[0].speed_ms, 11_000);
+        assert_eq!(rows[0].speed_est_ms, 11_000);
+        assert_eq!(rows[0].ttft_ms, 3_500);
+        assert_eq!(rows[0].decode_ms, 7_500);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn corrupt_duration_blobs_degrade_cleanly() {
+        let dir = temp_dir("bad_dur");
+        let db = dir.join("bad_dur.db");
+        let c = new_db(&db, false);
+        put_traj(&c, recent_secs(100), "file:///x");
+
+        let mut usage = f_varint(1, 1318);
+        usage.extend(f_varint(2, 500));
+        usage.extend(f_varint(3, 100));
+        usage.extend(f_len(11, b"bad-dur-1"));
+        let mut chat = f_len(4, &usage);
+        // Negative seconds (twos-complement u64::MAX) in #11, out-of-range nanos in #12.
+        chat.extend(f_dur(11, u64::MAX, 0));
+        chat.extend(f_dur(12, 1, 1_000_000_000));
+        chat.extend(f_len(19, b"gemini-3.8-flash-n"));
+        put_gen(&c, 0, &f_len(1, &chat));
+
+        // Truncated wire bytes in #11/#12.
+        let mut usage2 = f_varint(1, 1318);
+        usage2.extend(f_varint(2, 500));
+        usage2.extend(f_varint(3, 100));
+        usage2.extend(f_len(11, b"bad-dur-2"));
+        let mut chat2 = f_len(4, &usage2);
+        chat2.extend(f_len(11, &[0x08, 0x80]));
+        chat2.extend(f_len(12, &[0xff, 0xff]));
+        chat2.extend(f_len(19, b"gemini-3.8-flash-n"));
+        put_gen(&c, 1, &f_len(1, &chat2));
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        assert_eq!(out.events.len(), 2);
+        for ev in &out.events {
+            assert_eq!(ev.duration_ms, None);
+            assert_eq!(ev.ttft_ms, None);
+            assert_eq!(ev.ts_end, None);
+            assert_eq!(ev.input_tokens, 500);
+            assert_eq!(ev.output_tokens, 100);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn phantom_model_enum_only_rows_are_skipped_and_cleaned() {
+        let dir = temp_dir("phantom");
+        let db = dir.join("sess-p.db");
+        let c = new_db(&db, false);
+        put_traj(&c, recent_secs(100), "file:///x");
+
+        // Failed/aborted turn: only Model enum `#1 = 1318`, zero tokens, no response_id.
+        let mut phantom = turn("", None);
+        phantom.model_enum_id = 1318;
+        (
+            phantom.input,
+            phantom.cache,
+            phantom.think,
+            phantom.response,
+        ) = (0, 0, 0, 0);
+        phantom.ttft = Some((0, 0));
+        phantom.stream = Some((0, 0));
+        put_gen(&c, 11, &phantom.blob());
+
+        // Real prompt-only turn: non-zero input (`#2`) and response_id, zero output.
+        let mut real = turn("resp-prompt-only", Some("gemini-3.8-flash-n"));
+        (real.input, real.cache, real.think, real.response) = (117_349, 0, 0, 0);
+        real.ttft = Some((12, 100_000_000));
+        real.stream = Some((0, 934_000_000));
+        put_gen(&c, 89, &real.blob());
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        // Seed a legacy phantom row (as earlier builds would have written it).
+        store
+            .upsert_event(&UsageEvent {
+                dedup_key: "agy:sess-p:11".into(),
+                app: apps::GEMINI_ANTIGRAVITY.into(),
+                session_id: Some("sess-p".into()),
+                input_tokens: 1318,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        assert_eq!(out.events.len(), 1);
+        assert_eq!(out.events[0].dedup_key, "agy:resp-prompt-only");
+        assert_eq!(out.events[0].input_tokens, 117_349);
+        assert_eq!(out.events[0].duration_ms, Some(13_034));
+        assert_eq!(out.events[0].ttft_ms, Some(12_100));
+
+        // Legacy phantom row was removed from the ledger.
+        let remaining: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE dedup_key = 'agy:sess-p:11'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn model_enum_metadata_and_gemini_4_aliases_recover_models() {
+        let dir = temp_dir("enum_meta");
+        let db = dir.join("enums.db");
+        let c = new_db(&db, false);
+        put_traj(&c, recent_secs(100), "file:///x");
+
+        // Neither `#19` nor `#21` present, only `#20.model_enum`.
+        let mut r0 = turn("e0", None);
+        r0.model_enum = Some("MODEL_PLACEHOLDER_M318");
+        put_gen(&c, 0, &r0.blob());
+
+        let mut r1 = turn("e1", None);
+        r1.model_enum = Some("MODEL_OPENAI_GPT_OSS_120B_MEDIUM");
+        put_gen(&c, 1, &r1.blob());
+
+        let mut r2 = turn("e2", Some("gemini-4-neon-xhigh"));
+        r2.model_enum = Some("MODEL_PLACEHOLDER_M535");
+        put_gen(&c, 2, &r2.blob());
+
+        let mut r3 = turn("e3", None);
+        r3.label = Some("Gemini 4 Carbon (High)");
+        put_gen(&c, 3, &r3.blob());
+
+        let r4 = turn("e4", Some("gpt-oss-120b-medium"));
+        put_gen(&c, 4, &r4.blob());
+
+        let mut r5 = turn("e5", None);
+        r5.model_enum = Some("MODEL_PLACEHOLDER_M528");
+        put_gen(&c, 5, &r5.blob());
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let models: Vec<_> = out
+            .events
+            .iter()
+            .map(|e| {
+                (
+                    e.model.as_deref(),
+                    e.request_model.as_deref(),
+                    e.provider_id.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            models,
+            [
+                (
+                    Some("gemini-3.8-flash"),
+                    Some("MODEL_PLACEHOLDER_M318"),
+                    Some("google")
+                ),
+                (
+                    Some("gpt-oss-120b"),
+                    Some("MODEL_OPENAI_GPT_OSS_120B_MEDIUM"),
+                    Some("openai")
+                ),
+                (
+                    Some("gemini-4-neon"),
+                    Some("gemini-4-neon-xhigh"),
+                    Some("google")
+                ),
+                (Some("gemini-4-carbon"), None, Some("google")),
+                (
+                    Some("gpt-oss-120b"),
+                    Some("gpt-oss-120b-medium"),
+                    Some("openai")
+                ),
+                (
+                    Some("gemini-4-hydrogen"),
+                    Some("MODEL_PLACEHOLDER_M528"),
+                    Some("google")
+                ),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn incremental_rescan_reads_only_tail_and_recovers_sibling_models() {
+        let dir = temp_dir("incr");
+        let db = dir.join("sess-incr.db");
+        let c = new_db(&db, false);
+        put_traj(&c, recent_secs(200), "file:///work/proj");
+        put_gen(&c, 0, &turn("t0", Some("gemini-4-neon")).blob());
+        put_gen(&c, 1, &turn("t1", Some("gemini-4-neon")).blob());
+        put_gen(&c, 2, &turn("t2", Some("gemini-4-neon")).blob());
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let it = item(&db);
+        let first = Antigravity.scan_sqlite(&it, &store).unwrap();
+        assert_eq!(first.events.len(), 3);
+        for ev in &first.events {
+            store.upsert_event(ev).unwrap();
+        }
+        // Unchanged DB returns immediately.
+        assert!(
+            Antigravity
+                .scan_sqlite(&it, &store)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+
+        // Append a turn with only the routing label; incremental scan should
+        // read only idx >= 2 (t2, t3) and lazily load sibling models to recover t3.
+        let c = Connection::open(&db).unwrap();
+        let mut t3 = turn("t3", Some(ROUTING_LABEL));
+        t3.label = None;
+        put_gen(&c, 3, &t3.blob());
+        drop(c);
+
+        let second = Antigravity.scan_sqlite(&it, &store).unwrap();
+        let ids: Vec<_> = second.events.iter().map(|e| e.dedup_key.as_str()).collect();
+        assert_eq!(ids, ["agy:t2", "agy:t3"]);
+        assert_eq!(second.events[1].model.as_deref(), Some("gemini-4-neon"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn watch_roots_under_skips_parent_when_only_summaries_db_exists() {
+        let base = temp_dir("watchroots");
+        std::fs::create_dir_all(base.join("antigravity/conversations")).unwrap();
+        std::fs::write(base.join("antigravity").join(SUMMARIES_DB), b"idx").unwrap();
+        let roots = watch_roots_under(&base);
+        assert!(!roots.contains(&base.join("antigravity")));
+        assert!(roots.contains(&base.join("antigravity/conversations")));
+
+        // Legacy direct `<uuid>.db` activates watching the parent too.
+        std::fs::write(base.join("antigravity/legacy.db"), b"db").unwrap();
+        let roots2 = watch_roots_under(&base);
+        assert!(roots2.contains(&base.join("antigravity")));
+        std::fs::remove_dir_all(&base).ok();
     }
 }

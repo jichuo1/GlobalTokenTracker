@@ -112,9 +112,10 @@ type Signature = (i64, String, u64, u64, u64, u64);
 /// [`OVERLAP_MIN_DAYS`] of the last [`OVERLAP_LOOKBACK_DAYS`] days.
 pub fn overlaps(store: &Store) -> Result<Vec<OverlapWarning>> {
     let since_hour = (crate::store::now_ms() / super::BUCKET_MS) - OVERLAP_LOOKBACK_DAYS * 24;
-    let (local_id, _) = super::local_device(store)?;
     // device → app → signatures
     let mut by_device: BTreeMap<String, HashMap<String, BTreeSet<Signature>>> = BTreeMap::new();
+    let mut peer_hours_by_app: HashMap<String, BTreeSet<i64>> = HashMap::new();
+    let mut has_peer_groups = false;
     let mut push = |device: String, app: String, sig: Signature| {
         by_device
             .entry(device)
@@ -126,24 +127,6 @@ pub fn overlaps(store: &Store) -> Result<Vec<OverlapWarning>> {
     let n = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<u64> {
         Ok(u64::try_from(r.get::<_, i64>(i)?).unwrap_or(0))
     };
-    {
-        let mut st = store.conn().prepare(&format!(
-            "SELECT ts_start / {} AS h, app, {MODEL_EXPR}, COUNT(*), COALESCE(SUM(input_tokens),0),
-                    COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0)
-             FROM usage_events WHERE ts_start >= ?1 GROUP BY h, app, 3",
-            super::BUCKET_MS
-        ))?;
-        let rows = st.query_map([since_hour * super::BUCKET_MS], |r| {
-            Ok((
-                r.get::<_, String>(1)?,
-                (r.get(0)?, r.get(2)?, n(r, 3)?, n(r, 4)?, n(r, 5)?, n(r, 6)?),
-            ))
-        })?;
-        for row in rows {
-            let (app, sig) = row?;
-            push(local_id.clone(), app, sig);
-        }
-    }
     {
         let mut st = store.conn().prepare(
             "SELECT g.device_id, g.app, g.utc_hour, g.model, g.events, g.input_tokens,
@@ -160,7 +143,83 @@ pub fn overlaps(store: &Store) -> Result<Vec<OverlapWarning>> {
         })?;
         for row in rows {
             let (device, app, sig) = row?;
+            has_peer_groups = true;
+            if sig.2 > 0 && sig.3 + sig.4 + sig.5 > 0 {
+                peer_hours_by_app
+                    .entry(app.clone())
+                    .or_default()
+                    .insert(sig.0);
+            }
             push(device, app, sig);
+        }
+    }
+    // No enabled peer groups in the lookback window → skip scanning local usage_events.
+    if !has_peer_groups {
+        return Ok(Vec::new());
+    }
+    let (local_id, _) = super::local_device(store)?;
+    if !peer_hours_by_app.is_empty() {
+        // Merge contiguous peer hours per app into [start_h, end_h] ranges so
+        // local checks seek `idx_events_app(app, ts_start)` only where a peer
+        // actually has data (380ms full 30-day scan → ~4ms).
+        let mut intervals: Vec<(&str, i64, i64)> = Vec::new();
+        let mut has_negative = false;
+        for (app, hours) in &peer_hours_by_app {
+            let mut cur: Option<(i64, i64)> = None;
+            for &h in hours {
+                if h < 0 {
+                    has_negative = true;
+                    continue;
+                }
+                match cur {
+                    Some((s, e)) if h <= e + 1 => cur = Some((s, h)),
+                    Some((s, e)) => {
+                        intervals.push((app.as_str(), s, e));
+                        cur = Some((h, h));
+                    }
+                    None => cur = Some((h, h)),
+                }
+            }
+            if let Some((s, e)) = cur {
+                intervals.push((app.as_str(), s, e));
+            }
+        }
+        if has_negative || intervals.len() > 512 {
+            let mut st = store.conn().prepare(&format!(
+                "SELECT ts_start / {} AS h, app, {MODEL_EXPR}, COUNT(*), COALESCE(SUM(input_tokens),0),
+                        COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0)
+                 FROM usage_events WHERE ts_start >= ?1 GROUP BY h, app, 3",
+                super::BUCKET_MS
+            ))?;
+            let rows = st.query_map([since_hour * super::BUCKET_MS], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    (r.get(0)?, r.get(2)?, n(r, 3)?, n(r, 4)?, n(r, 5)?, n(r, 6)?),
+                ))
+            })?;
+            for row in rows {
+                let (app, sig) = row?;
+                push(local_id.clone(), app, sig);
+            }
+        } else {
+            let mut st = store.conn().prepare(&format!(
+                "SELECT ts_start / {} AS h, {MODEL_EXPR}, COUNT(*), COALESCE(SUM(input_tokens),0),
+                        COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0)
+                 FROM usage_events
+                 WHERE app = ?1 AND ts_start >= ?2 AND ts_start < ?3
+                 GROUP BY h, 2",
+                super::BUCKET_MS
+            ))?;
+            for (app, start_h, end_h) in intervals {
+                let start_ms = start_h.saturating_mul(super::BUCKET_MS);
+                let end_ms = end_h.saturating_add(1).saturating_mul(super::BUCKET_MS);
+                let rows = st.query_map(rusqlite::params![app, start_ms, end_ms], |r| {
+                    Ok((r.get(0)?, r.get(1)?, n(r, 2)?, n(r, 3)?, n(r, 4)?, n(r, 5)?))
+                })?;
+                for row in rows {
+                    push(local_id.clone(), app.to_string(), row?);
+                }
+            }
         }
     }
     let devices: Vec<&String> = by_device.keys().collect();

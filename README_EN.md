@@ -56,7 +56,7 @@ The Windows UI is native WinUI 3 (Rust + windows-reactor); the macOS app is nati
 | Cline | 4.x / CLI 3.x / desktop: `~/.cline/data/sessions/<id>/<id>.messages.json`; older tasks: `ui_messages.json` + editor globalStorage | ✅ exact (self-reported cost; a $0 BYOK cost is priced from the price book) |
 | Command Code | Local JSONL | ✅ exact (self-reported cost) |
 | Muse (Meta) | Local session logs `~/.local/share/muse/sessions/**/session.jsonl` (incl. subagent sessions; the tool's model catalog reports no prices, so rows stay unpriced until the price book carries them) | ✅ exact |
-| Antigravity (app / IDE / `agy` CLI) | Local conversation databases `~/.gemini/antigravity*/…/*.db` | ✅ exact (incl. thinking tokens; no cache-write data) |
+| Antigravity (app / IDE / `agy` CLI) | Local conversation databases `~/.gemini/antigravity*/…/*.db` | ✅ exact (incl. thinking tokens, TTFT & duration; no cache-write data) |
 | CodeBuddy IDE / Agent | `CodeBuddyExtension/Data/**/messages/*.json` | 🟡 Request usage snapshots, including streaming updates and history recovery |
 | CodeBuddy CLI | `~/.codebuddy/traces/**/*.json` | 🟡 Agent workflow totals; missing breakdowns stay unclassified |
 | Cursor / Qoder | Credentials + official quota APIs | 🟡 quota-oriented |

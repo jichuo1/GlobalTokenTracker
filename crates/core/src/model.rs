@@ -139,6 +139,7 @@ impl UsageEvent {
         n += (self.cost_usd.is_some()) as i32;
         n += (self.credits.is_some()) as i32;
         n += (self.duration_ms.is_some()) as i32;
+        n += (self.ttft_ms.is_some()) as i32;
         n += (self.unclassified_tokens > 0) as i32;
         n
     }

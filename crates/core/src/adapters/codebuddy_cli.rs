@@ -26,7 +26,7 @@ impl SourceAdapter for CodeBuddyCli {
         Capability::Estimate
     }
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![crate::sync::home(".codebuddy")]
+        vec![crate::sync::home(".codebuddy/traces")]
     }
     fn discover(&self) -> Result<Vec<SourceItem>> {
         Ok(
@@ -41,9 +41,26 @@ impl SourceAdapter for CodeBuddyCli {
         )
     }
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        let stamp = super::codebuddy::Stamp::read(&item.path)?;
+        let generation = super::codebuddy::refresh_generation();
+        let stamp_fp = format!("cbcli:{}:{}", stamp.size, stamp.modified_ns);
+        if let Some(meta) = store.load_cursor_meta(&item.key)?
+            && meta.offset == generation
+            && meta.fingerprint.as_deref() == Some(stamp_fp.as_str())
+        {
+            return Ok(ScanOutcome::default());
+        }
         let bytes = super::codebuddy::read_json(&item.path)?;
         let hash = super::codebuddy::fingerprint(&bytes);
         if store.load_cursor(&item.key)?.state.as_deref() == Some(hash.as_str()) {
+            store.save_cursor_opaque(
+                self.id(),
+                &item.key,
+                generation,
+                Some(&stamp_fp),
+                0,
+                Some(&hash),
+            )?;
             return Ok(ScanOutcome::default());
         }
         // Partial JSON remains retryable; a file can be finalized in place.
@@ -90,11 +107,11 @@ impl SourceAdapter for CodeBuddyCli {
                 });
             }
         }
-        store.save_cursor(
+        store.save_cursor_opaque(
             self.id(),
             &item.key,
-            &item.path,
-            bytes.len() as u64,
+            generation,
+            Some(&stamp_fp),
             0,
             Some(&hash),
         )?;

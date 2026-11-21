@@ -145,7 +145,11 @@ impl SourceAdapter for WorkBuddy {
     /// `session_usage` → per-session context watermark quota rows.
     /// `used`/`size` are the context-window fill of that session.
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        let fp = super::sqlite_change_token(&item.path);
         let cur = store.load_cursor(&item.key)?;
+        if cur.fingerprint.as_deref() == Some(fp.as_str()) {
+            return Ok(ScanOutcome::default());
+        }
         let since = (cur.offset as i64).saturating_sub(1000);
         let conn = super::opencode::open_ro(&item.path)?;
         let mut st = conn.prepare(
@@ -182,12 +186,12 @@ impl SourceAdapter for WorkBuddy {
                 raw_json: None,
             });
         }
-        if (max_updated as u64) > cur.offset {
-            store.save_cursor(
+        if (max_updated as u64) > cur.offset || cur.fingerprint.as_deref() != Some(fp.as_str()) {
+            store.save_cursor_opaque(
                 self.id(),
                 &item.key,
-                &item.path,
                 max_updated as u64,
+                Some(&fp),
                 0,
                 None,
             )?;

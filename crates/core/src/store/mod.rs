@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
+pub use cursor::{CursorAction, CursorMeta, FileCursor, tail_fingerprint};
 pub use query::{
     AppSummary, ArchiveReport, DailyRow, EventRow, MODEL_EXPR, PriceQuote, PriceRow, QuotaRow,
     ShareRow, SourceHealth, Totals, filter_price_indices, filter_prices, speed_exprs,
@@ -16,6 +16,21 @@ pub use query::{
 const SCHEMA: &str = include_str!("schema.sql");
 /// v2: LAN peer tables (`peers`, `peer_groups`, `peer_day_fps`, `peer_quotas`).
 const SCHEMA_VERSION: i64 = 2;
+/// Bumped whenever `migrate()` gains a new DDL/index/backfill step so the
+/// process-local fast-open cache never skips an unapplied schema update.
+const MIG_SCHEMA_STAMP_KEY: &str = "mig_schema_stamp";
+const MIG_SCHEMA_STAMP_VAL: &str = "v2:antigravity_timing_v1:cursors_idx_v1";
+
+fn migrated_paths() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static SET: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn canonical_key(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
 
 /// Default database location: `~/.globaltokentracker/ledger.db`.
 ///
@@ -77,15 +92,44 @@ impl Store {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
-             PRAGMA mmap_size = 67108864;
+             PRAGMA mmap_size = 0;
              PRAGMA temp_store = MEMORY;
-             PRAGMA cache_size = -64000;
+             PRAGMA cache_size = -8000;
              PRAGMA busy_timeout = 5000;",
         )?;
         Ok(())
     }
 
+    /// Release unused SQLite page-cache memory back to the allocator.
+    /// Cheap, safe to call after heavy queries or before idling.
+    pub fn shrink_memory(&self) {
+        let _ = self.conn.execute_batch("PRAGMA shrink_memory;");
+    }
+
+    /// Single-query verification that an already-seen DB file still carries
+    /// the current schema version, schema stamp, and every one-time migration marker.
+    fn is_already_migrated(&self) -> bool {
+        self.conn
+            .query_row(
+                "SELECT (
+                    SELECT COUNT(*) FROM app_state WHERE key IN (
+                        ?1,
+                        'mig_opencode_output_includes_reasoning',
+                        'mig_rescan_durations_v1',
+                        'mig_rescan_codex_model_v1',
+                        'mig_rescan_antigravity_qoder_v1',
+                        'mig_rescan_antigravity_timing_v1'
+                    ) AND (key != ?1 OR value = ?2)
+                 ) = 6 AND EXISTS(SELECT 1 FROM schema_migrations WHERE version >= ?3)",
+                params![MIG_SCHEMA_STAMP_KEY, MIG_SCHEMA_STAMP_VAL, SCHEMA_VERSION],
+                |r| r.get::<_, bool>(0),
+            )
+            .ok()
+            == Some(true)
+    }
+
     pub(crate) fn try_open(path: &Path) -> Result<Self> {
+        let existed_nonempty = std::fs::metadata(path).is_ok_and(|m| m.len() >= 4096);
         let conn =
             Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
         let store = Self {
@@ -93,7 +137,20 @@ impl Store {
             path: Some(path.to_path_buf()),
         };
         store.apply_pragmas()?;
-        store.migrate()?;
+        let canon = canonical_key(path);
+        let skip = existed_nonempty
+            && migrated_paths()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&canon)
+            && store.is_already_migrated();
+        if !skip {
+            store.migrate()?;
+            migrated_paths()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(canon);
+        }
         Ok(store)
     }
 
@@ -144,6 +201,10 @@ impl Store {
             }
             let _ = std::fs::remove_file(path.with_extension("db-wal"));
             let _ = std::fs::remove_file(path.with_extension("db-shm"));
+            migrated_paths()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&canonical_key(path));
             std::fs::copy(&cand, path)?;
             if Self::try_open(path).is_ok() {
                 return Ok(true);
@@ -352,6 +413,26 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        // Antigravity now extracts per-generation TTFT (#11), streaming
+        // duration (#12), and step completion timestamps, and fixes usage.#1
+        // (Model enum, not input tokens) plus usage.#9/#10 (thinking vs text).
+        // Dropping only its sync cursors makes every on-disk DB re-read and
+        // upgrade existing rows in place via completeness-UPSERT while keeping
+        // historical rows whose conversation DBs are no longer on disk.
+        const RESCAN_ANTIGRAVITY_TIMING: &str = "mig_rescan_antigravity_timing_v1";
+        if self.get_state(RESCAN_ANTIGRAVITY_TIMING)?.is_none() {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM sync_cursors WHERE source = ?1",
+                [crate::model::apps::GEMINI_ANTIGRAVITY],
+            )?;
+            tx.execute(
+                "INSERT INTO app_state(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [RESCAN_ANTIGRAVITY_TIMING],
+            )?;
+            tx.commit()?;
+        }
         // Every ledger has a stable device id (the device dimension's local
         // key, and this device's id when it serves peers).
         crate::peer::ensure_device_id(self)?;
@@ -365,6 +446,9 @@ impl Store {
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
                 params![SCHEMA_VERSION, now_ms()],
             )?;
+        }
+        if self.get_state(MIG_SCHEMA_STAMP_KEY)?.as_deref() != Some(MIG_SCHEMA_STAMP_VAL) {
+            self.set_state(MIG_SCHEMA_STAMP_KEY, MIG_SCHEMA_STAMP_VAL)?;
         }
         Ok(())
     }
@@ -790,6 +874,69 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_timing_migration_drops_only_antigravity_cursors_and_keeps_events() {
+        let s = Store::open_memory().unwrap();
+        for (src, path) in [
+            (apps::GEMINI_ANTIGRAVITY, "p1"),
+            (apps::CLAUDE, "p2"),
+            (apps::CODEX, "p3"),
+        ] {
+            s.conn()
+                .execute(
+                    "INSERT INTO sync_cursors(source, file_path, last_byte_offset) VALUES (?1, ?2, 10)",
+                    [src, path],
+                )
+                .unwrap();
+        }
+        s.upsert_event(&UsageEvent {
+            dedup_key: "agy:kept-history".into(),
+            app: apps::GEMINI_ANTIGRAVITY.into(),
+            input_tokens: 100,
+            ..Default::default()
+        })
+        .unwrap();
+
+        s.conn()
+            .execute(
+                "DELETE FROM app_state WHERE key='mig_rescan_antigravity_timing_v1'",
+                [],
+            )
+            .unwrap();
+        s.migrate().unwrap();
+
+        let cursors = |s: &Store| -> Vec<String> {
+            s.conn()
+                .prepare("SELECT source FROM sync_cursors ORDER BY file_path")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(cursors(&s), [apps::CLAUDE, apps::CODEX]);
+        // Existing historical events are preserved (upgraded in place on rescan).
+        let agy_cnt: i64 = s
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE app = ?1",
+                [apps::GEMINI_ANTIGRAVITY],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(agy_cnt, 1);
+
+        // Idempotent: re-inserting cursor + migrating again leaves it intact.
+        s.conn()
+            .execute(
+                "INSERT INTO sync_cursors(source, file_path, last_byte_offset) VALUES (?1, 'p1', 1)",
+                [apps::GEMINI_ANTIGRAVITY],
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(cursors(&s).len(), 3);
+    }
+
+    #[test]
     fn opencode_output_gains_reasoning_exactly_once() {
         let dir = std::env::temp_dir().join(format!("gtt_mig_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -894,6 +1041,11 @@ mod tests {
     fn completeness_counts_dims() {
         assert_eq!(ev("x", 0, None).completeness(), 1); // input only
         assert_eq!(ev("x", 1, Some(0.1)).completeness(), 3);
+        let mut timed = ev("x", 1, Some(0.1));
+        timed.duration_ms = Some(500);
+        assert_eq!(timed.completeness(), 4);
+        timed.ttft_ms = Some(100);
+        assert_eq!(timed.completeness(), 5);
     }
 
     // 2025-01-15T23:30:00Z — UTC date 15th, but +08:00 rolls to the 16th.
@@ -1064,7 +1216,13 @@ mod tests {
             .conn()
             .query_row("PRAGMA mmap_size", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(mmap, 67_108_864);
+        assert_eq!(mmap, 0);
+        let cache: i64 = s
+            .conn()
+            .query_row("PRAGMA cache_size", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache, -8000);
+        s.shrink_memory();
         let temp: i64 = s
             .conn()
             .query_row("PRAGMA temp_store", [], |r| r.get(0))
@@ -1567,5 +1725,39 @@ mod tests {
                 .captured_at,
             old
         );
+    }
+
+    #[test]
+    fn repeated_open_fast_path_re_runs_migration_if_marker_removed() {
+        let temp_dir = std::env::temp_dir().join(format!("gtt_fast_open_{}", now_ms()));
+        let db_file = temp_dir.join("ledger.db");
+        {
+            let s1 = Store::open(&db_file).unwrap();
+            assert_eq!(
+                s1.get_state(MIG_SCHEMA_STAMP_KEY).unwrap().as_deref(),
+                Some(MIG_SCHEMA_STAMP_VAL)
+            );
+            // Second open hits the fast-path and stays completely functional.
+            let s2 = Store::open(&db_file).unwrap();
+            assert!(s2.is_already_migrated());
+            // Removing a migration marker forces the next open to run migrate() again.
+            s2.conn()
+                .execute(
+                    "DELETE FROM app_state WHERE key = 'mig_rescan_antigravity_timing_v1'",
+                    [],
+                )
+                .unwrap();
+            assert!(!s2.is_already_migrated());
+        }
+        let s3 = Store::open(&db_file).unwrap();
+        assert!(s3.is_already_migrated());
+        assert_eq!(
+            s3.get_state("mig_rescan_antigravity_timing_v1")
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        drop(s3);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

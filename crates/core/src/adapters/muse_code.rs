@@ -108,15 +108,15 @@ impl SourceAdapter for MuseCode {
     fn discover(&self) -> Result<Vec<SourceItem>> {
         let mut out = Vec::new();
         for root in sessions_roots() {
-            // Date shards + session dir + nested `subagent/<id>` levels.
-            for p in crate::sync::collect_files(&root, "jsonl", 10) {
-                if p.file_name().is_some_and(|n| n == "session.jsonl") {
-                    out.push(SourceItem {
-                        key: p.to_string_lossy().to_string(),
-                        path: p,
-                        kind: SourceKind::Jsonl,
-                    });
-                }
+            let mut found = Vec::new();
+            collect_sessions(&root, 10, &mut found);
+            found.sort();
+            for p in found {
+                out.push(SourceItem {
+                    key: p.to_string_lossy().to_string(),
+                    path: p,
+                    kind: SourceKind::Jsonl,
+                });
             }
         }
         Ok(out)
@@ -338,6 +338,45 @@ fn num64(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
 }
 
+/// Targeted walk under `sessions/`: finds `session.jsonl` while skipping
+/// bulky non-transcript directories (`tool-outputs`, `.spool`, dot-dirs) and
+/// recursing only into `subagent/` once inside a session directory.
+fn collect_sessions(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut has_session = false;
+    let mut subdirs = Vec::new();
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let Ok(ft) = entry.file_type() else { continue };
+        if name == "session.jsonl" && ft.is_file() {
+            out.push(entry.path());
+            has_session = true;
+            continue;
+        }
+        if !ft.is_dir() {
+            continue;
+        }
+        if name
+            .to_str()
+            .is_some_and(|s| s == "tool-outputs" || s == ".spool" || s.starts_with('.'))
+        {
+            continue;
+        }
+        subdirs.push(entry.path());
+    }
+    for sub in subdirs {
+        if has_session && sub.file_name().is_none_or(|n| n != "subagent") {
+            continue;
+        }
+        collect_sessions(&sub, depth - 1, out);
+    }
+}
+
 fn trim_cr(l: &[u8]) -> &[u8] {
     l.strip_suffix(b"\r").unwrap_or(l)
 }
@@ -484,6 +523,31 @@ mod tests {
         // A non-subagent log never reaches across to a sibling file.
         let plain = parse(&[completed(Some("src-6"), usage)], None);
         assert_eq!(plain.events[0].project, None);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn collect_sessions_skips_tool_outputs_and_spool_dirs() {
+        let base = std::env::temp_dir().join(format!(
+            "gtt-muse-walk-{}-{}",
+            std::process::id(),
+            crate::store::now_ms()
+        ));
+        let main = base.join("2026/11/20/s1");
+        let sub = main.join("subagent/c1");
+        let tools = main.join("tool-outputs/nested");
+        let spool = main.join(".spool/chunks");
+        for d in [&main, &sub, &tools, &spool] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("session.jsonl"), b"{}\n").unwrap();
+        }
+        let mut found = Vec::new();
+        collect_sessions(&base, 10, &mut found);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![main.join("session.jsonl"), sub.join("session.jsonl")]
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 }

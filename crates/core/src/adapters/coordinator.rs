@@ -77,21 +77,37 @@ impl SourceAdapter for Coordinator {
             .collect())
     }
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        let fp = super::sqlite_change_token(&item.path);
+        let cursor = store.load_cursor(&item.key)?;
+        if cursor.fingerprint.as_deref() == Some(fp.as_str()) {
+            return Ok(ScanOutcome::default());
+        }
         let conn = super::opencode::open_ro(&item.path)?;
         conn.pragma_update(None, "trusted_schema", "OFF")?;
         conn.busy_timeout(std::time::Duration::from_millis(500))?;
         let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_records')", [], |r| r.get(0))?;
         if !exists {
+            if cursor.fingerprint.as_deref() != Some(fp.as_str()) {
+                store.save_cursor_opaque(
+                    self.id(),
+                    &item.key,
+                    cursor.offset,
+                    Some(&fp),
+                    0,
+                    None,
+                )?;
+            }
             return Ok(ScanOutcome::default());
         } // old coordinator
-        let cursor = store.load_cursor(&item.key)?;
         let mut seq = cursor.offset as i64;
         let mut query = conn.prepare(
             "SELECT seq,payload FROM usage_records WHERE seq>?1 ORDER BY seq LIMIT 2048",
         )?;
         let mut rows = query.query([seq])?;
         let mut out = ScanOutcome::default();
+        let mut fetched = 0usize;
         while let Some(row) = rows.next()? {
+            fetched += 1;
             let current: i64 = row.get(0)?;
             let payload: String = row.get(1)?;
             ensure!(payload.len() <= 65536, "coordinator usage record too large");
@@ -165,8 +181,9 @@ impl SourceAdapter for Coordinator {
                 ..Default::default()
             });
         }
-        if seq as u64 != cursor.offset {
-            store.save_cursor(self.id(), &item.key, &item.path, seq as u64, 0, None)?;
+        let next_fp = (fetched < 2048).then_some(fp.as_str());
+        if seq as u64 != cursor.offset || cursor.fingerprint.as_deref() != next_fp {
+            store.save_cursor_opaque(self.id(), &item.key, seq as u64, next_fp, 0, None)?;
         }
         Ok(out)
     }

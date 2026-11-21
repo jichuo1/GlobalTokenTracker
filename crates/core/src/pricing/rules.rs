@@ -61,9 +61,15 @@ pub struct Rules {
 
 impl Rules {
     pub fn bundled() -> Self {
-        let r: Self = serde_json::from_str(BUNDLED).expect("bundled pricing_rules.json parses");
-        r.validate().expect("bundled pricing_rules.json is valid");
-        r
+        static CACHE: std::sync::OnceLock<Rules> = std::sync::OnceLock::new();
+        CACHE
+            .get_or_init(|| {
+                let r: Self =
+                    serde_json::from_str(BUNDLED).expect("bundled pricing_rules.json parses");
+                r.validate().expect("bundled pricing_rules.json is valid");
+                r
+            })
+            .clone()
     }
 
     pub fn parse(json: &str) -> Result<Self> {

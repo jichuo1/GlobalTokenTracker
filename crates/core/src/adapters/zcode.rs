@@ -108,11 +108,15 @@ impl SourceAdapter for ZCode {
     }
 
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        let fp = super::sqlite_change_token(&item.path);
         let cur = store.load_cursor(&item.key)?;
         // Migration: pre-"rowid-v2" cursors held a `started_at` epoch-ms
         // watermark that missed late-inserted rows (inserts happen at request
         // completion). Reset once → full rescan; dedup keys make it idempotent.
         let migrated = cur.state.as_deref() == Some(STATE);
+        if migrated && cur.fingerprint.as_deref() == Some(fp.as_str()) {
+            return Ok(ScanOutcome::default());
+        }
         let since_rowid = if migrated { cur.offset as i64 } else { 0 };
         let conn = super::opencode::open_ro(&item.path)?;
         // Older ZCode builds lack the provider total / raw usage columns.
@@ -252,12 +256,13 @@ impl SourceAdapter for ZCode {
             });
         }
         let next = first_running_rowid.map_or(max_rowid, |r| r - 1);
-        if next as u64 != cur.offset || !migrated {
-            store.save_cursor(
+        let next_fp = first_running_rowid.is_none().then_some(fp.as_str());
+        if next as u64 != cur.offset || !migrated || cur.fingerprint.as_deref() != next_fp {
+            store.save_cursor_opaque(
                 self.id(),
                 &item.key,
-                &item.path,
                 next.max(0) as u64,
+                next_fp,
                 0,
                 Some(STATE),
             )?;

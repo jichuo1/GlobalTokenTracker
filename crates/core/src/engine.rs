@@ -20,7 +20,7 @@ const SEGMENT_BUDGET: u64 = 256 << 20;
 
 pub struct Engine {
     pub store: Store,
-    pub prices: PriceBook,
+    prices: std::cell::OnceCell<PriceBook>,
     adapters: Vec<Box<dyn SourceAdapter>>,
 }
 
@@ -45,12 +45,20 @@ pub struct ScanReport {
 
 impl Engine {
     pub fn new(store: Store) -> Result<Self> {
-        let prices = PriceBook::load(&store)?;
         Ok(Self {
             store,
-            prices,
+            prices: std::cell::OnceCell::new(),
             adapters: adapters::registry(),
         })
+    }
+
+    fn price_book(&self) -> Result<&PriceBook> {
+        if let Some(p) = self.prices.get() {
+            return Ok(p);
+        }
+        let loaded = PriceBook::load(&self.store)?;
+        let _ = self.prices.set(loaded);
+        Ok(self.prices.get().expect("price book just initialized"))
     }
 
     /// One full incremental pass over every enabled adapter.
@@ -66,18 +74,29 @@ impl Engine {
         if let Err(e) = self.store.maybe_backup() {
             tracing::warn!("ledger backup failed: {e}");
         }
+        self.store.shrink_memory();
         Ok(report)
     }
 
-    pub fn scan_source(&self, id: &str) -> Result<ScanReport> {
+    /// Incremental pass over a specific subset of adapters (used by live
+    /// file-watcher events to scan only the tool whose files changed).
+    pub fn scan_sources(&self, ids: &[&str]) -> Result<ScanReport> {
         let mut report = ScanReport::default();
         for adapter in &self.adapters {
-            if adapter.id() == id {
+            if ids.contains(&adapter.id()) {
                 merge(&mut report, self.scan_adapter(adapter.as_ref())?);
             }
         }
         self.refresh_rollups(&report);
+        if let Err(e) = self.store.maybe_backup() {
+            tracing::warn!("ledger backup failed: {e}");
+        }
+        self.store.shrink_memory();
         Ok(report)
+    }
+
+    pub fn scan_source(&self, id: &str) -> Result<ScanReport> {
+        self.scan_sources(&[id])
     }
 
     /// Keep daily_rollups in sync — only when this pass ingested something.
@@ -161,13 +180,23 @@ impl Engine {
         let mut in_flight: u64 = 0;
         // The stat of every session file is the bulk of a no-change pass (515
         // codex files ≈ 24ms sequentially, ~47µs each) and the calls are
-        // independent: fan them out on the eco pool, consume in order.
-        let metas: Vec<std::io::Result<std::fs::Metadata>> = eco_pool().install(|| {
-            jsonl
-                .par_iter()
-                .map(|i| std::fs::metadata(&i.path))
-                .collect()
-        });
+        // independent: fan out on the eco pool only when there are enough files
+        // to amortize pool wakeups, and batch-load cursor headers in one SQL query.
+        let cursors = if jsonl.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            self.store.load_source_cursor_meta(adapter.id())?
+        };
+        let metas: Vec<std::io::Result<std::fs::Metadata>> = if jsonl.len() >= 16 {
+            eco_pool().install(|| {
+                jsonl
+                    .par_iter()
+                    .map(|i| std::fs::metadata(&i.path))
+                    .collect()
+            })
+        } else {
+            jsonl.iter().map(|i| std::fs::metadata(&i.path)).collect()
+        };
         for (item, meta) in jsonl.iter().zip(metas) {
             let meta = match meta {
                 Ok(m) => m,
@@ -178,9 +207,9 @@ impl Engine {
                     continue;
                 }
             };
-            let action = self
-                .store
-                .cursor_action(&item.path, &item.key, meta.len())?;
+            let action =
+                self.store
+                    .cursor_action_with(&item.path, cursors.get(&item.key), meta.len())?;
             match action {
                 CursorAction::Unchanged => {}
                 CursorAction::SkipPinned { eof } => {
@@ -361,7 +390,14 @@ impl Engine {
                 continue;
             }
             // Price + resolve pricing_model on the way in (idempotent).
-            self.prices.apply(&mut ev);
+            match self.price_book() {
+                Ok(prices) => prices.apply(&mut ev),
+                Err(e) => {
+                    report
+                        .errors
+                        .push(format!("{adapter_id} price_book: {e:#}"));
+                }
+            }
             match self.store.upsert_event(&ev) {
                 Ok(true) => {
                     report.events_ingested += 1;
@@ -466,7 +502,7 @@ fn eco_pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         let width = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(2))
+            .map(|n| (n.get() / 2).clamp(2, 4))
             .unwrap_or(4);
         rayon::ThreadPoolBuilder::new()
             .num_threads(width)
@@ -716,5 +752,14 @@ mod coordinator_tests {
         assert_ne!(report.errors, Vec::<String>::new());
         assert_eq!(e.store.load_cursor(&item.key).unwrap().offset, 0);
         assert_eq!(e.store.totals(None, None, None, None).unwrap().events, 0);
+    }
+
+    #[test]
+    fn scan_sources_skips_unrequested_adapters() {
+        let e = Engine::new(Store::open_memory().unwrap()).unwrap();
+        let report = e.scan_sources(&["nonexistent_adapter"]).unwrap();
+        assert_eq!(report.files_seen, 0);
+        assert_eq!(report.events_ingested, 0);
+        assert_eq!(report.errors, Vec::<String>::new());
     }
 }

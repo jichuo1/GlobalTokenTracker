@@ -398,3 +398,17 @@ fn file_backed_migration_creates_verified_backup_before_replacement() {
         Some(backup.as_str())
     );
 }
+
+#[test]
+fn empty_messages_dir_persists_fast_path_cursor_and_stays_idle() {
+    let f = Fixture::new();
+    let e = engine();
+    assert_eq!(f.scan(&e).events_ingested, 0);
+    let meta = e.store.load_cursor_meta(&f.item().key).unwrap().unwrap();
+    assert_eq!(meta.fingerprint.as_deref(), Some("v2:empty"));
+    // Second scan hits the zero-allocation fast-path cleanly.
+    assert_eq!(f.scan(&e).events_ingested, 0);
+    // Adding a message later invalidates the empty fingerprint immediately.
+    f.msg("01", "req-after-empty", 500, 100, 200);
+    assert_eq!(f.scan(&e).events_ingested, 1);
+}

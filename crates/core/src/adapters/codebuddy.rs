@@ -22,6 +22,10 @@ pub fn forget_scan_memo() {
     REFRESH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+pub(super) fn refresh_generation() -> u64 {
+    REFRESH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn is_codebuddy(id: &str) -> bool {
     matches!(id, apps::CODEBUDDY_IDE | apps::CODEBUDDY_CLI)
 }
@@ -32,17 +36,21 @@ pub(crate) fn backup_legacy(store: &Store) -> Result<()> {
     let Some(path) = store.path() else {
         return Ok(());
     };
+    if store
+        .get_state("codebuddy_v2_backup")?
+        .is_some_and(|p| Path::new(&p).is_file())
+    {
+        return Ok(());
+    }
+    if store.get_state("codebuddy_v2_no_legacy")?.as_deref() == Some("1") {
+        return Ok(());
+    }
     let legacy: bool = store.conn().query_row(
         "SELECT EXISTS(SELECT 1 FROM usage_events WHERE app=?1 AND dedup_key NOT LIKE 'codebuddy_ide:v2:%')",
         [apps::CODEBUDDY_IDE], |r| r.get(0),
     )?;
     if !legacy {
-        return Ok(());
-    }
-    if store
-        .get_state("codebuddy_v2_backup")?
-        .is_some_and(|p| Path::new(&p).is_file())
-    {
+        store.set_state("codebuddy_v2_no_legacy", "1")?;
         return Ok(());
     }
     let dir = path
@@ -144,14 +152,13 @@ fn session_dirs() -> BTreeMap<String, String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Stamp {
-    size: u64,
-    modified_ns: u128,
+pub(super) struct Stamp {
+    pub(super) size: u64,
+    pub(super) modified_ns: u128,
 }
 
 impl Stamp {
-    fn read(path: &Path) -> Result<Self> {
-        let m = std::fs::metadata(path)?;
+    pub(super) fn from_metadata(m: &std::fs::Metadata) -> Result<Self> {
         Ok(Self {
             size: m.len(),
             modified_ns: m
@@ -159,6 +166,62 @@ impl Stamp {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos(),
         })
+    }
+
+    pub(super) fn read(path: &Path) -> Result<Self> {
+        Self::from_metadata(&std::fs::metadata(path)?)
+    }
+}
+
+fn mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn fnv1a_bytes(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Order-independent 128-bit fingerprint of all `*.json` `(name, size, mtime_ns)`
+/// in `msg_dir` with zero per-file `PathBuf`/`String` allocations or sorting.
+fn quick_dir_stamp(msg_dir: &Path) -> Result<String> {
+    let mut count = 0u64;
+    let mut xor_acc = 0u64;
+    let mut sum_acc = 0u64;
+    for entry in std::fs::read_dir(msg_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if Path::new(&name).extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        // `DirEntry::metadata()` reuses WIN32_FIND_DATAW on Windows without
+        // extra per-file stat syscalls.
+        let stamp = Stamp::from_metadata(&entry.metadata()?)?;
+        let nh = fnv1a_bytes(name.as_encoded_bytes());
+        let t_lo = stamp.modified_ns as u64;
+        let t_hi = (stamp.modified_ns >> 64) as u64;
+        let h1 = mix64(nh ^ mix64(stamp.size) ^ mix64(t_lo));
+        let h2 = mix64(
+            nh.rotate_left(17)
+                ^ mix64(stamp.size.wrapping_add(1))
+                ^ mix64(t_hi ^ t_lo.rotate_left(31)),
+        );
+        count += 1;
+        xor_acc ^= h1;
+        sum_acc = sum_acc.wrapping_add(h2);
+    }
+    if count == 0 {
+        Ok("v2:empty".into())
+    } else {
+        Ok(format!("v2:{count}:{xor_acc:016x}:{sum_acc:016x}"))
     }
 }
 
@@ -280,12 +343,7 @@ impl SourceAdapter for CodeBuddyIde {
         Capability::Estimate
     }
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![
-            data_root()
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(data_root),
-        ]
+        vec![data_root()]
     }
     fn discover(&self) -> Result<Vec<SourceItem>> {
         let mut out = Vec::new();
@@ -314,34 +372,39 @@ impl SourceAdapter for CodeBuddyIde {
 }
 
 impl CodeBuddyIde {
+    fn project_for(&self, conv: &str) -> Option<String> {
+        let mut g = self
+            .cwds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.get_or_insert_with(session_dirs)
+            .get(conv)
+            .and_then(|cwd| {
+                Path::new(cwd)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+            })
+    }
+
     fn scan_conversation(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
-        let cur = store.load_cursor(&item.key)?;
-        let mut state = cur
-            .state
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<ConvState>(s).ok())
-            .filter(|s| s.version == 2)
-            .unwrap_or_default();
-        let generation = REFRESH.load(std::sync::atomic::Ordering::Relaxed);
-        let force = state.version != 2 || state.generation != generation;
-        let conv = item.path.file_name().unwrap_or_default().to_string_lossy();
-        let project = {
-            let mut g = self
-                .cwds
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            g.get_or_insert_with(session_dirs)
-                .get(conv.as_ref())
-                .and_then(|cwd| {
-                    Path::new(cwd)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                })
-        };
-        let mut changed = force;
-        let mut fingerprint_file = None;
-        for entry in std::fs::read_dir(item.path.join("messages"))? {
-            let path = entry?.path();
+        let msg_dir = item.path.join("messages");
+        let generation = refresh_generation();
+        let dir_stamp = quick_dir_stamp(&msg_dir)?;
+
+        // Idle fast-path: skip loading/deserializing megabytes of `ConvState`
+        // and per-file PathBuf/String allocation when no `.json` file was
+        // added, removed, resized, or modified and no manual refresh fired.
+        if let Some(meta) = store.load_cursor_meta(&item.key)?
+            && meta.offset == generation
+            && meta.fingerprint.as_deref() == Some(dir_stamp.as_str())
+        {
+            return Ok(ScanOutcome::default());
+        }
+
+        let mut entries: Vec<(String, PathBuf, Stamp)> = Vec::new();
+        for entry in std::fs::read_dir(&msg_dir)? {
+            let entry = entry?;
+            let path = entry.path();
             if path.extension().is_none_or(|x| x != "json") {
                 continue;
             }
@@ -350,7 +413,22 @@ impl CodeBuddyIde {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let stamp = Stamp::read(&path)?;
+            let stamp = Stamp::from_metadata(&entry.metadata()?)?;
+            entries.push((stem, path, stamp));
+        }
+
+        let cur = store.load_cursor(&item.key)?;
+        let mut state = cur
+            .state
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<ConvState>(s).ok())
+            .filter(|s| s.version == 2)
+            .unwrap_or_default();
+        let force = state.version != 2 || state.generation != generation;
+        let conv = item.path.file_name().unwrap_or_default().to_string_lossy();
+        let mut changed = force;
+        let mut had_parse_error = false;
+        for (stem, path, stamp) in entries {
             let old = state.files.get(&stem);
             if !force && old.is_some_and(|f| f.stamp == stamp) {
                 continue;
@@ -366,6 +444,7 @@ impl CodeBuddyIde {
             }
             // An in-flight/torn JSON is retried, never committed as "seen".
             let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                had_parse_error = true;
                 continue;
             };
             let snapshot =
@@ -382,7 +461,6 @@ impl CodeBuddyIde {
                     ],
                 )?;
             }
-            fingerprint_file = Some(path);
             state.files.insert(
                 stem,
                 FileState {
@@ -392,6 +470,24 @@ impl CodeBuddyIde {
                 },
             );
             changed = true;
+        }
+        if !changed {
+            // Directory listing was unchanged relative to `state.files` (e.g.
+            // upgrading a pre-fingerprint v2 cursor or after a file deletion
+            // whose history we intentionally keep): stamp the cursor so future
+            // idle passes hit the fast-path without deserializing `ConvState`.
+            let fp = (!had_parse_error).then_some(dir_stamp.as_str());
+            if cur.offset != generation || cur.fingerprint.as_deref() != fp {
+                store.save_cursor_opaque(
+                    self.id(),
+                    &item.key,
+                    generation,
+                    fp,
+                    0,
+                    cur.state.as_deref(),
+                )?;
+            }
+            return Ok(ScanOutcome::default());
         }
         let mut requests: BTreeMap<&str, (&str, &FileState, &Snapshot)> = BTreeMap::new();
         for (stem, file) in &state.files {
@@ -409,18 +505,18 @@ impl CodeBuddyIde {
             }
         }
         let mut out = ScanOutcome::default();
+        let mut project: Option<Option<String>> = None;
         for (request, (stem, _, snap)) in &requests {
             let digest = fingerprint(&serde_json::to_vec(snap)?);
             if state.emitted.get(*request) == Some(&digest) {
                 continue;
             }
-            out.events.push(snap.event(
-                &conv,
-                project.clone(),
-                &item.path.join("messages").join(format!("{stem}.json")),
-            ));
+            let proj = project
+                .get_or_insert_with(|| self.project_for(conv.as_ref()))
+                .clone();
+            out.events
+                .push(snap.event(&conv, proj, &msg_dir.join(format!("{stem}.json"))));
             state.emitted.insert((*request).into(), digest);
-            changed = true;
         }
         let retired: Vec<String> = state
             .emitted
@@ -435,27 +531,17 @@ impl CodeBuddyIde {
             )?;
             state.emitted.remove(&id);
         }
-        if changed {
-            state.version = 2;
-            state.generation = generation;
-            let fp = fingerprint_file.or_else(|| {
-                std::fs::read_dir(item.path.join("messages"))
-                    .ok()?
-                    .flatten()
-                    .map(|e| e.path())
-                    .find(|p| p.is_file())
-            });
-            if let Some(fp) = fp {
-                store.save_cursor(
-                    self.id(),
-                    &item.key,
-                    &fp,
-                    0,
-                    0,
-                    Some(&serde_json::to_string(&state)?),
-                )?;
-            }
-        }
+        state.version = 2;
+        state.generation = generation;
+        let fp = (!had_parse_error).then_some(dir_stamp.as_str());
+        store.save_cursor_opaque(
+            self.id(),
+            &item.key,
+            generation,
+            fp,
+            0,
+            Some(&serde_json::to_string(&state)?),
+        )?;
         Ok(out)
     }
 }
